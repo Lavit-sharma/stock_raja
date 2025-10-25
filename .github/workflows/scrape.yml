@@ -12,8 +12,8 @@ jobs:
     
     strategy:
       matrix:
-        batch: [1, 2, 3, 4, 5]
-      max-parallel: 5
+        batch: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+      max-parallel: 10
     
     steps:
       - name: Checkout
@@ -39,7 +39,7 @@ jobs:
       - name: Calculate range
         id: calc
         run: |
-          echo "start=$(( (${{ matrix.batch }} - 1) * 400 + 1 ))" >> $GITHUB_OUTPUT
+          echo "start=$(( (${{ matrix.batch }} - 1) * 200 + 1 ))" >> $GITHUB_OUTPUT
       
       - name: Run batch ${{ matrix.batch }}
         env:
@@ -47,7 +47,7 @@ jobs:
           TRADINGVIEW_EMAIL: ${{ secrets.TRADINGVIEW_EMAIL }}
           TRADINGVIEW_PASSWORD: ${{ secrets.TRADINGVIEW_PASSWORD }}
           START_INDEX: ${{ steps.calc.outputs.start }}
-          BATCH_SIZE: '400'
+          BATCH_SIZE: '200'
         run: |
           SLEEP=$(( (${{ matrix.batch }} - 1) * 10 ))
           echo "Staggering by $SLEEP seconds"

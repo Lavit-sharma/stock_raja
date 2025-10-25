@@ -12,8 +12,8 @@ jobs:
     
     strategy:
       matrix:
-        batch: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-      max-parallel: 10
+        batch: [1, 2, 3, 4, 5]
+      max-parallel: 5
     
     steps:
       - name: Checkout
@@ -39,15 +39,18 @@ jobs:
       - name: Calculate range
         id: calc
         run: |
-          echo "start=$(( (${{ matrix.batch }} - 1) * 200 + 1 ))" >> $GITHUB_OUTPUT
+          echo "start=$(( (${{ matrix.batch }} - 1) * 400 + 1 ))" >> $GITHUB_OUTPUT
       
-      - name: Run scraper
+      - name: Run batch ${{ matrix.batch }}
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           TRADINGVIEW_EMAIL: ${{ secrets.TRADINGVIEW_EMAIL }}
           TRADINGVIEW_PASSWORD: ${{ secrets.TRADINGVIEW_PASSWORD }}
           START_INDEX: ${{ steps.calc.outputs.start }}
-          BATCH_SIZE: '200'
+          BATCH_SIZE: '400'
         run: |
-          echo "Batch ${{ matrix.batch }}: START_INDEX=$START_INDEX, BATCH_SIZE=$BATCH_SIZE"
+          SLEEP=$(( (${{ matrix.batch }} - 1) * 10 ))
+          echo "Staggering by $SLEEP seconds"
+          sleep $SLEEP
+          echo "Batch ${{ matrix.batch }}: START=$START_INDEX, SIZE=$BATCH_SIZE"
           python run_scraper.py

@@ -1,6 +1,9 @@
-# run_scraper.py
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 import gspread
 from datetime import date
@@ -9,93 +12,91 @@ import os
 import time
 
 print("="*70)
-print("TradingView Scraper - Cloud Mode")
+print("TradingView Scraper - GitHub Actions")
 print("="*70)
 
-# Google Sheets Authentication
-print("\n[1/3] Connecting to Google Sheets...")
-credentials_json = os.environ.get('GOOGLE_CREDENTIALS')
-if not credentials_json:
-    print("ERROR: GOOGLE_CREDENTIALS not found")
-    exit(1)
-
-credentials = json.loads(credentials_json)
-gc = gspread.service_account_from_dict(credentials)
+# Google Sheets
+print("\n[1/4] Google Sheets...")
+creds = json.loads(os.environ.get('GOOGLE_CREDENTIALS', '{}'))
+gc = gspread.service_account_from_dict(creds)
 
 sheet_main = gc.open('Stock List').worksheet('Sheet1')
 try:
     sheet_data = gc.open('Tradingview Data Reel Experimental May').worksheet('Sheet5')
-except gspread.WorksheetNotFound:
+except:
     sh = gc.open('Tradingview Data Reel Experimental May')
     sheet_data = sh.add_worksheet(title='Sheet5', rows=1000, cols=26)
 
-company_list = sheet_main.col_values(5)
-name_list = sheet_main.col_values(1)
-current_date = date.today().strftime("%m/%d/%Y")
+companies = sheet_main.col_values(5)
+names = sheet_main.col_values(1)
+today = date.today().strftime("%m/%d/%Y")
+print(f"OK - {len(companies)} companies")
 
-print(f"✓ Loaded {len(company_list)} companies")
+# Chrome
+print("\n[2/4] Browser...")
+opts = Options()
+opts.add_argument("--headless=new")
+opts.add_argument("--no-sandbox")
+opts.add_argument("--disable-dev-shm-usage")
+driver = webdriver.Chrome(options=opts)
+print("OK")
 
-# Chrome Setup (Headless)
-print("\n[2/3] Initializing browser...")
-chrome_options = Options()
-chrome_options.add_argument("--headless=new")
-chrome_options.add_argument("--disable-gpu")
-chrome_options.add_argument("--no-sandbox")
-chrome_options.add_argument("--disable-dev-shm-usage")
-chrome_options.add_argument("--window-size=1920,1080")
+# Login
+print("\n[3/4] Login...")
+email = os.environ.get('TRADINGVIEW_EMAIL')
+pwd = os.environ.get('TRADINGVIEW_PASSWORD')
 
-driver = webdriver.Chrome(options=chrome_options)
-print("✓ Browser ready")
-
-# Scraping Function
-def scrape_tradingview(url):
+if email and pwd:
     try:
-        driver.get(url)
-        time.sleep(12)
+        driver.get("https://www.tradingview.com/#signin")
+        time.sleep(5)
         
-        soup = BeautifulSoup(driver.page_source, "html.parser")
+        e = WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='username']"))
+        )
+        e.send_keys(email)
         
-        # Method 1
-        nodes = soup.find_all("div", class_="valueValue-l31H9iuA")
-        if nodes:
-            values = [el.get_text().strip() for el in nodes if el.get_text(strip=True)]
-            return [v.replace('−', '-').replace('∅', 'None') for v in values]
-        
-        # Method 2
-        nodes = soup.find_all("div", attrs={"data-name": True})
-        if nodes:
-            values = [el.get_text().strip() for el in nodes if el.get_text(strip=True)]
-            return [v.replace('−', '-').replace('∅', 'None') for v in values]
-        
-        return []
-    except Exception as e:
-        print(f"   Error: {str(e)}")
-        return []
+        p = driver.find_element(By.CSS_SELECTOR, "input[name='password']")
+        p.send_keys(pwd)
+        p.send_keys(Keys.RETURN)
+        time.sleep(10)
+        print("OK - Logged in")
+    except:
+        print("WARN - Login failed")
+else:
+    print("SKIP - No credentials")
 
-# Main Loop
-print("\n[3/3] Scraping data...")
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', '100'))
-start_idx = int(os.environ.get('START_INDEX', '1'))
-end_idx = min(len(company_list), start_idx + BATCH_SIZE)
+# Scrape
+def scrape(url):
+    driver.get(url)
+    time.sleep(12)
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    nodes = soup.find_all("div", class_="valueValue-l31H9iuA")
+    if nodes:
+        return [n.get_text().strip() for n in nodes if n.get_text(strip=True)]
+    return []
+
+# Run
+print("\n[4/4] Scraping...")
+batch = int(os.environ.get('BATCH_SIZE', '100'))
+start = int(os.environ.get('START_INDEX', '1'))
+end = min(len(companies), start + batch)
 
 success = 0
-for i in range(start_idx, end_idx):
-    name = name_list[i] if i < len(name_list) else "Unknown"
-    url = company_list[i]
+for i in range(start, end):
+    name = names[i] if i < len(names) else "Unknown"
+    url = companies[i]
+    print(f"[{i}] {name}", end=" ")
     
-    print(f"[{i}/{end_idx-1}] {name}", end=" ")
-    vals = scrape_tradingview(url)
-    
+    vals = scrape(url)
     if vals:
-        sheet_data.append_row([name, current_date] + vals, table_range='A1')
-        print(f"✓ {len(vals)} values")
+        sheet_data.append_row([name, today] + vals, table_range='A1')
+        print(f"OK ({len(vals)})")
         success += 1
     else:
-        print("✗ No data")
-    
+        print("SKIP")
     time.sleep(2)
 
 driver.quit()
-print(f"\n{'='*70}")
-print(f"COMPLETED: {success}/{end_idx-start_idx} successful")
-print("="*70)
+print(f"\nDone: {success}/{end-start}")
+

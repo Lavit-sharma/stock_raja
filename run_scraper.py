@@ -11,11 +11,11 @@ import os
 import time
 
 print("="*70)
-print("Parallel Stock Scraper (Batched)")
+print("Parallel Stock Scraper (Update Mode)")
 print("="*70)
 
 # Google Sheets
-print("\n[1/3] Connecting to Sheets...")
+print("\n[1/4] Connecting to Sheets...")
 creds = json.loads(os.environ.get('GOOGLE_CREDENTIALS', '{}'))
 gc = gspread.service_account_from_dict(creds)
 
@@ -31,8 +31,14 @@ names = sheet_main.col_values(1)
 today = date.today().strftime("%m/%d/%Y")
 print(f"OK - {len(companies)} companies")
 
+# Get existing data to find row positions
+print("\n[2/4] Loading existing data...")
+existing_data = sheet_data.get_all_values()
+existing_names = [row[0] if row else "" for row in existing_data]
+print(f"OK - {len(existing_data)} existing rows")
+
 # Chrome
-print("\n[2/3] Starting browser...")
+print("\n[3/4] Starting browser...")
 opts = Options()
 opts.add_argument("--headless=new")
 opts.add_argument("--no-sandbox")
@@ -68,43 +74,38 @@ def scrape(url):
     except:
         return []
 
-# Batched append (KEY FIX!)
-buffer = []
-BATCH_SIZE_APPEND = 50
+# Batch updates
+updates = []
+BATCH_SIZE_UPDATE = 50
 
-def flush_buffer():
-    if not buffer:
+def flush_updates():
+    if not updates:
         return True
     
     for retry in range(3):
         try:
-            rng = 'Sheet5!A1'
-            params = {
-                'valueInputOption': 'USER_ENTERED',
-                'insertDataOption': 'INSERT_ROWS'
-            }
-            body = {'values': buffer}
-            sheet_data.spreadsheet.values_append(rng, params, body)
-            buffer.clear()
+            sheet_data.batch_update(updates)
+            updates.clear()
             return True
-        except gspread.exceptions.APIError as e:
+        except Exception as e:
             if retry < 2:
                 wait = (retry + 1) * 5
                 print(f" [Retry {retry+1}, wait {wait}s]", end="")
                 time.sleep(wait)
             else:
-                print(f" [FAILED after 3 retries]", end="")
+                print(f" [FAILED: {str(e)[:30]}]", end="")
                 return False
     return False
 
 # Main loop
-print("\n[3/3] Scraping...")
-batch = int(os.environ.get('BATCH_SIZE', '400'))
+print("\n[4/4] Scraping and updating...")
+batch = int(os.environ.get('BATCH_SIZE', '200'))
 start = int(os.environ.get('START_INDEX', '1'))
 end = min(len(companies), start + batch)
 
 success = 0
 failed = 0
+new_entries = 0
 
 for i in range(start, end):
     name = names[i] if i < len(names) else "Unknown"
@@ -115,13 +116,30 @@ for i in range(start, end):
     vals = scrape(url)
     
     if vals:
-        buffer.append([name, today] + vals)
-        print(f"✓ ({len(vals)})", end="")
+        # Find existing row for this company
+        try:
+            row_num = existing_names.index(name) + 1  # Sheet rows are 1-indexed
+            # Update existing row
+            range_name = f'Sheet5!A{row_num}:Z{row_num}'
+            updates.append({
+                'range': range_name,
+                'values': [[name, today] + vals]
+            })
+            print(f"✓ UPDATE ({len(vals)})", end="")
+        except ValueError:
+            # Company not found, append new
+            updates.append({
+                'range': f'Sheet5!A{len(existing_data) + new_entries + 1}',
+                'values': [[name, today] + vals]
+            })
+            new_entries += 1
+            print(f"✓ NEW ({len(vals)})", end="")
+        
         success += 1
         
-        if len(buffer) >= BATCH_SIZE_APPEND:
+        if len(updates) >= BATCH_SIZE_UPDATE:
             print(" [PUSH]", end="")
-            flush_buffer()
+            flush_updates()
             time.sleep(1)
     else:
         print("✗", end="")
@@ -132,11 +150,12 @@ for i in range(start, end):
 
 # Final flush
 print("\nFlushing remaining...")
-flush_buffer()
+flush_updates()
 
 driver.quit()
 
 print(f"\n{'='*70}")
 print(f"COMPLETE: {success} success, {failed} failed")
+print(f"Updated: {success - new_entries}, New: {new_entries}")
 print(f"Rate: {success/(success+failed)*100:.1f}%")
 print("="*70)

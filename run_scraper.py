@@ -11,7 +11,7 @@ import os
 import time
 
 print("="*70)
-print("Parallel Stock Scraper")
+print("Parallel Stock Scraper (Batched)")
 print("="*70)
 
 # Google Sheets
@@ -29,7 +29,7 @@ except:
 companies = sheet_main.col_values(5)
 names = sheet_main.col_values(1)
 today = date.today().strftime("%m/%d/%Y")
-print(f"OK - {len(companies)} companies loaded")
+print(f"OK - {len(companies)} companies")
 
 # Chrome
 print("\n[2/3] Starting browser...")
@@ -41,12 +41,10 @@ opts.add_argument("--disable-blink-features=AutomationControlled")
 driver = webdriver.Chrome(options=opts)
 print("OK")
 
-# Smart scraper (5s avg per stock)
+# Scraper
 def scrape(url):
-    driver.get(url)
-    
-    # Wait for data nodes (stops as soon as found)
     try:
+        driver.get(url)
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((
                 By.CSS_SELECTOR,
@@ -54,48 +52,91 @@ def scrape(url):
             ))
         )
         time.sleep(2)
+        
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        nodes = soup.find_all("div", class_="valueValue-l31H9iuA")
+        if not nodes:
+            nodes = soup.find_all("div", attrs={"data-name": True})
+        
+        values = [n.get_text().strip() for n in nodes if n.get_text(strip=True)]
+        cleaned = []
+        for v in values:
+            v = v.replace('−', '-').replace('∅', 'None').strip()
+            if v and v not in cleaned:
+                cleaned.append(v)
+        return cleaned
     except:
-        time.sleep(5)
-    
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-    
-    nodes = soup.find_all("div", class_="valueValue-l31H9iuA")
-    if not nodes:
-        nodes = soup.find_all("div", attrs={"data-name": True})
-    
-    values = [n.get_text().strip() for n in nodes if n.get_text(strip=True)]
-    cleaned = []
-    for v in values:
-        v = v.replace('−', '-').replace('∅', 'None').strip()
-        if v and v not in cleaned:
-            cleaned.append(v)
-    return cleaned
+        return []
 
-# Run batch
+# Batched append (KEY FIX!)
+buffer = []
+BATCH_SIZE_APPEND = 50
+
+def flush_buffer():
+    if not buffer:
+        return True
+    
+    for retry in range(3):
+        try:
+            rng = 'Sheet5!A1'
+            params = {
+                'valueInputOption': 'USER_ENTERED',
+                'insertDataOption': 'INSERT_ROWS'
+            }
+            body = {'values': buffer}
+            sheet_data.spreadsheet.values_append(rng, params, body)
+            buffer.clear()
+            return True
+        except gspread.exceptions.APIError as e:
+            if retry < 2:
+                wait = (retry + 1) * 5
+                print(f" [Retry {retry+1}, wait {wait}s]", end="")
+                time.sleep(wait)
+            else:
+                print(f" [FAILED after 3 retries]", end="")
+                return False
+    return False
+
+# Main loop
 print("\n[3/3] Scraping...")
-batch = int(os.environ.get('BATCH_SIZE', '200'))
+batch = int(os.environ.get('BATCH_SIZE', '400'))
 start = int(os.environ.get('START_INDEX', '1'))
 end = min(len(companies), start + batch)
 
 success = 0
+failed = 0
+
 for i in range(start, end):
     name = names[i] if i < len(names) else "Unknown"
     url = companies[i]
     
-    print(f"[{i}] {name}", end=" ")
+    print(f"[{i}] {name[:15]:15}", end=" ")
+    
     vals = scrape(url)
     
     if vals:
-        sheet_data.append_row([name, today] + vals, table_range='A1')
-        print(f"✓ ({len(vals)})")
+        buffer.append([name, today] + vals)
+        print(f"✓ ({len(vals)})", end="")
         success += 1
+        
+        if len(buffer) >= BATCH_SIZE_APPEND:
+            print(" [PUSH]", end="")
+            flush_buffer()
+            time.sleep(1)
     else:
-        print("✗")
+        print("✗", end="")
+        failed += 1
     
-    time.sleep(0.7)
+    print()
+    time.sleep(0.5)
+
+# Final flush
+print("\nFlushing remaining...")
+flush_buffer()
 
 driver.quit()
 
 print(f"\n{'='*70}")
-print(f"Batch complete: {success}/{end-start} successful")
+print(f"COMPLETE: {success} success, {failed} failed")
+print(f"Rate: {success/(success+failed)*100:.1f}%")
 print("="*70)

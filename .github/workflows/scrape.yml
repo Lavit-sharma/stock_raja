@@ -47,11 +47,11 @@ jobs:
         run: |
           python run_scraper.py
       
-      - name: Upload logs (if failed)
-        if: failure()
-        uses: actions/upload-artifact@v3
-        with:
-          name: error-logs
-          path: |
-            *.log
-            *.html
+    - name: Upload logs (if failed)
+  if: failure()
+  uses: actions/upload-artifact@v4    # ← v3 se v4 kar diya
+  with:
+    name: error-logs
+    path: |
+      *.log
+      *.html

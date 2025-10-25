@@ -1,4 +1,4 @@
-name: Parallel Stock Scraper (17min)
+name: Parallel Stock Scraper
 
 on:
   schedule:
@@ -36,22 +36,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Calculate batch range
-        id: range
+      - name: Calculate range
+        id: calc
         run: |
-          BATCH=${{ matrix.batch }}
-          START=$(( ($BATCH - 1) * 200 + 1 ))
-          END=$(( $BATCH * 200 ))
-          echo "start=$START" >> $GITHUB_OUTPUT
-          echo "end=$END" >> $GITHUB_OUTPUT
-          echo "Batch $BATCH: companies $START to $END"
+          echo "start=$(( (${{ matrix.batch }} - 1) * 200 + 1 ))" >> $GITHUB_OUTPUT
       
-      - name: Run batch ${{ matrix.batch }}
+      - name: Run scraper
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           TRADINGVIEW_EMAIL: ${{ secrets.TRADINGVIEW_EMAIL }}
           TRADINGVIEW_PASSWORD: ${{ secrets.TRADINGVIEW_PASSWORD }}
-          START_INDEX: ${{ steps.range.outputs.start }}
+          START_INDEX: ${{ steps.calc.outputs.start }}
           BATCH_SIZE: '200'
         run: |
+          echo "Batch ${{ matrix.batch }}: START_INDEX=$START_INDEX, BATCH_SIZE=$BATCH_SIZE"
           python run_scraper.py

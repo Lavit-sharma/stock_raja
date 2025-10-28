@@ -8,10 +8,12 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
+
     strategy:
       matrix:
-        batch: [1,2,3,4,5,6,7,8,9,10]  # 10 parallel jobs
+        batch: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] # 10 parallel batches
       max-parallel: 10
+      fail-fast: false
 
     steps:
       - name: Checkout repository
@@ -23,7 +25,7 @@ jobs:
       - name: Install Chrome
         run: |
           set -e
-          curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o chrome.deb
+          curl -fsSL "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" -o chrome.deb
           sudo dpkg -i chrome.deb || sudo apt-get -f install -y
           google-chrome --version || true
 
@@ -43,15 +45,16 @@ jobs:
         env:
           MATRIX_BATCH: ${{ matrix.batch }}
         run: |
-          START=$(( (MATRIX_BATCH - 1) * 200 + 1 ))
-          echo "start=$START" >> "$GITHUB_OUTPUT"
+          START=$(( ( ${MATRIX_BATCH} - 1 ) * 200 + 1 ))   # 1, 201, 401, ...
+          echo "start=${START}" >> "$GITHUB_OUTPUT"
+          echo "size=200" >> "$GITHUB_OUTPUT"
 
       - name: Stagger start
         shell: bash
         env:
           MATRIX_BATCH: ${{ matrix.batch }}
         run: |
-          SLEEP=$(( (MATRIX_BATCH - 1) * 10 ))
+          SLEEP=$(( ( ${MATRIX_BATCH} - 1 ) * 10 ))  # 0s,10s,20s... smooth load
           echo "Staggering ${SLEEP}s"
           sleep "${SLEEP}"
 
@@ -60,7 +63,8 @@ jobs:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
           START_INDEX: ${{ steps.calc.outputs.start }}
-          BATCH_SIZE: '200'
+          BATCH_SIZE: ${{ steps.calc.outputs.size }}
         run: |
           echo "Batch ${{ matrix.batch }}: START_INDEX=$START_INDEX, SIZE=$BATCH_SIZE"
           python run_scraper.py
+

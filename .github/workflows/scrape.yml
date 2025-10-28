@@ -1,56 +1,56 @@
-name: Parallel Stock Scraper
+name: Parallel Stock Scraper (Logged-In)
 
 on:
-  schedule:
-    - cron: '30 3 * * *'
-  workflow_dispatch:
+schedule:
+- cron: '30 3 * * *' # Daily run; change timing if needed​
+workflow_dispatch:
 
 jobs:
-  scrape:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    
-    strategy:
-      matrix:
-        batch: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-      max-parallel: 10
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-      
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-      
-      - name: Install Chrome
-        run: |
-          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-      
-      - name: Install packages
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-      
-      - name: Calculate range
-        id: calc
-        run: |
-          echo "start=$(( (${{ matrix.batch }} - 1) * 200 + 1 ))" >> $GITHUB_OUTPUT
-      
-      - name: Run batch ${{ matrix.batch }}
-        env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          TRADINGVIEW_EMAIL: ${{ secrets.TRADINGVIEW_EMAIL }}
-          TRADINGVIEW_PASSWORD: ${{ secrets.TRADINGVIEW_PASSWORD }}
-          START_INDEX: ${{ steps.calc.outputs.start }}
-          BATCH_SIZE: '200'
-        run: |
-          SLEEP=$(( (${{ matrix.batch }} - 1) * 10 ))
-          echo "Staggering by $SLEEP seconds"
-          sleep $SLEEP
-          echo "Batch ${{ matrix.batch }}: START=$START_INDEX, SIZE=$BATCH_SIZE"
-          python run_scraper.py
+scrape:
+runs-on: ubuntu-latest
+timeout-minutes: 90
+
+text
+strategy:
+  matrix:
+    batch: 
+  max-parallel: 10
+
+steps:
+  - name: Checkout
+    uses: actions/checkout@v3  # Pulls exact code for this run[1]
+
+  - name: Show commit SHA
+    run: echo "Running commit ${{ github.sha }}"  # Verify code parity[2]
+
+  - name: Install Chrome (fast)
+    run: |
+      set -e
+      curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o chrome.deb
+      sudo dpkg -i chrome.deb || sudo apt-get -f install -y
+      google-chrome --version || true  # Print version for logs [1]
+
+  - name: Setup Python
+    uses: actions/setup-python@v4
+    with:
+      python-version: '3.10'  # Stable on ubuntu-latest[1]
+
+  - name: Install dependencies
+    run: |
+      python -m pip install --upgrade pip
+      pip install -r requirements.txt  # selenium, bs4, gspread, etc.[1]
+
+  - name: Calculate range
+    id: calc
+    run: |
+      echo "start=$(( (${{ matrix.batch }} - 1) * 200 + 1 ))" >> $GITHUB_OUTPUT  # 200/company per job[1]
+
+  - name: Run batch ${{ matrix.batch }}
+    env:
+      GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}  # Service Account JSON (string)[1]
+      COOKIES_JSON: ${{ secrets.COOKIES_JSON }}              # TradingView session cookies JSON[1]
+      START_INDEX: ${{ steps.calc.outputs.start }}
+      BATCH_SIZE: '200'
+    run: |
+      echo "Batch ${{ matrix.batch }}: START_INDEX=$START_INDEX, SIZE=$BATCH_SIZE"
+      python run_scraper.py  # Always-login scraper[1]

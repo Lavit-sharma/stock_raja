@@ -16,12 +16,12 @@ print("Parallel Stock Scraper (Logged-In, 10x200, Batched Appends)")
 print("="*70)
 
 # -------------------------
-# [1/3] Connect to Google Sheets with retries
+# [1/3] Connect to Google Sheets
 # -------------------------
 print("\n[1/3] Connecting to Sheets...")
 
 creds = json.loads(os.environ.get('GOOGLE_CREDENTIALS', '{}'))  # secret string
-gc = gspread.service_account_from_dict(creds)  # service account auth
+gc = gspread.service_account_from_dict(creds)
 
 MAX_RETRIES = 5
 RETRY_DELAY = 5  # seconds
@@ -101,8 +101,12 @@ except Exception as e:
     raise SystemExit(1)
 
 # -------------------------
-# [3/3] Scrape with robust fallbacks
+# [3/3] Scrape and parse structured data
 # -------------------------
+COLUMNS = ["Name", "Date", "Open", "High", "Low", "Close", "Volume", "Change", "ChangePercent"]
+buffer = []
+BATCH_SIZE_APPEND = 50
+
 def scrape(url, retry_count=0, max_retries=1):
     try:
         driver.get(url)
@@ -114,67 +118,32 @@ def scrape(url, retry_count=0, max_retries=1):
         )
         time.sleep(1.0)
 
-        def parse_once():
-            soup = BeautifulSoup(driver.page_source, "html.parser")
-            values = []
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        data_dict = {col: None for col in COLUMNS}
 
-            # A) Attribute-first
-            nodes = soup.select("div[data-name]")
-            if nodes:
-                values = [n.get_text(strip=True) for n in nodes if n.get_text(strip=True)]
+        # Try structured data first
+        nodes = soup.select("div[data-name]")
+        for n in nodes:
+            key = n.get("data-name", "").strip()
+            val = n.get_text(strip=True).replace('−', '-').replace('∅', 'None')
+            if key.lower() == "open": data_dict["Open"] = val
+            elif key.lower() == "high": data_dict["High"] = val
+            elif key.lower() == "low": data_dict["Low"] = val
+            elif key.lower() == "close": data_dict["Close"] = val
+            elif key.lower() == "volume": data_dict["Volume"] = val
+            elif key.lower() == "change": data_dict["Change"] = val
+            elif key.lower() == "change%": data_dict["ChangePercent"] = val
 
-            # B) Hashed class fallback
-            if not values:
-                nodes = soup.find_all("div", class_="valueValue-l31H9iuA")
-                if nodes:
-                    values = [n.get_text(strip=True) for n in nodes if n.get_text(strip=True)]
+        # fallback: first 6 numeric values
+        numeric_vals = [v.get_text(strip=True) for v in soup.find_all("div", class_="valueValue-l31H9iuA") if v.get_text(strip=True)]
+        if numeric_vals:
+            for idx, col in enumerate(COLUMNS[2:]):  # Open->ChangePercent
+                if idx < len(numeric_vals):
+                    data_dict[col] = numeric_vals[idx]
 
-            # C) Generic 'value'/'rating' classes
-            if not values:
-                sections = soup.find_all(
-                    ["span", "div"],
-                    class_=lambda x: x and ("value" in str(x).lower() or "rating" in str(x).lower())
-                )
-                values = [el.get_text(strip=True)
-                          for el in sections
-                          if el.get_text(strip=True) and len(el.get_text(strip=True)) < 50]
-
-            # D) Widget containers fallback
-            if not values:
-                containers = soup.find_all("div", class_=lambda x: x and "widget" in str(x).lower())
-                all_text = []
-                for c in containers[:5]:
-                    text = c.get_text(strip=True, separator="|").split("|")
-                    all_text.extend([t.strip() for t in text if t.strip() and len(t.strip()) < 30])
-                values = all_text[:20]
-
-            # Clean + de-duplicate
-            cleaned, seen = [], set()
-            for v in values:
-                v = v.replace('−', '-').replace('∅', 'None').strip()
-                if v and v not in seen:
-                    seen.add(v)
-                    cleaned.append(v)
-            return cleaned
-
-        cleaned = parse_once()
-        if len(cleaned) < 10 and retry_count < max_retries:
-            time.sleep(2.5)
-            driver.refresh()
-            WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "div[data-name], div.valueValue-l31H9iuA"))
-            )
-            time.sleep(0.8)
-            return scrape(url, retry_count + 1, max_retries)
-        return cleaned
+        return [data_dict[col] for col in COLUMNS]
     except:
-        return []
-
-# -------------------------
-# Batched appends (50 rows/write)
-# -------------------------
-buffer = []
-BATCH_SIZE_APPEND = 50
+        return [None for _ in COLUMNS]
 
 def flush_buffer():
     if not buffer:
@@ -188,23 +157,20 @@ def flush_buffer():
             buffer.clear()
             return True
         except gspread.exceptions.APIError:
-            wait = (retry + 1) * 5
-            print(f" [Append retry {retry+1}, wait {wait}s]", end="")
-            time.sleep(wait)
-        except Exception:
-            wait = (retry + 1) * 5
-            print(f" [Error retry {retry+1}, wait {wait}s]", end="")
-            time.sleep(wait)
-    print(" [FAILED APPEND]")
+            time.sleep((retry + 1) * 5)
     return False
 
-# -------------------------
-# Run scraping
-# -------------------------
 print("\n[Run] Scraping and appending (logged-in, batched)...")
 batch = int(os.environ.get('BATCH_SIZE', '200'))
 start = int(os.environ.get('START_INDEX', '1'))
 end = min(len(companies), start + batch)
+
+# Insert headers first if empty
+try:
+    if not sheet_data.get_all_values():
+        sheet_data.append_row(COLUMNS)
+except Exception:
+    pass
 
 success = 0
 failed = 0
@@ -214,8 +180,10 @@ for i in range(start, end):
     print(f"[{i}] {name[:20]:20}", end=" ")
     vals = scrape(url)
     if vals:
-        buffer.append([name, today] + vals)
-        print(f"✓ ({len(vals)})", end="")
+        vals[0] = name  # Name column
+        vals[1] = today # Date column
+        buffer.append(vals)
+        print(f"✓", end="")
         success += 1
         if len(buffer) >= BATCH_SIZE_APPEND:
             print(" [PUSH]", end="")

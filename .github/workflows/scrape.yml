@@ -2,7 +2,7 @@ name: Parallel Stock Scraper (Logged-In)
 
 on:
 schedule:
-- cron: '30 3 * * *' # Daily run; change timing if needed​
+- cron: '30 3 * * *' # UTC cron; single quotes required​
 workflow_dispatch:
 
 jobs:
@@ -18,39 +18,42 @@ strategy:
 
 steps:
   - name: Checkout
-    uses: actions/checkout@v3  # Pulls exact code for this run[1]
+    uses: actions/checkout@v4  # use latest major[4]
 
   - name: Show commit SHA
-    run: echo "Running commit ${{ github.sha }}"  # Verify code parity[2]
+    run: echo "Running commit ${{ github.sha }}"  # ok to use double quotes here[5]
 
   - name: Install Chrome (fast)
     run: |
       set -e
       curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o chrome.deb
       sudo dpkg -i chrome.deb || sudo apt-get -f install -y
-      google-chrome --version || true  # Print version for logs [1]
+      google-chrome --version || true
 
   - name: Setup Python
-    uses: actions/setup-python@v4
+    uses: actions/setup-python@v5
     with:
-      python-version: '3.10'  # Stable on ubuntu-latest[1]
+      python-version: '3.10'
 
   - name: Install dependencies
     run: |
       python -m pip install --upgrade pip
-      pip install -r requirements.txt  # selenium, bs4, gspread, etc.[1]
+      pip install -r requirements.txt
 
   - name: Calculate range
     id: calc
+    shell: bash
     run: |
-      echo "start=$(( (${{ matrix.batch }} - 1) * 200 + 1 ))" >> $GITHUB_OUTPUT  # 200/company per job[1]
-
-  - name: Run batch ${{ matrix.batch }}
+      echo "start=$(( ( ${MATRIX_BATCH} - 1 ) * 200 + 1 ))" >> "$GITHUB_OUTPUT"
     env:
-      GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}  # Service Account JSON (string)[1]
-      COOKIES_JSON: ${{ secrets.COOKIES_JSON }}              # TradingView session cookies JSON[1]
+      MATRIX_BATCH: ${{ matrix.batch }}
+
+  - name: Run batch
+    env:
+      GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+      COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
       START_INDEX: ${{ steps.calc.outputs.start }}
       BATCH_SIZE: '200'
     run: |
       echo "Batch ${{ matrix.batch }}: START_INDEX=$START_INDEX, SIZE=$BATCH_SIZE"
-      python run_scraper.py  # Always-login scraper[1]
+      python run_scraper.py

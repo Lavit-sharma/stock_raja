@@ -2,31 +2,24 @@
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 import gspread
-from google.api_core.exceptions import ServiceUnavailable
 from datetime import date
 import json
 import os
 import time
 
 print("="*70)
-print("TradingView Stock Scraper (Logged-In, Formatted for Sheets)")
+print("TradingView Stock Scraper - Logged In & Immediate Append")
 print("="*70)
 
 # -------- CONFIGURATION --------
-HEADLESS_MODE = True       # Change to False to see browser
-WAIT_TIME = 10             # Seconds to wait for page load
-RATE_LIMIT = 2             # Seconds between requests
-BATCH_SIZE_APPEND = 50     # How many rows to append in batch
-MAX_RETRIES = 2            # Retry failed scrapes
+HEADLESS_MODE = True
+WAIT_TIME = 8          # Page load wait
+RATE_LIMIT = 3         # Seconds between requests
+MAX_RETRIES = 2
 
 # -------- GOOGLE SHEETS SETUP --------
-print("\n[1/5] Connecting to Google Sheets...")
-
 creds_json = os.environ.get('GOOGLE_CREDENTIALS', '{}')
 if not creds_json:
     print("✗ GOOGLE_CREDENTIALS not found in environment variables.")
@@ -52,7 +45,6 @@ current_date = date.today().strftime("%m/%d/%Y")
 print(f"✓ Loaded {len(company_list)} companies")
 
 # -------- CHROME BROWSER SETUP --------
-print("\n[2/5] Starting Chrome browser...")
 chrome_options = Options()
 if HEADLESS_MODE:
     chrome_options.add_argument("--headless=new")
@@ -68,8 +60,6 @@ driver.set_window_size(1920,1080)
 print("✓ Browser initialized")
 
 # -------- SESSION LOGIN --------
-print("\n[3/5] Loading TradingView session via cookies...")
-
 cookies_json = os.environ.get("COOKIES_JSON", "")
 if not cookies_json:
     print("✗ COOKIES_JSON missing. Please provide your logged-in cookies.")
@@ -101,14 +91,14 @@ except Exception as e:
     exit(1)
 
 # -------- SCRAPE FUNCTION --------
-def scrape_tradingview_values(url, retry_count=0):
+def scrape_values(url, retry_count=0):
     try:
         driver.get(url)
         time.sleep(WAIT_TIME)
         soup = BeautifulSoup(driver.page_source, "html.parser")
         values = []
 
-        # Primary: valueValue-l31H9iuA
+        # Primary selector
         nodes = soup.find_all("div", class_="valueValue-l31H9iuA")
         if nodes:
             values = [n.get_text(strip=True) for n in nodes if n.get_text(strip=True)]
@@ -124,7 +114,7 @@ def scrape_tradingview_values(url, retry_count=0):
             sections = soup.find_all(["span","div"], class_=lambda x: x and ("value" in str(x).lower() or "rating" in str(x).lower()))
             values = [el.get_text(strip=True) for el in sections if el.get_text(strip=True)]
 
-        # Clean and deduplicate
+        # Clean duplicates
         cleaned = []
         for v in values:
             v = v.replace('−','-').replace('∅','None').strip()
@@ -135,37 +125,14 @@ def scrape_tradingview_values(url, retry_count=0):
     except Exception as e:
         if retry_count < MAX_RETRIES:
             time.sleep(3)
-            return scrape_tradingview_values(url, retry_count+1)
+            return scrape_values(url, retry_count+1)
         else:
             print(f"✗ Failed to scrape {url}: {str(e)}")
             return []
 
-# -------- BATCHED APPEND --------
-buffer = []
-
-def flush_buffer():
-    if not buffer:
-        return
-    for attempt in range(3):
-        try:
-            sheet_data.spreadsheet.values_append(
-                'Sheet5!A1',
-                {'valueInputOption':'USER_ENTERED', 'insertDataOption':'INSERT_ROWS'},
-                {'values': buffer}
-            )
-            buffer.clear()
-            return
-        except Exception as e:
-            wait = (attempt+1)*5
-            print(f"Retrying append in {wait}s due to error: {str(e)}")
-            time.sleep(wait)
-    print("✗ Failed to append batch")
-
 # -------- MAIN LOOP --------
-print("\n[4/5] Starting scraping...")
-start_index = 1
-end_index = min(len(company_list), 1100)  # Max 1100 companies
-
+start_index = 0
+end_index = min(len(company_list), 10)  # 10 jobs for ~15-17 min
 success_count = 0
 fail_count = 0
 
@@ -173,23 +140,22 @@ for i in range(start_index, end_index):
     name = name_list[i] if i < len(name_list) else "Unknown"
     url = company_list[i]
     print(f"[{i}] {name} -> scraping...", end=" ")
-    
-    vals = scrape_tradingview_values(url)
+
+    vals = scrape_values(url)
     if vals:
-        buffer.append([name, current_date] + vals)
-        print(f"✓ {len(vals)} values")
-        success_count += 1
-        if len(buffer) >= BATCH_SIZE_APPEND:
-            print(" [PUSH]", end="")
-            flush_buffer()
+        row = [name, current_date] + vals
+        try:
+            sheet_data.append_row(row, value_input_option='USER_ENTERED')
+            print(f"✓ {len(vals)} values written")
+            success_count += 1
+        except Exception as e:
+            print(f"✗ Sheet write failed: {str(e)}")
+            fail_count += 1
     else:
         print("✗ No values")
         fail_count += 1
     time.sleep(RATE_LIMIT)
 
-# Flush remaining
-print("\nFlushing remaining rows...")
-flush_buffer()
 driver.quit()
 
 # -------- FINAL REPORT --------

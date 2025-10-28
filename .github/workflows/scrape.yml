@@ -1,57 +1,57 @@
 name: Parallel Stock Scraper (Logged-In)
 
 on:
-schedule:
-- cron: '30 3 * * *' # UTC; adjust if needed
-workflow_dispatch:
+  schedule:
+    - cron: '30 3 * * *' # Runs daily at 03:30 UTC
+  workflow_dispatch:
 
 jobs:
-scrape:
-runs-on: ubuntu-latest
-timeout-minutes: 90
-strategy:
-  matrix:
-    batch: 
-  max-parallel: 10
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      matrix:
+        batch: [1, 2, 3, 4, 5] # Example batches; adjust as needed
+      max-parallel: 10
 
-steps:
-  - name: Checkout
-    uses: actions/checkout@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  - name: Show commit SHA
-    run: echo "Running commit ${{ github.sha }}"
+      - name: Show commit SHA
+        run: echo "Running commit ${{ github.sha }}"
 
-  - name: Install Chrome (fast)
-    run: |
-      set -e
-      curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o chrome.deb
-      sudo dpkg -i chrome.deb || sudo apt-get -f install -y
-      google-chrome --version || true
+      - name: Install Chrome (fast)
+        run: |
+          set -e
+          curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o chrome.deb
+          sudo dpkg -i chrome.deb || sudo apt-get -f install -y
+          google-chrome --version || true
 
-  - name: Setup Python
-    uses: actions/setup-python@v5
-    with:
-      python-version: '3.10'
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-  - name: Install dependencies
-    run: |
-      python -m pip install --upgrade pip
-      pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-  - name: Calculate range
-    id: calc
-    shell: bash
-    env:
-      MATRIX_BATCH: ${{ matrix.batch }}
-    run: |
-      echo "start=$(( ( ${MATRIX_BATCH} - 1 ) * 200 + 1 ))" >> "$GITHUB_OUTPUT"
+      - name: Calculate range
+        id: calc
+        shell: bash
+        env:
+          MATRIX_BATCH: ${{ matrix.batch }}
+        run: |
+          echo "start=$(( ( ${MATRIX_BATCH} - 1 ) * 200 + 1 ))" >> "$GITHUB_OUTPUT"
 
-  - name: Run batch
-    env:
-      GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-      COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
-      START_INDEX: ${{ steps.calc.outputs.start }}
-      BATCH_SIZE: '200'
-    run: |
-      echo "Batch ${{ matrix.batch }}: START_INDEX=$START_INDEX, SIZE=$BATCH_SIZE"
-      python run_scraper.py
+      - name: Run batch
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
+          START_INDEX: ${{ steps.calc.outputs.start }}
+          BATCH_SIZE: '200'
+        run: |
+          echo "Batch ${{ matrix.batch }}: START_INDEX=$START_INDEX, SIZE=$BATCH_SIZE"
+          python run_scraper.py

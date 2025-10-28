@@ -5,6 +5,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 import gspread
+from google.api_core.exceptions import ServiceUnavailable
 from datetime import date
 import json
 import os
@@ -14,23 +15,41 @@ print("="*70)
 print("Parallel Stock Scraper (Logged-In, 10x200, Batched Appends)")
 print("="*70)
 
-# [1/3] Connect to Google Sheets
+# -------------------------
+# [1/3] Connect to Google Sheets with retries
+# -------------------------
 print("\n[1/3] Connecting to Sheets...")
+
 creds = json.loads(os.environ.get('GOOGLE_CREDENTIALS', '{}'))  # secret string
 gc = gspread.service_account_from_dict(creds)  # service account auth
-sheet_main = gc.open('Stock List').worksheet('Sheet1')  # source list
-try:
-    sheet_data = gc.open('Tradingview Data Reel Experimental May').worksheet('Sheet5')  # target
-except:
-    sh = gc.open('Tradingview Data Reel Experimental May')
-    sheet_data = sh.add_worksheet(title='Sheet5', rows=1000, cols=26)
+
+MAX_RETRIES = 5
+RETRY_DELAY = 5  # seconds
+
+for attempt in range(1, MAX_RETRIES + 1):
+    try:
+        sheet_main = gc.open('Stock List').worksheet('Sheet1')
+        try:
+            sheet_data = gc.open('Tradingview Data Reel Experimental May').worksheet('Sheet5')
+        except:
+            sh = gc.open('Tradingview Data Reel Experimental May')
+            sheet_data = sh.add_worksheet(title='Sheet5', rows=1000, cols=26)
+        print(f"Connected to Google Sheets on attempt {attempt}")
+        break
+    except (gspread.exceptions.APIError, ServiceUnavailable) as e:
+        print(f"Attempt {attempt} failed: {e}")
+        if attempt == MAX_RETRIES:
+            raise SystemExit("Failed to connect to Google Sheets after multiple attempts")
+        time.sleep(RETRY_DELAY)
 
 companies = sheet_main.col_values(5)  # URLs
 names = sheet_main.col_values(1)      # Names
 today = date.today().strftime("%m/%d/%Y")
 print(f"OK - {len(companies)} companies")
 
-# [2/3] Start Chrome (headless parity 1920x1080)
+# -------------------------
+# [2/3] Start Chrome (headless)
+# -------------------------
 print("\n[2/3] Starting browser...")
 opts = Options()
 opts.add_argument("--headless=new")
@@ -42,12 +61,14 @@ opts.add_experimental_option("excludeSwitches", ["enable-automation"])
 opts.add_experimental_option('useAutomationExtension', False)
 driver = webdriver.Chrome(options=opts)
 try:
-    driver.set_window_size(1920, 1080)  # enforce viewport
+    driver.set_window_size(1920, 1080)
 except Exception:
     pass
 print("OK")
 
+# -------------------------
 # [Login] Mandatory login via cookies
+# -------------------------
 print("\n[Login] Applying session cookies...")
 driver.get("https://www.tradingview.com")
 time.sleep(2)
@@ -79,7 +100,9 @@ except Exception as e:
     driver.quit()
     raise SystemExit(1)
 
+# -------------------------
 # [3/3] Scrape with robust fallbacks
+# -------------------------
 def scrape(url, retry_count=0, max_retries=1):
     try:
         driver.get(url)
@@ -147,7 +170,9 @@ def scrape(url, retry_count=0, max_retries=1):
     except:
         return []
 
+# -------------------------
 # Batched appends (50 rows/write)
+# -------------------------
 buffer = []
 BATCH_SIZE_APPEND = 50
 
@@ -173,7 +198,9 @@ def flush_buffer():
     print(" [FAILED APPEND]")
     return False
 
+# -------------------------
 # Run scraping
+# -------------------------
 print("\n[Run] Scraping and appending (logged-in, batched)...")
 batch = int(os.environ.get('BATCH_SIZE', '200'))
 start = int(os.environ.get('START_INDEX', '1'))

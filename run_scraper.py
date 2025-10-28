@@ -10,56 +10,56 @@ import json
 import os
 import time
 
-print("=" * 70)
-print("Parallel Stock Scraper (ALWAYS LOGGED-IN via Cookies, Append Mode)")
-print("=" * 70)
+print("="*70)
+print("Parallel Stock Scraper (Logged-In, 10x200, Batched Appends)")
+print("="*70)
 
-# [1/4] Connect to Google Sheets
-print("\n[1/4] Connecting to Sheets...")
-creds = json.loads(os.environ.get('GOOGLE_CREDENTIALS', '{}'))  # Secret string from Actions
-gc = gspread.service_account_from_dict(creds)  # Auth via service account
-sheet_main = gc.open('Stock List').worksheet('Sheet1')  # Read inputs
+# [1/3] Connect to Google Sheets
+print("\n[1/3] Connecting to Sheets...")
+creds = json.loads(os.environ.get('GOOGLE_CREDENTIALS', '{}'))  # secret string
+gc = gspread.service_account_from_dict(creds)  # service account auth
+sheet_main = gc.open('Stock List').worksheet('Sheet1')  # source list
 try:
-    sheet_data = gc.open('Tradingview Data Reel Experimental May').worksheet('Sheet5')  # Target sheet
+    sheet_data = gc.open('Tradingview Data Reel Experimental May').worksheet('Sheet5')  # target
 except:
-    sh = gc.open('Tradingview Data Reel Experimental May')  # File handle
-    sheet_data = sh.add_worksheet(title='Sheet5', rows=1000, cols=26)  # Create if absent
+    sh = gc.open('Tradingview Data Reel Experimental May')
+    sheet_data = sh.add_worksheet(title='Sheet5', rows=1000, cols=26)
 
-companies = sheet_main.col_values(5)  # URLs list
-names = sheet_main.col_values(1)  # Names list
-today = date.today().strftime("%m/%d/%Y")  # Date stamp
-print(f"OK - {len(companies)} companies")  # Diagnostics
+companies = sheet_main.col_values(5)  # URLs
+names = sheet_main.col_values(1)      # Names
+today = date.today().strftime("%m/%d/%Y")
+print(f"OK - {len(companies)} companies")
 
-# [2/4] Start Chrome with local-like viewport
-print("\n[2/4] Starting browser...")
+# [2/3] Start Chrome (headless parity 1920x1080)
+print("\n[2/3] Starting browser...")
 opts = Options()
-opts.add_argument("--headless=new")  # Headless for CI
-opts.add_argument("--no-sandbox")  # Required on runners
-opts.add_argument("--disable-dev-shm-usage")  # Shared mem fix
-opts.add_argument("--disable-blink-features=AutomationControlled")  # Reduce detection
-opts.add_argument("--window-size=1920,1080")  # Match local rendering
-opts.add_experimental_option("excludeSwitches", ["enable-automation"])  # Cleaner
-opts.add_experimental_option('useAutomationExtension', False)  # Cleaner
-driver = webdriver.Chrome(options=opts)  # Launch Chrome
+opts.add_argument("--headless=new")
+opts.add_argument("--no-sandbox")
+opts.add_argument("--disable-dev-shm-usage")
+opts.add_argument("--disable-blink-features=AutomationControlled")
+opts.add_argument("--window-size=1920,1080")
+opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+opts.add_experimental_option('useAutomationExtension', False)
+driver = webdriver.Chrome(options=opts)
 try:
-    driver.set_window_size(1920, 1080)  # Enforce viewport
+    driver.set_window_size(1920, 1080)  # enforce viewport
 except Exception:
-    pass  # Some versions already honor window-size
-print("OK")  # Status
+    pass
+print("OK")
 
-# [3/4] Apply TradingView session cookies (MANDATORY LOGIN)
-print("\n[3/4] Applying session cookies...")
-driver.get("https://www.tradingview.com")  # Base domain for cookies
-time.sleep(2)  # Initial settle
-cookies_json = os.environ.get("COOKIES_JSON", "")  # Secret with cookie array
+# [Login] Mandatory login via cookies
+print("\n[Login] Applying session cookies...")
+driver.get("https://www.tradingview.com")
+time.sleep(2)
+cookies_json = os.environ.get("COOKIES_JSON", "")
 if not cookies_json:
     print("ERROR - COOKIES_JSON secret missing. Cannot proceed without login.")
     driver.quit()
     raise SystemExit(1)
 
-applied = 0  # Count successful cookie injections
+applied = 0
 try:
-    cookies = json.loads(cookies_json)  # List of dicts
+    cookies = json.loads(cookies_json)
     for ck in cookies:
         ck = dict(ck)
         ck.pop('sameSite', None)
@@ -79,14 +79,7 @@ except Exception as e:
     driver.quit()
     raise SystemExit(1)
 
-# Heuristic guard for obvious logout (not strict)
-page = driver.page_source
-if ("Sign in" in page or "Log in" in page) and applied < 3:
-    print("ERROR - Still appears logged out. Update COOKIES_JSON and retry.")
-    driver.quit()
-    raise SystemExit(1)
-
-# [4/4] Robust scrape with attribute-first fallbacks
+# [3/3] Scrape with robust fallbacks
 def scrape(url, retry_count=0, max_retries=1):
     try:
         driver.get(url)
@@ -102,30 +95,28 @@ def scrape(url, retry_count=0, max_retries=1):
             soup = BeautifulSoup(driver.page_source, "html.parser")
             values = []
 
-            # A) Attribute-first (most stable across layouts)
+            # A) Attribute-first
             nodes = soup.select("div[data-name]")
             if nodes:
                 values = [n.get_text(strip=True) for n in nodes if n.get_text(strip=True)]
 
-            # B) Hashed class fallback (TradingView value blocks)
+            # B) Hashed class fallback
             if not values:
                 nodes = soup.find_all("div", class_="valueValue-l31H9iuA")
                 if nodes:
                     values = [n.get_text(strip=True) for n in nodes if n.get_text(strip=True)]
 
-            # C) Generic 'value'/'rating' classes (broad fallback)
+            # C) Generic 'value'/'rating' classes
             if not values:
                 sections = soup.find_all(
                     ["span", "div"],
                     class_=lambda x: x and ("value" in str(x).lower() or "rating" in str(x).lower())
                 )
-                values = [
-                    el.get_text(strip=True)
-                    for el in sections
-                    if el.get_text(strip=True) and len(el.get_text(strip=True)) < 50
-                ]
+                values = [el.get_text(strip=True)
+                          for el in sections
+                          if el.get_text(strip=True) and len(el.get_text(strip=True)) < 50]
 
-            # D) Widget containers (last resort, trimmed)
+            # D) Widget containers fallback
             if not values:
                 containers = soup.find_all("div", class_=lambda x: x and "widget" in str(x).lower())
                 all_text = []
@@ -134,9 +125,8 @@ def scrape(url, retry_count=0, max_retries=1):
                     all_text.extend([t.strip() for t in text if t.strip() and len(t.strip()) < 30])
                 values = all_text[:20]
 
-            # Clean + de-duplicate while preserving order
-            cleaned = []
-            seen = set()
+            # Clean + de-duplicate
+            cleaned, seen = [], set()
             for v in values:
                 v = v.replace('−', '-').replace('∅', 'None').strip()
                 if v and v not in seen:
@@ -157,7 +147,7 @@ def scrape(url, retry_count=0, max_retries=1):
     except:
         return []
 
-# Batched append to respect Google Sheets limits
+# Batched appends (50 rows/write)
 buffer = []
 BATCH_SIZE_APPEND = 50
 
@@ -183,7 +173,8 @@ def flush_buffer():
     print(" [FAILED APPEND]")
     return False
 
-print("\n[Run] Scraping and appending (logged-in)...")
+# Run scraping
+print("\n[Run] Scraping and appending (logged-in, batched)...")
 batch = int(os.environ.get('BATCH_SIZE', '200'))
 start = int(os.environ.get('START_INDEX', '1'))
 end = min(len(companies), start + batch)
@@ -194,7 +185,6 @@ for i in range(start, end):
     name = names[i] if i < len(names) else "Unknown"
     url = companies[i]
     print(f"[{i}] {name[:20]:20}", end=" ")
-
     vals = scrape(url)
     if vals:
         buffer.append([name, today] + vals)
@@ -207,7 +197,6 @@ for i in range(start, end):
     else:
         print("✗", end="")
         failed += 1
-
     print()
     time.sleep(0.5)
 
@@ -215,8 +204,8 @@ print("\nFlushing remaining...")
 flush_buffer()
 driver.quit()
 
-print(f"\n{'=' * 70}")
+print(f"\n{'='*70}")
 print(f"COMPLETE: {success} success, {failed} failed")
 if success + failed > 0:
-    print(f"Rate: {success / (success + failed) * 100:.1f}%")
-print("=" * 70)
+    print(f"Rate: {success/(success+failed)*100:.1f}%")
+print("="*70)

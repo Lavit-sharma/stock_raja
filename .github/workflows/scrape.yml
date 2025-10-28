@@ -2,15 +2,13 @@ name: Parallel Stock Scraper (Logged-In)
 
 on:
 schedule:
-- cron: '30 3 * * *' # UTC cron; single quotes required​
+- cron: '30 3 * * *' # UTC; adjust if needed
 workflow_dispatch:
 
 jobs:
 scrape:
 runs-on: ubuntu-latest
 timeout-minutes: 90
-
-
 strategy:
   matrix:
     batch: 
@@ -18,10 +16,10 @@ strategy:
 
 steps:
   - name: Checkout
-    uses: actions/checkout@v4  # use latest major[4]
+    uses: actions/checkout@v4
 
   - name: Show commit SHA
-    run: echo "Running commit ${{ github.sha }}"  # ok to use double quotes here[5]
+    run: echo "Running commit ${{ github.sha }}"
 
   - name: Install Chrome (fast)
     run: |
@@ -43,10 +41,10 @@ steps:
   - name: Calculate range
     id: calc
     shell: bash
-    run: |
-      echo "start=$(( ( ${MATRIX_BATCH} - 1 ) * 200 + 1 ))" >> "$GITHUB_OUTPUT"
     env:
       MATRIX_BATCH: ${{ matrix.batch }}
+    run: |
+      echo "start=$(( ( ${MATRIX_BATCH} - 1 ) * 200 + 1 ))" >> "$GITHUB_OUTPUT"
 
   - name: Run batch
     env:

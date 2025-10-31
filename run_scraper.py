@@ -7,32 +7,32 @@ from bs4 import BeautifulSoup
 import gspread
 from google.api_core.exceptions import ServiceUnavailable
 from datetime import date
-import json
-import os
-import time
+import json, os, time, math
 
 print("="*70)
-print("TradingView Stock Scraper (Logged-In, Formatted for Sheets)")
+print("TradingView Stock Scraper (Logged-In, Optimized)")
 print("="*70)
 
 # -------- CONFIGURATION --------
-HEADLESS_MODE = True       # Change to False to see browser
-WAIT_TIME = 10             # Seconds to wait for page load
-RATE_LIMIT = 2             # Seconds between requests
-BATCH_SIZE_APPEND = 50     # How many rows to append in batch
-MAX_RETRIES = 2            # Retry failed scrapes
+HEADLESS_MODE = True
+PAGE_LOAD_TIMEOUT = 20
+WAIT_VISIBLE_TIMEOUT = 6          # shorter, explicit waits
+RATE_LIMIT = 0.75                 # seconds between URLs (reduced)
+BATCH_SIZE_APPEND = 100           # bigger batch to cut API calls
+MAX_RETRIES_SCRAPE = 2
+MAX_RETRIES_APPEND = 4
+
+# Read slice bounds from env (matrix)
+START_INDEX = int(os.getenv("START_INDEX", "1"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "200"))
 
 # -------- GOOGLE SHEETS SETUP --------
 print("\n[1/5] Connecting to Google Sheets...")
-
-creds_json = os.environ.get('GOOGLE_CREDENTIALS', '{}')
+creds_json = os.environ.get('GOOGLE_CREDENTIALS', '')
 if not creds_json:
-    print("✗ GOOGLE_CREDENTIALS not found in environment variables.")
-    exit(1)
+    print("✗ GOOGLE_CREDENTIALS missing"); exit(1)
 
-creds = json.loads(creds_json)
-gc = gspread.service_account_from_dict(creds)
-
+gc = gspread.service_account_from_dict(json.loads(creds_json))
 try:
     sheet_main = gc.open('Stock List').worksheet('Sheet1')
     try:
@@ -41,18 +41,24 @@ try:
         sh = gc.open('Tradingview Data Reel Experimental May')
         sheet_data = sh.add_worksheet(title='Sheet5', rows=1000, cols=26)
 except Exception as e:
-    print(f"✗ Error accessing Google Sheets: {str(e)}")
-    exit(1)
+    print(f"✗ Sheets access error: {e}"); exit(1)
 
 company_list = sheet_main.col_values(5)  # URLs
 name_list = sheet_main.col_values(1)     # Names
+n = len(company_list)
 current_date = date.today().strftime("%m/%d/%Y")
-print(f"✓ Loaded {len(company_list)} companies")
+print(f"✓ Loaded {n} companies")
+
+# Compute slice
+start = max(1, START_INDEX)
+end = min(n, start + BATCH_SIZE - 1)
+print(f"Processing slice: {start}..{end}")
 
 # -------- CHROME BROWSER SETUP --------
 print("\n[2/5] Starting Chrome browser...")
 chrome_options = Options()
 if HEADLESS_MODE:
+    # Prefer stable headless flag for CI environments
     chrome_options.add_argument("--headless=new")
 chrome_options.add_argument("--disable-gpu")
 chrome_options.add_argument("--no-sandbox")
@@ -62,139 +68,129 @@ chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
 chrome_options.add_experimental_option('useAutomationExtension', False)
 
 driver = webdriver.Chrome(options=chrome_options)
-driver.set_window_size(1920,1080)
+driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
+driver.set_window_size(1600, 1000)
+wait = WebDriverWait(driver, WAIT_VISIBLE_TIMEOUT)
 print("✓ Browser initialized")
 
-# -------- SESSION LOGIN --------
+# -------- SESSION LOGIN VIA COOKIES --------
 print("\n[3/5] Loading TradingView session via cookies...")
-
 cookies_json = os.environ.get("COOKIES_JSON", "")
 if not cookies_json:
-    print("✗ COOKIES_JSON missing. Please provide your logged-in cookies.")
-    driver.quit()
-    exit(1)
+    print("✗ COOKIES_JSON missing"); driver.quit(); exit(1)
 
 try:
     driver.get("https://www.tradingview.com")
-    time.sleep(2)
+    time.sleep(1.5)
     cookies = json.loads(cookies_json)
     for ck in cookies:
-        ck = dict(ck)
-        ck.pop('sameSite', None)
-        ck.pop('expiry', None)
+        c = dict(ck)
+        c.pop('sameSite', None)   # Selenium cookie shape constraints
+        c.pop('expiry', None)
         try:
-            driver.add_cookie(ck)
+            driver.add_cookie(c)
         except Exception:
             pass
     driver.refresh()
-    time.sleep(5)
-    if "Sign in" in driver.page_source or "Log in" in driver.page_source:
-        print("⚠ WARNING: Session may be expired. Check cookies.")
-        driver.quit()
-        exit(1)
-    print("✓ Session loaded successfully")
+    # Quick check for login
+    time.sleep(2.0)
+    if ("Sign in" in driver.page_source) or ("Log in" in driver.page_source):
+        print("⚠ Session looks expired; aborting."); driver.quit(); exit(1)
+    print("✓ Session loaded")
 except Exception as e:
-    print(f"✗ Cookie load error: {str(e)}")
-    driver.quit()
-    exit(1)
+    print(f"✗ Cookie load error: {e}"); driver.quit(); exit(1)
 
-# -------- SCRAPE FUNCTION --------
-def scrape_tradingview_values(url, retry_count=0):
+# -------- SCRAPE FUNCTION (optimized waits) --------
+def scrape_tradingview_values(url, retry=0):
     try:
         driver.get(url)
-        time.sleep(WAIT_TIME)
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-        values = []
+        # Try minimal explicit wait for key containers if any
+        try:
+            wait.until(lambda d: "tradingview" in d.current_url.lower())
+        except Exception:
+            pass
 
-        # Primary: valueValue-l31H9iuA
-        nodes = soup.find_all("div", class_="valueValue-l31H9iuA")
-        if nodes:
-            values = [n.get_text(strip=True) for n in nodes if n.get_text(strip=True)]
+        # Small pause to allow dynamic render
+        time.sleep(0.8)
+        html = driver.page_source
+        soup = BeautifulSoup(html, "html.parser")
 
-        # Fallback: data-name attribute
+        # Priority classes
+        values = [n.get_text(strip=True) for n in soup.find_all("div", class_="valueValue-l31H9iuA")]
         if not values:
             nodes = soup.find_all("div", attrs={"data-name": True})
-            if nodes:
-                values = [n.get_text(strip=True) for n in nodes if n.get_text(strip=True)]
-
-        # Fallback: value/rating classes
+            values = [n.get_text(strip=True) for n in nodes if n.get_text(strip=True)]
         if not values:
-            sections = soup.find_all(
-                ["span","div"], 
-                class_=lambda x: x and ("value" in str(x).lower() or "rating" in str(x).lower())
-            )
+            sections = soup.find_all(["span","div"], class_=lambda x: x and ("value" in str(x).lower() or "rating" in str(x).lower()))
             values = [el.get_text(strip=True) for el in sections if el.get_text(strip=True)]
 
-        # Clean and deduplicate
         cleaned = []
         for v in values:
             v = v.replace('−','-').replace('∅','None').strip()
             if v and v not in cleaned:
                 cleaned.append(v)
         return cleaned
-
     except Exception as e:
-        if retry_count < MAX_RETRIES:
-            time.sleep(3)
-            return scrape_tradingview_values(url, retry_count+1)
+        if retry < MAX_RETRIES_SCRAPE:
+            time.sleep(1.5 * (retry + 1))
+            return scrape_tradingview_values(url, retry + 1)
         else:
-            print(f"✗ Failed to scrape {url}: {str(e)}")
+            print(f"✗ Failed scrape {url}: {e}")
             return []
 
-# -------- BATCHED APPEND --------
+# -------- BATCHED APPEND WITH BACKOFF --------
 buffer = []
 
 def flush_buffer():
     if not buffer:
         return
-    for attempt in range(3):
+    backoff = 2
+    for attempt in range(1, MAX_RETRIES_APPEND + 1):
         try:
             sheet_data.spreadsheet.values_append(
                 'Sheet5!A1',
-                {'valueInputOption':'USER_ENTERED', 'insertDataOption':'INSERT_ROWS'},
+                {'valueInputOption': 'USER_ENTERED', 'insertDataOption': 'INSERT_ROWS'},
                 {'values': buffer}
             )
             buffer.clear()
             return
         except Exception as e:
-            wait = (attempt+1)*5
-            print(f"Retrying append in {wait}s due to error: {str(e)}")
-            time.sleep(wait)
-    print("✗ Failed to append batch")
+            if attempt == MAX_RETRIES_APPEND:
+                print(f"✗ Append failed after {attempt} attempts: {e}")
+                return
+            print(f"Append retry {attempt} in {backoff}s due to: {e}")
+            time.sleep(backoff)
+            backoff = min(30, backoff * 2)
 
 # -------- MAIN LOOP --------
 print("\n[4/5] Starting scraping...")
-start_index = 1
-end_index = min(len(company_list), 1100)  # Max 1100 companies
-success_count = 0
-fail_count = 0
-
-for i in range(start_index, end_index):
+success, fail = 0, 0
+for i in range(start, end + 1):
     name = name_list[i] if i < len(name_list) else "Unknown"
     url = company_list[i]
     print(f"[{i}] {name} -> scraping...", end=" ")
 
     vals = scrape_tradingview_values(url)
     if vals:
-        buffer.append([name, current_date] + vals)
+        row = [name, current_date] + vals
+        buffer.append(row)
+        success += 1
         print(f"✓ {len(vals)} values")
-        success_count += 1
         if len(buffer) >= BATCH_SIZE_APPEND:
-            print(" [PUSH]", end="")
+            print(" [APPEND]")
             flush_buffer()
     else:
         print("✗ No values")
-        fail_count += 1
+        fail += 1
+
+    # Light rate limit
     time.sleep(RATE_LIMIT)
 
-# Flush remaining
 print("\nFlushing remaining rows...")
 flush_buffer()
 driver.quit()
 
-# -------- FINAL REPORT --------
 print("\n" + "="*70)
-print(f"SCRAPING COMPLETED")
-print(f"Success: {success_count}")
-print(f"Failed : {fail_count}")
+print(f"SCRAPING COMPLETED | Slice {start}-{end}")
+print(f"Success: {success} | Failed: {fail}")
 print("="*70)

@@ -1,9 +1,9 @@
-name: Parallel Stock Scraper (Stable)
+name: Parallel TradingView Scrape (10x stagger)
 
 on:
-  schedule:
-    - cron: '30 3 * * *'
   workflow_dispatch:
+  schedule:
+    - cron: '30 3 * * *'  # daily
 
 jobs:
   scrape:
@@ -17,31 +17,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Chrome
+      - name: Install chrome (chromium)
         run: |
           sudo apt-get update
-          curl -fsSL "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" -o chrome.deb
-          sudo dpkg -i chrome.deb || sudo apt-get -f install -y
+          sudo apt-get install -y chromium-browser
+          chromium-browser --version || true
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
-          pip install --upgrade pip
-          pip install selenium gspread beautifulsoup4 google-api-core webdriver-manager
+          python -m pip install --upgrade pip
+          pip install selenium webdriver-manager beautifulsoup4 gspread google-api-python-client
 
-      - name: Compute batch
+      - name: Compute start index
         id: calc
         run: |
           START=$(( ( ${{ matrix.batch }} - 1 ) * 200 + 1 ))
           echo "start=${START}" >> "$GITHUB_OUTPUT"
           echo "size=200" >> "$GITHUB_OUTPUT"
 
-      - name: Delay start
-        run: sleep $(( ( ${{ matrix.batch }} - 1 ) * 10 ))
+      - name: Stagger start (2 minutes per batch)
+        run: sleep $(( ( ${{ matrix.batch }} - 1 ) * 120 ))
 
       - name: Run scraper
         env:
@@ -49,4 +49,11 @@ jobs:
           COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
           START_INDEX: ${{ steps.calc.outputs.start }}
           BATCH_SIZE: ${{ steps.calc.outputs.size }}
-        run: python run_scraper.py
+        run: |
+          # prepare file with URLs (your repo should contain a urls list or you can modify to read from Google Sheets)
+          # Example: read urls.txt sliced by START_INDEX and BATCH_SIZE (assuming file exists)
+          START=${START_INDEX}
+          SIZE=${BATCH_SIZE}
+          # create slice file
+          awk "NR>=(START) && NR<=(START+SIZE-1)" urls.txt > slice_urls.txt || true
+          python run_tradingview_scraper.py --file slice_urls.txt --to-sheets

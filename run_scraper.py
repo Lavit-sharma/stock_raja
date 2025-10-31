@@ -1,13 +1,15 @@
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import gspread
 from google.api_core.exceptions import ServiceUnavailable
 from datetime import date
-import json, os, time, math
+import json, os, time
 
 print("="*70)
 print("TradingView Stock Scraper (Logged-In, Optimized)")
@@ -16,13 +18,13 @@ print("="*70)
 # -------- CONFIGURATION --------
 HEADLESS_MODE = True
 PAGE_LOAD_TIMEOUT = 20
-WAIT_VISIBLE_TIMEOUT = 6          # shorter, explicit waits
-RATE_LIMIT = 0.75                 # seconds between URLs (reduced)
-BATCH_SIZE_APPEND = 100           # bigger batch to cut API calls
+WAIT_VISIBLE_TIMEOUT = 6          # shorter explicit waits
+RATE_LIMIT = 0.75                 # faster per-URL throttle
+BATCH_SIZE_APPEND = 100           # larger batch to cut API calls
 MAX_RETRIES_SCRAPE = 2
 MAX_RETRIES_APPEND = 4
 
-# Read slice bounds from env (matrix)
+# Matrix slice from env
 START_INDEX = int(os.getenv("START_INDEX", "1"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "200"))
 
@@ -43,13 +45,13 @@ try:
 except Exception as e:
     print(f"✗ Sheets access error: {e}"); exit(1)
 
-company_list = sheet_main.col_values(5)  # URLs
+company_list = sheet_main.col_values(5)  # URLs (1-indexed semantics later)
 name_list = sheet_main.col_values(1)     # Names
 n = len(company_list)
 current_date = date.today().strftime("%m/%d/%Y")
 print(f"✓ Loaded {n} companies")
 
-# Compute slice
+# Compute unique slice for this matrix batch
 start = max(1, START_INDEX)
 end = min(n, start + BATCH_SIZE - 1)
 print(f"Processing slice: {start}..{end}")
@@ -58,7 +60,6 @@ print(f"Processing slice: {start}..{end}")
 print("\n[2/5] Starting Chrome browser...")
 chrome_options = Options()
 if HEADLESS_MODE:
-    # Prefer stable headless flag for CI environments
     chrome_options.add_argument("--headless=new")
 chrome_options.add_argument("--disable-gpu")
 chrome_options.add_argument("--no-sandbox")
@@ -67,7 +68,8 @@ chrome_options.add_argument("--disable-blink-features=AutomationControlled")
 chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
 chrome_options.add_experimental_option('useAutomationExtension', False)
 
-driver = webdriver.Chrome(options=chrome_options)
+service = Service(ChromeDriverManager().install())  # auto-match Chrome version
+driver = webdriver.Chrome(service=service, options=chrome_options)
 driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
 driver.set_window_size(1600, 1000)
 wait = WebDriverWait(driver, WAIT_VISIBLE_TIMEOUT)
@@ -85,14 +87,13 @@ try:
     cookies = json.loads(cookies_json)
     for ck in cookies:
         c = dict(ck)
-        c.pop('sameSite', None)   # Selenium cookie shape constraints
+        c.pop('sameSite', None)   # keep Selenium cookie schema clean
         c.pop('expiry', None)
         try:
             driver.add_cookie(c)
         except Exception:
             pass
     driver.refresh()
-    # Quick check for login
     time.sleep(2.0)
     if ("Sign in" in driver.page_source) or ("Log in" in driver.page_source):
         print("⚠ Session looks expired; aborting."); driver.quit(); exit(1)
@@ -104,18 +105,15 @@ except Exception as e:
 def scrape_tradingview_values(url, retry=0):
     try:
         driver.get(url)
-        # Try minimal explicit wait for key containers if any
+        # minimal condition on navigation
         try:
             wait.until(lambda d: "tradingview" in d.current_url.lower())
         except Exception:
             pass
 
-        # Small pause to allow dynamic render
-        time.sleep(0.8)
-        html = driver.page_source
-        soup = BeautifulSoup(html, "html.parser")
+        time.sleep(0.8)  # small render allowance
+        soup = BeautifulSoup(driver.page_source, "html.parser")
 
-        # Priority classes
         values = [n.get_text(strip=True) for n in soup.find_all("div", class_="valueValue-l31H9iuA")]
         if not values:
             nodes = soup.find_all("div", attrs={"data-name": True})
@@ -172,8 +170,7 @@ for i in range(start, end + 1):
 
     vals = scrape_tradingview_values(url)
     if vals:
-        row = [name, current_date] + vals
-        buffer.append(row)
+        buffer.append([name, current_date] + vals)
         success += 1
         print(f"✓ {len(vals)} values")
         if len(buffer) >= BATCH_SIZE_APPEND:
@@ -183,8 +180,7 @@ for i in range(start, end + 1):
         print("✗ No values")
         fail += 1
 
-    # Light rate limit
-    time.sleep(RATE_LIMIT)
+    time.sleep(RATE_LIMIT)  # light throttle
 
 print("\nFlushing remaining rows...")
 flush_buffer()

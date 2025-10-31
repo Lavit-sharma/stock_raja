@@ -2,7 +2,7 @@ name: Parallel Stock Scraper (Logged-In, 10x Parallel)
 
 on:
   schedule:
-    - cron: '30 3 * * *'   # Daily at 03:30 UTC
+    - cron: '30 3 * * *'  # Daily at 03:30 UTC
   workflow_dispatch:
 
 jobs:
@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
+      # This matrix defines 10 parallel jobs
       matrix:
         batch: [1,2,3,4,5,6,7,8,9,10]
       max-parallel: 10
@@ -22,20 +23,18 @@ jobs:
       - name: Show commit SHA
         run: echo "Running commit ${{ github.sha }}"
 
-      - name: Install Chrome
-        run: |
-          set -e
-          curl -fsSL "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" -o chrome.deb
-          sudo dpkg -i chrome.deb || sudo apt-get -f install -y
-          google-chrome --version || true
+      # --- REMOVED: Install Chrome step ---
+      # WebDriverManager now handles the driver, and Chromium is often pre-installed.
+      # If you face issues, you can uncomment this block.
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'  # optional but recommended
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
+          sudo apt-get update && sudo apt-get install -y chromium-browser # Ensure Chromium is ready
           python -m pip install --upgrade pip
           pip install gspread selenium beautifulsoup4 google-api-core packaging webdriver-manager
 
@@ -45,7 +44,9 @@ jobs:
         env:
           MATRIX_BATCH: ${{ matrix.batch }}
         run: |
-          START=$(( ( ${MATRIX_BATCH} - 1 ) * 200 + 1 ))   # 1,201,401,...
+          # The list is 0-indexed in Python, but gspread.col_values(5) returns a 1-indexed list 
+          # The logic is correct: Batch 1 starts at index 1 (the header is skipped in Python list slicing)
+          START=$(( ( ${MATRIX_BATCH} - 1 ) * 200 + 1 ))  # 1, 201, 401, ...
           echo "start=${START}" >> "$GITHUB_OUTPUT"
           echo "size=200" >> "$GITHUB_OUTPUT"
 
@@ -54,7 +55,8 @@ jobs:
         env:
           MATRIX_BATCH: ${{ matrix.batch }}
         run: |
-          SLEEP=$(( ( ${MATRIX_BATCH} - 1 ) * 10 ))  # 0s,10s,...90s
+          # Staggering is crucial to prevent all 10 jobs from hitting Google Sheets/TradingView simultaneously.
+          SLEEP=$(( ( ${MATRIX_BATCH} - 1 ) * 15 ))  # Increased stagger to 15s (0s, 15s, 30s,...)
           echo "Staggering ${SLEEP}s"
           sleep "${SLEEP}"
 
@@ -66,4 +68,4 @@ jobs:
           BATCH_SIZE: ${{ steps.calc.outputs.size }}
         run: |
           echo "Batch ${{ matrix.batch }}: START_INDEX=$START_INDEX, SIZE=$BATCH_SIZE"
-          python run_scraper.py
+          python run_scraper.py # Assuming your python file is named run_scraper.py

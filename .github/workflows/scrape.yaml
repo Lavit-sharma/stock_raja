@@ -1,14 +1,13 @@
-name: Parallel Stock Scraper (Logged-In, 10x Parallel)
+name: Parallel Stock Scraper (Stable, 10x Parallel)
 
 on:
   schedule:
-    - cron: '30 3 * * *'  # Daily at 03:30 UTC
+    - cron: '30 3 * * *'   # Daily 03:30 UTC
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-
     strategy:
       matrix:
         batch: [1,2,3,4,5,6,7,8,9,10]
@@ -16,11 +15,13 @@ jobs:
       fail-fast: false
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Show commit SHA
-        run: echo "Running commit ${{ github.sha }}"
+      - name: Install Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser
+          chromium-browser --version
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -29,35 +30,24 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y chromium-browser
           python -m pip install --upgrade pip
           pip install gspread selenium beautifulsoup4 google-api-core packaging webdriver-manager
 
-      - name: Calculate start index
+      - name: Calculate slice
         id: calc
-        shell: bash
-        env:
-          MATRIX_BATCH: ${{ matrix.batch }}
         run: |
-          START=$(( ( ${MATRIX_BATCH} - 1 ) * 200 + 1 ))
+          START=$(( ( ${{ matrix.batch }} - 1 ) * 200 + 1 ))
           echo "start=${START}" >> "$GITHUB_OUTPUT"
           echo "size=200" >> "$GITHUB_OUTPUT"
 
-      - name: Stagger start
-        shell: bash
-        env:
-          MATRIX_BATCH: ${{ matrix.batch }}
-        run: |
-          SLEEP=$(( ( ${MATRIX_BATCH} - 1 ) * 15 ))
-          echo "Staggering ${SLEEP}s"
-          sleep "${SLEEP}"
+      - name: Delay start
+        run: sleep $(( ( ${{ matrix.batch }} - 1 ) * 15 ))
 
-      - name: Run batch
+      - name: Run scraper
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
           START_INDEX: ${{ steps.calc.outputs.start }}
           BATCH_SIZE: ${{ steps.calc.outputs.size }}
         run: |
-          echo "Batch ${{ matrix.batch }}: START_INDEX=$START_INDEX, SIZE=$BATCH_SIZE"
           python run_scraper.py

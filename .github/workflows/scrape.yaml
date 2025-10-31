@@ -1,13 +1,14 @@
-name: TradingView Scraper
+name: Parallel Stock Scraper (Logged-In, 10x Parallel)
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '0 3 * * *'  # daily at 03:00 UTC
+    - cron: '30 3 * * *'   # Daily at 03:30 UTC
+  workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+
     strategy:
       matrix:
         batch: [1,2,3,4,5,6,7,8,9,10]
@@ -18,41 +19,53 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Show commit SHA
+        run: echo "Running commit ${{ github.sha }}"
+
+      - name: Install Chrome
+        run: |
+          set -e
+          curl -fsSL "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" -o chrome.deb
+          sudo dpkg -i chrome.deb || sudo apt-get -f install -y
+          google-chrome --version || true
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.11'  # optional but recommended
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install selenium webdriver-manager beautifulsoup4 google-api-python-client
-
-      - name: Install Chromium
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser
-          chromium-browser --version || true
+          pip install gspread selenium beautifulsoup4 google-api-core packaging webdriver-manager
 
       - name: Calculate start index
         id: calc
+        shell: bash
+        env:
+          MATRIX_BATCH: ${{ matrix.batch }}
         run: |
-          START=$(( ( ${{ matrix.batch }} - 1 ) * 200 ))
-          echo "start_index=$START" >> $GITHUB_OUTPUT
-          echo "batch_size=200" >> $GITHUB_OUTPUT
+          START=$(( ( ${MATRIX_BATCH} - 1 ) * 200 + 1 ))   # 1,201,401,...
+          echo "start=${START}" >> "$GITHUB_OUTPUT"
+          echo "size=200" >> "$GITHUB_OUTPUT"
 
       - name: Stagger start
+        shell: bash
+        env:
+          MATRIX_BATCH: ${{ matrix.batch }}
         run: |
-          SLEEP=$(( ( ${{ matrix.batch }} - 1 ) * 10 ))  # stagger 0s,10s,20s...
-          echo "Sleeping ${SLEEP}s before starting"
+          SLEEP=$(( ( ${MATRIX_BATCH} - 1 ) * 10 ))  # 0s,10s,...90s
+          echo "Staggering ${SLEEP}s"
           sleep "${SLEEP}"
 
-      - name: Run scraper batch
+      - name: Run batch
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          BATCH_SIZE: ${{ steps.calc.outputs.batch_size }}
-          START_INDEX: ${{ steps.calc.outputs.start_index }}
+          COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
+          START_INDEX: ${{ steps.calc.outputs.start }}
+          BATCH_SIZE: ${{ steps.calc.outputs.size }}
         run: |
-          echo "Running batch ${{ matrix.batch }}: START_INDEX=$START_INDEX, BATCH_SIZE=$BATCH_SIZE"
+          echo "Batch ${{ matrix.batch }}: START_INDEX=$START_INDEX, SIZE=$BATCH_SIZE"
           python run_scraper.py
+
+

@@ -1,9 +1,9 @@
-name: Parallel TradingView Scrape (10x stagger)
+name: TradingView Scraper
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 3 * * *'  # daily
+    - cron: '0 3 * * *'  # daily at 03:00 UTC
 
 jobs:
   scrape:
@@ -15,45 +15,43 @@ jobs:
       fail-fast: false
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install chrome (chromium)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser
-          chromium-browser --version || true
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install selenium webdriver-manager beautifulsoup4 gspread google-api-python-client
 
-      - name: Compute start index
+      - name: Install Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser
+          chromium-browser --version || true
+
+      - name: Calculate start index
         id: calc
         run: |
-          START=$(( ( ${{ matrix.batch }} - 1 ) * 200 + 1 ))
-          echo "start=${START}" >> "$GITHUB_OUTPUT"
-          echo "size=200" >> "$GITHUB_OUTPUT"
+          START=$(( ( ${MATRIX_BATCH} - 1 ) * 200 ))
+          echo "start_index=$START" >> $GITHUB_OUTPUT
+          echo "batch_size=200" >> $GITHUB_OUTPUT
 
-      - name: Stagger start (2 minutes per batch)
-        run: sleep $(( ( ${{ matrix.batch }} - 1 ) * 120 ))
+      - name: Stagger start
+        run: |
+          SLEEP=$(( ( ${MATRIX_BATCH} - 1 ) * 10 ))  # staggered start 0s,10s,20s...
+          echo "Sleeping ${SLEEP}s before starting"
+          sleep "${SLEEP}"
 
-      - name: Run scraper
+      - name: Run scraper batch
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
-          START_INDEX: ${{ steps.calc.outputs.start }}
-          BATCH_SIZE: ${{ steps.calc.outputs.size }}
+          BATCH_SIZE: ${{ steps.calc.outputs.batch_size }}
+          START_INDEX: ${{ steps.calc.outputs.start_index }}
         run: |
-          # prepare file with URLs (your repo should contain a urls list or you can modify to read from Google Sheets)
-          # Example: read urls.txt sliced by START_INDEX and BATCH_SIZE (assuming file exists)
-          START=${START_INDEX}
-          SIZE=${BATCH_SIZE}
-          # create slice file
-          awk "NR>=(START) && NR<=(START+SIZE-1)" urls.txt > slice_urls.txt || true
-          python run_tradingview_scraper.py --file slice_urls.txt --to-sheets
+          echo "Running batch ${{ matrix.batch }}: START_INDEX=$START_INDEX, BATCH_SIZE=$BATCH_SIZE"
+          python runscraper.py

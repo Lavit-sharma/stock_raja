@@ -2,16 +2,15 @@ name: Parallel Stock Scraper (Logged-In, 10x Parallel)
 
 on:
   schedule:
-    - cron: '30 3 * * *' # Daily at 03:30 UTC
+    - cron: '30 3 * * *'
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-
     strategy:
       matrix:
-        batch: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] # 10 parallel batches
+        batch: [1,2,3,4,5,6,7,8,9,10]
       max-parallel: 10
       fail-fast: false
 
@@ -45,7 +44,7 @@ jobs:
         env:
           MATRIX_BATCH: ${{ matrix.batch }}
         run: |
-          START=$(( ( ${MATRIX_BATCH} - 1 ) * 200 + 1 ))   # 1, 201, 401, ...
+          START=$(( ( ${MATRIX_BATCH} - 1 ) * 200 + 1 ))
           echo "start=${START}" >> "$GITHUB_OUTPUT"
           echo "size=200" >> "$GITHUB_OUTPUT"
 
@@ -54,7 +53,7 @@ jobs:
         env:
           MATRIX_BATCH: ${{ matrix.batch }}
         run: |
-          SLEEP=$(( ( ${MATRIX_BATCH} - 1 ) * 10 ))  # 0s,10s,20s... smooth load
+          SLEEP=$(( ( ${MATRIX_BATCH} - 1 ) * 10 ))
           echo "Staggering ${SLEEP}s"
           sleep "${SLEEP}"
 
@@ -67,4 +66,3 @@ jobs:
         run: |
           echo "Batch ${{ matrix.batch }}: START_INDEX=$START_INDEX, SIZE=$BATCH_SIZE"
           python run_scraper.py
-

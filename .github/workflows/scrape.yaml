@@ -1,8 +1,8 @@
-name: Parallel Stock Scraper (Stable, 10x Parallel)
+name: Parallel Stock Scraper (Stable)
 
 on:
   schedule:
-    - cron: '30 3 * * *'   # Daily 03:30 UTC
+    - cron: '30 3 * * *'
   workflow_dispatch:
 
 jobs:
@@ -20,8 +20,8 @@ jobs:
       - name: Install Chrome
         run: |
           sudo apt-get update
-          sudo apt-get install -y chromium-browser
-          chromium-browser --version
+          curl -fsSL "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" -o chrome.deb
+          sudo dpkg -i chrome.deb || sudo apt-get -f install -y
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -30,10 +30,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install gspread selenium beautifulsoup4 google-api-core packaging webdriver-manager
+          pip install --upgrade pip
+          pip install selenium gspread beautifulsoup4 google-api-core webdriver-manager
 
-      - name: Calculate slice
+      - name: Compute batch
         id: calc
         run: |
           START=$(( ( ${{ matrix.batch }} - 1 ) * 200 + 1 ))
@@ -41,7 +41,7 @@ jobs:
           echo "size=200" >> "$GITHUB_OUTPUT"
 
       - name: Delay start
-        run: sleep $(( ( ${{ matrix.batch }} - 1 ) * 15 ))
+        run: sleep $(( ( ${{ matrix.batch }} - 1 ) * 10 ))
 
       - name: Run scraper
         env:
@@ -49,5 +49,4 @@ jobs:
           COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
           START_INDEX: ${{ steps.calc.outputs.start }}
           BATCH_SIZE: ${{ steps.calc.outputs.size }}
-        run: |
-          python run_scraper.py
+        run: python run_scraper.py

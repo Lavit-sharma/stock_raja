@@ -37,13 +37,13 @@ jobs:
       - name: Calculate start index
         id: calc
         run: |
-          START=$(( ( ${MATRIX_BATCH} - 1 ) * 200 ))
+          START=$(( ( ${{ matrix.batch }} - 1 ) * 200 ))
           echo "start_index=$START" >> $GITHUB_OUTPUT
           echo "batch_size=200" >> $GITHUB_OUTPUT
 
       - name: Stagger start
         run: |
-          SLEEP=$(( ( ${MATRIX_BATCH} - 1 ) * 10 ))  # staggered start 0s,10s,20s...
+          SLEEP=$(( ( ${{ matrix.batch }} - 1 ) * 10 ))  # stagger 0s,10s,20s...
           echo "Sleeping ${SLEEP}s before starting"
           sleep "${SLEEP}"
 

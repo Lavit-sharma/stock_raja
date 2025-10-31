@@ -1,3 +1,4 @@
+# run_scraper.py
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -11,13 +12,14 @@ from datetime import date
 import json, os, time, re
 
 print("="*70)
-print("TradingView Stock Scraper (Logged-In, Robust Extract)")
+print("TradingView Stock Scraper (Logged-In, Targeted Selectors)")
 print("="*70)
 
 # -------- CONFIG --------
 HEADLESS_MODE = True
 PAGE_LOAD_TIMEOUT = 25
 WAIT_VISIBLE_TIMEOUT = 10
+FIELD_WAIT_TIMEOUT = 4           # per-field probing
 RATE_LIMIT = 0.8
 BATCH_SIZE_APPEND = 100
 MAX_RETRIES_SCRAPE = 2
@@ -39,7 +41,7 @@ try:
         sheet_data = gc.open('Tradingview Data Reel Experimental May').worksheet('Sheet5')
     except gspread.WorksheetNotFound:
         sh = gc.open('Tradingview Data Reel Experimental May')
-        sheet_data = sh.add_worksheet(title='Sheet5', rows=1000, cols=26)
+        sheet_data = sh.add_worksheet(title='Sheet5', rows=2000, cols=20)
 except Exception as e:
     print(f"✗ Sheets access error: {e}"); exit(1)
 
@@ -92,16 +94,16 @@ try:
     driver.refresh()
     time.sleep(2.0)
     if ("Sign in" in driver.page_source) or ("Log in" in driver.page_source):
-        print("⚠ Session looks expired; abort."); driver.quit(); exit(1)
+        print("✗ Session invalid; refresh cookies"); driver.quit(); exit(1)
     print("✓ Session loaded")
 except Exception as e:
     print(f"✗ Cookie load error: {e}"); driver.quit(); exit(1)
 
-# -------- NORMALIZATION HELPERS --------
+# -------- NORMALIZATION --------
 THIN_SPACE = u'\u2009'
 NARROW_NBSP = u'\u202f'
 NBSP = u'\u00a0'
-def to_ascii(s: str) -> str:
+def norm(s: str) -> str:
     return s.replace(THIN_SPACE,'').replace(NARROW_NBSP,'').replace(NBSP,'').strip()
 
 km_re = re.compile(r'^\s*([+\-]?\d+(?:\.\d+)?)\s*([KkMm])\s*$')
@@ -110,16 +112,16 @@ pct_re = re.compile(r'^\s*[+\-]?\d+(?:\.\d+)?\s*%\s*$')
 chg_re = re.compile(r'^\s*([+\-]?\d+(?:\.\d+)?)\s*\(\s*([+\-]?\d+(?:\.\d+)?)%\s*\)\s*$')
 
 def to_float(s):
-    t = to_ascii(s).replace(',', '').replace('−','-')
+    t = norm(s).replace(',', '').replace('−','-')
     try:
         return float(t)
     except:
         return None
 
-def clean_cell(text):
-    if not text: 
+def clean_num(text):
+    if not text:
         return None
-    t = to_ascii(text).replace('−','-')
+    t = norm(text).replace('−','-')
     if t in ('', '-', '—'):
         return None
     m = km_re.match(t)
@@ -127,22 +129,21 @@ def clean_cell(text):
         base = float(m.group(1))
         return base * (1_000_000 if m.group(2).lower()=='m' else 1_000)
     if pct_re.match(t):
-        return t  # Sheets will parse USER_ENTERED percentages
+        return t
     if num_re.match(t):
         return to_float(t)
-    return t
+    return None
 
 def split_change_token(s):
-    if not isinstance(s, str): 
+    if not isinstance(s, str):
         return (None, None)
-    m = chg_re.match(to_ascii(s))
+    m = chg_re.match(norm(s))
     if not m:
         return (None, None)
     return (to_float(m.group(1)), to_float(m.group(2)))
 
-# -------- WAIT HELPERS --------
+# -------- WAITS --------
 def wait_core_loaded():
-    # Prefer stable containers on symbol pages
     try:
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[data-name='symbol-header']")))
     except Exception:
@@ -152,164 +153,171 @@ def wait_core_loaded():
     except Exception:
         pass
 
-# -------- FIELD EXTRACTORS --------
-def extract_fields(soup):
-    """
-    Try multiple selector sets to assemble:
-    Open, High, Low, Close, Change, Change%, Volume
-    If missing, keep None to ensure fixed schema.
-    """
-    open_v = high_v = low_v = close_v = chg = chg_pct = vol = None
+def wait_any_numeric(timeout=FIELD_WAIT_TIMEOUT):
+    w = WebDriverWait(driver, timeout)
+    try:
+        w.until(lambda d: any(ch.isdigit() for ch in d.page_source[-5000:]))
+    except Exception:
+        pass
 
-    # Strategy A: scan labeled stat rows common in headers/overviews
-    # Look for labels near numeric siblings
-    label_map = {'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close', 'volume': 'volume'}
-    texts = []
-    # consider first ~200 data-name nodes to limit work
-    for node in soup.select("[data-name]")[:200]:
-        t = node.get_text(" ", strip=True)
-        if t:
-            texts.append(t)
-
-    # Flatten text tokens, pick plausible numbers and labeled pairs
-    # Quick heuristics
-    candidates = []
-    for t in texts:
-        parts = [p for p in re.split(r'\s+', to_ascii(t)) if p]
-        for p in parts:
-            c = clean_cell(p)
-            if c is None:
-                continue
-            candidates.append((p.lower(), c, t))
-
-    # Assign numbers based on label hints from the same block text
-    for raw, cval, full in candidates:
-        lower_full = full.lower()
-        if open_v is None and 'open' in lower_full and isinstance(cval, (int, float, float)):
-            open_v = cval
-        if high_v is None and 'high' in lower_full and isinstance(cval, (int, float, float)):
-            high_v = cval
-        if low_v is None and 'low' in lower_full and isinstance(cval, (int, float, float)):
-            low_v = cval
-        if close_v is None and ('close' in lower_full or 'prev close' in lower_full) and isinstance(cval, (int, float, float)):
-            close_v = cval
-        if vol is None and 'vol' in lower_full and isinstance(cval, (int, float, float)):
-            vol = cval
-
-    # Strategy B: fallback to known numeric clusters
-    if open_v is None or high_v is None or low_v is None or close_v is None or vol is None:
-        cluster = []
+# -------- FIELD EXTRACTORS (multi-path) --------
+def extract_ohlc(soup):
+    # Strategy 1: labeled rows near data-name containers
+    o=h=l=c=None
+    blocks = soup.select("[data-name]")[:220]
+    for node in blocks:
+        text = norm(node.get_text(" ", strip=True)).lower()
+        if not text:
+            continue
+        # Try to find nearby numeric tokens in the same block
+        nums = []
+        for el in node.select("span,div"):
+            val = clean_num(el.get_text(strip=True))
+            if val is not None and isinstance(val, (int, float, float)):
+                nums.append(val)
+        if 'open' in text and o is None and nums:
+            o = nums[0]
+        if 'high' in text and h is None and nums:
+            h = nums[0]
+        if 'low' in text and l is None and nums:
+            l = nums[0]
+        if ('close' in text or 'prev close' in text) and c is None and nums:
+            c = nums[0]
+    # Strategy 2: generic numeric clusters order-mapped
+    if None in (o,h,l,c):
+        cluster=[]
         for el in soup.select("div.valueValue-l31H9iuA, span, div"):
             txt = el.get_text(strip=True)
-            c = clean_cell(txt)
-            if c is None:
-                continue
-            if isinstance(c, (int, float)) or (isinstance(c, str) and pct_re.match(str(c))):
-                cluster.append(c)
-            if len(cluster) >= 40:
+            v = clean_num(txt)
+            if isinstance(v, (int, float, float)):
+                cluster.append(v)
+            if len(cluster)>=40:
                 break
-        # Try map first plausible 4 numbers to OHLC if missing
-        nums = [x for x in cluster if isinstance(x, (int, float))]
-        if open_v is None and len(nums) >= 1:
-            open_v = nums[0]
-        if high_v is None and len(nums) >= 2:
-            high_v = nums[1]
-        if low_v is None and len(nums) >= 3:
-            low_v = nums[2]
-        if close_v is None and len(nums) >= 4:
-            close_v = nums[3]
-        # Volume as largest number beyond OHLC range
-        if vol is None and len(nums) >= 5:
-            vol = max(nums[4:])
+        nums = cluster
+        if o is None and len(nums)>=1: o = nums[0]
+        if h is None and len(nums)>=2: h = nums[1]
+        if l is None and len(nums)>=3: l = nums[2]
+        if c is None and len(nums)>=4: c = nums[3]
+    return o,h,l,c
 
-        # Change% as first percentage token
-        pcts = [x for x in cluster if isinstance(x, str) and pct_re.match(x)]
-        if pcts and chg_pct is None:
-            chg_pct = to_float(pcts[0].replace('%',''))
-
-    # Strategy C: parse combined change token if visible anywhere
-    # Search limited selection to avoid noise
+def extract_change_and_volume(soup):
+    chg = chg_pct = vol = None
+    # Strategy 1: combined token
     for el in soup.select("span, div")[:200]:
-        t = el.get_text(strip=True)
-        if not t:
-            continue
-        a, b = split_change_token(t)
+        a,b = split_change_token(el.get_text(strip=True))
         if a is not None or b is not None:
-            if chg is None:
-                chg = a
-            if chg_pct is None:
-                chg_pct = b
+            if chg is None: chg = a
+            if chg_pct is None: chg_pct = b
             break
+    # Strategy 2: percent token alone
+    if chg_pct is None:
+        for el in soup.select("span, div")[:200]:
+            t = el.get_text(strip=True)
+            if pct_re.match(norm(t)):
+                chg_pct = to_float(norm(t).replace('%',''))
+                break
+    # Strategy 3: volume hints
+    # Look for 'Vol' label in nearby text and take largest numeric in that block
+    for node in soup.select("[data-name]")[:220]:
+        text = norm(node.get_text(" ", strip=True)).lower()
+        if 'vol' in text or 'volume' in text:
+            nums=[]
+            for el in node.select("span,div"):
+                v = clean_num(el.get_text(strip=True))
+                if isinstance(v, (int, float, float)):
+                    nums.append(v)
+            if nums:
+                vol = max(nums)
+                break
+    # Fallback: pick a large number further down the page which likely is volume
+    if vol is None:
+        nums=[]
+        for el in soup.select("span, div"):
+            v = clean_num(el.get_text(strip=True))
+            if isinstance(v, (int, float, float)):
+                nums.append(v)
+            if len(nums)>=80:
+                break
+        if nums:
+            vol = max(nums)
+    return chg, chg_pct, vol
 
-    return open_v, high_v, low_v, close_v, chg, chg_pct, vol
-
-# -------- SCRAPE ONE --------
+# -------- SCRAPE ONE WITH PER-FIELD WAITS --------
 def scrape_symbol(url, retry=0):
     try:
         driver.get(url)
         wait_core_loaded()
-        time.sleep(0.8)
+        wait_any_numeric()
+        time.sleep(0.6)
         soup = BeautifulSoup(driver.page_source, "html.parser")
-        o,h,l,c,chg,chg_pct,vol = extract_fields(soup)
+        o,h,l,c = extract_ohlc(soup)
+        chg, chg_pct, vol = extract_change_and_volume(soup)
         return o,h,l,c,chg,chg_pct,vol
     except Exception as e:
         if retry < MAX_RETRIES_SCRAPE:
-            time.sleep(1.5 * (retry + 1))
+            time.sleep(1.5*(retry+1))
             return scrape_symbol(url, retry+1)
-        else:
-            print(f"✗ Failed {url}: {e}")
-            return (None, None, None, None, None, None, None)
+        print(f"✗ Failed {url}: {e}")
+        return (None,None,None,None,None,None,None)
 
 # -------- APPEND BUFFER --------
-buffer = []
+buffer=[]
 
 def flush_buffer():
     if not buffer:
         return
+    to_send = list(buffer)
+    count = len(to_send)
     backoff = 2
-    for attempt in range(1, MAX_RETRIES_APPEND + 1):
+    for attempt in range(1, MAX_RETRIES_APPEND+1):
         try:
+            print(f"Appending {count} rows...")
             sheet_data.spreadsheet.values_append(
                 'Sheet5!A1',
                 {'valueInputOption':'USER_ENTERED','insertDataOption':'INSERT_ROWS'},
-                {'values': buffer}
+                {'values': to_send}
             )
             buffer.clear()
+            print("✓ Append OK")
             return
         except Exception as e:
             if attempt == MAX_RETRIES_APPEND:
                 print(f"✗ Append failed after {attempt} attempts: {e}")
                 return
-            print(f"Append retry {attempt} in {backoff}s due to: {e}")
+            print(f"Retry append in {backoff}s due to: {e}")
             time.sleep(backoff)
-            backoff = min(30, backoff * 2)
+            backoff = min(30, backoff*2)
 
 # -------- MAIN --------
 print("\n[4/6] Scraping slice...")
 success = fail = 0
-for i in range(start, end + 1):
+for i in range(start, end+1):
     name = names[i] if i < len(names) else "Unknown"
     url = urls[i]
+    if not url:
+        print(f"[{i}] {name} -> no URL"); 
+        row=[name, today, None,None,None,None,None,None,None]
+        buffer.append(row)
+        continue
+
     print(f"[{i}] {name} -> scrape", end=" ")
-
     o,h,l,c,chg,chg_pct,vol = scrape_symbol(url)
-
-    # Always push a fixed 9-column row: Name, Date, O,H,L,C, Change, Change%, Volume
-    row = [name, today, o, h, l, c, chg, chg_pct, vol]
-    # Count success if we have at least Close or Volume or 2+ numeric fields
-    have_vals = sum(1 for v in [o,h,l,c,chg,chg_pct,vol] if v is not None)
-    if have_vals >= 2:
+    found = {
+        'O': o is not None, 'H': h is not None, 'L': l is not None,
+        'C': c is not None, 'chg': chg is not None, '%': chg_pct is not None, 'Vol': vol is not None
+    }
+    have_vals = sum(found.values())
+    if have_vals >= 3:
         success += 1
-        print("✓")
+        print("✓", found)
     else:
         fail += 1
-        print("… partial")
+        print("… partial", found)
 
+    row = [name, today, o, h, l, c, chg, chg_pct, vol]
     buffer.append(row)
     if len(buffer) >= BATCH_SIZE_APPEND:
-        print(" [APPEND]")
         flush_buffer()
-
     time.sleep(RATE_LIMIT)
 
 print("\n[5/6] Flushing remaining rows...")
@@ -319,5 +327,5 @@ print("\n[6/6] Closing browser")
 driver.quit()
 
 print("\n" + "="*70)
-print(f"DONE | Slice {start}-{end} | Success {success} | Fail {fail}")
+print(f"DONE | Slice {start}-{end} | Success {success} | Partial {fail}")
 print("="*70)

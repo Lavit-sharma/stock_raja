@@ -1,107 +1,61 @@
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from bs4 import BeautifulSoup
+import requests
 import gspread
-from datetime import date
-import os
 import time
-import json
+from bs4 import BeautifulSoup
+from google.oauth2.service_account import Credentials
 
-# ---------------- GOOGLE SHEET SETUP ---------------- #
-creds_json = os.environ.get("GOOGLE_CREDENTIALS")
-if not creds_json:
-    raise Exception("GOOGLE_CREDENTIALS secret missing")
+# Google Sheet setup
+creds = Credentials.from_service_account_file("creds.json")
+client = gspread.authorize(creds)
+sheet = client.open("Stock Data").sheet1  # Change your sheet name
 
-creds_dict = json.loads(creds_json)
-gc = gspread.service_account_from_dict(creds_dict)
+# List of stock URLs to scrape (replace with yours)
+urls = [
+    "https://www.tradingview.com/symbols/NSE-TCS/",
+    "https://www.tradingview.com/symbols/NSE-INFY/",
+]
 
-sheet_main = gc.open('Stock List').worksheet('Sheet1')
-sheet_data = gc.open('Tradingview Data Reel Experimental May').worksheet('Sheet5')
+def get_field(soup, label):
+    """Extract numeric field value from label"""
+    tag = soup.find("div", string=lambda t: t and label in t)
+    if tag:
+        parent = tag.find_parent("div", class_="row-hQx6xNJo")
+        if parent:
+            value = parent.find("span", class_="value-DHeKxVBO")
+            if value:
+                return value.text.strip()
+    return None
 
-company_list = sheet_main.col_values(5)  # URLs
-name_list = sheet_main.col_values(1)     # Names
-current_date = date.today().strftime("%m/%d/%Y")
+def scrape_stock(url):
+    """Scrape required fields and wait until valid"""
+    for attempt in range(10):  # retry up to 10 times
+        print(f"Scraping attempt {attempt+1} for {url}")
+        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(response.text, "html.parser")
 
-# ---------------- CHROME SETUP ---------------- #
-chrome_options = Options()
-chrome_options.add_argument("--headless=new")
-chrome_options.add_argument("--disable-gpu")
-chrome_options.add_argument("--no-sandbox")
-chrome_options.add_argument("--disable-dev-shm-usage")
-chrome_options.add_argument("--window-size=1920,1080")
-chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-chrome_options.add_experimental_option('useAutomationExtension', False)
+        data = {
+            "Volume": get_field(soup, "Volume"),
+            "Market Cap": get_field(soup, "Market Cap"),
+            "P/E Ratio": get_field(soup, "P/E Ratio"),
+            "Dividend Yield": get_field(soup, "Dividend Yield"),
+        }
 
-driver_service = Service("/usr/bin/chromedriver")  # GitHub Actions path
+        # Check if all values are valid
+        if all(data.values()):
+            print(f"✅ Data fetched for {url}: {data}")
+            return data
+        else:
+            print("⚠️ Missing fields, retrying in 5s...")
+            time.sleep(5)
 
-# ---------------- SCRAPE FUNCTION ---------------- #
-def scrape_tradingview(url):
-    driver = webdriver.Chrome(service=driver_service, options=chrome_options)
-    driver.set_window_size(1920, 1080)
-    try:
-        driver.get(url)
+    print(f"❌ Failed to fetch valid data for {url}")
+    return None
 
-        # Wait until 'Fundamentals' or key stats appear
-        WebDriverWait(driver, 30).until(
-            EC.presence_of_all_elements_located((By.TAG_NAME, "body"))
-        )
-
-        # Wait up to 40s until the fields load completely
-        waited = 0
-        while waited < 40:
-            soup = BeautifulSoup(driver.page_source, "html.parser")
-            info = {}
-            for label, field in [
-                ("Volume", "Volume"),
-                ("Market Cap", "Market Cap"),
-                ("P/E Ratio", "P/E Ratio"),
-                ("Dividend Yield", "Dividend Yield")
-            ]:
-                el = soup.find("span", string=lambda x: x and field in x)
-                if el:
-                    val = el.find_next("span")
-                    if val:
-                        info[field] = val.get_text(strip=True)
-            if len(info) == 4:
-                return info
-            time.sleep(2)
-            waited += 2
-
-        print(f"Timeout: Some fields missing for {url}")
-        return info
-
-    except Exception as e:
-        print(f"Error scraping {url}: {e}")
-        return {}
-
-    finally:
-        driver.quit()
-
-
-# ---------------- MAIN LOOP ---------------- #
-for i, url in enumerate(company_list):
-    name = name_list[i] if i < len(name_list) else "Unknown"
-
-    if not url or not url.startswith("http"):
-        print(f"Skipping invalid URL for {name}: {url}")
-        continue
-
-    print(f"[{i}] Scraping: {name}")
-    data = scrape_tradingview(url)
-
-    if data and len(data) == 4:
-        row = [name, current_date, data["Volume"], data["Market Cap"], data["P/E Ratio"], data["Dividend Yield"]]
-        try:
-            sheet_data.append_row(row, table_range="A1")
-            print(f"✓ Added {name}")
-        except Exception as e:
-            print(f"⚠ Failed to append {name}: {e}")
+# Main loop
+for url in urls:
+    result = scrape_stock(url)
+    if result:
+        sheet.append_row([url, result["Volume"], result["Market Cap"], result["P/E Ratio"], result["Dividend Yield"]])
+        print(f"✅ Appended data for {url}")
     else:
-        print(f"✗ Incomplete data for {name}: {data}")
-
-    time.sleep(1)  # gentle delay between scrapes
+        sheet.append_row([url, "N/A", "N/A", "N/A", "N/A"])

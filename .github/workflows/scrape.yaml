@@ -1,16 +1,16 @@
-name: Run TradingView Scraper
+name: Stock Scraper Automation
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 3 * * *" # Runs daily at 03:30 UTC
+    - cron: "0 4 * * *" # daily at 04:00 UTC
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -20,11 +20,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser chromium-chromedriver
-          pip install selenium gspread beautifulsoup4
+          pip install selenium gspread google-auth BeautifulSoup4 webdriver-manager
 
       - name: Run scraper
         env:
-          GITHUB_ACTIONS: true
+          GOOGLE_SHEET_CREDENTIALS: ${{ secrets.GOOGLE_SHEET_CREDENTIALS }}
         run: python run_scraper.py

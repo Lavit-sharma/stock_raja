@@ -1,57 +1,34 @@
-name: Tradingview Data Scraper
+name: Run TradingView Scraper
 
+# Trigger workflow on push to main or manual trigger
 on:
-  # Triggers the workflow every day at 10:00 AM UTC
-  schedule:
-    - cron: '0 10 * * *'
-  # Allows manual running from the Actions tab
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
-  scrape:
+  scraper:
     runs-on: ubuntu-latest
-    
+
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        
+      # 1. Checkout the repo
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # 2. Set up Python
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.x'
-          
-      - name: Install Dependencies
+          python-version: '3.10'  # or any version you use
+
+      # 3. Install dependencies
+      - name: Install dependencies
         run: |
-          # Install system-level dependencies for running Chrome headless
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-          
-          # Install Python dependencies
-          pip install selenium gspread beautifulsoup4
-          
-      - name: Restore Checkpoint (if exists)
-        # Tries to download the checkpoint file from a previous successful run
-        uses: actions/cache@v4
-        with:
-          path: checkpoint_new_1.txt
-          key: ${{ runner.os }}-checkpoint
-          restore-keys: |
-            ${{ runner.os }}-checkpoint-
-            
-      - name: Run Scraper Script
-        # Set environment variables securely
-        env:
-          GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
-        run: python scraper.py
-        
-      - name: Save Checkpoint
-        # Saves the updated checkpoint file for the next run
-        uses: actions/cache/save@v4
-        with:
-          path: checkpoint_new_1.txt
-          key: ${{ runner.os }}-checkpoint
-          
-      # Optional: Clean up to prevent large cache history
-      - name: Clean up cache (Optional)
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 4. Run scraper
+      - name: Run scraper
         run: |
-          echo "Cache cleanup completed."
+          python run_scraper.py

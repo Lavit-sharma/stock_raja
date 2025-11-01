@@ -1,7 +1,7 @@
-name: Run Scraper
+name: Run TradingView Scraper
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Allows manual triggering
 
 jobs:
   scrape:
@@ -11,8 +11,10 @@ jobs:
       TV_PASSWORD: ${{ secrets.TV_PASSWORD }}
       TV_COOKIES_B64: ${{ secrets.TV_COOKIES_B64 }}
       GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -20,7 +22,10 @@ jobs:
           python-version: 3.10
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install selenium gspread beautifulsoup4
 
       - name: Run scraper
         run: python run_scraper.py

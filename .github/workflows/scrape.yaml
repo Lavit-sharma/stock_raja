@@ -1,29 +1,57 @@
-name: TradingView Scraper
+name: Tradingview Data Scraper
 
 on:
-  workflow_dispatch:   # Manual trigger
+  # Triggers the workflow every day at 10:00 AM UTC
   schedule:
-    - cron: '0 3 * * *'  # Runs daily at 03:00 UTC
+    - cron: '0 10 * * *'
+  # Allows manual running from the Actions tab
+  workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-
+    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: 3.10  # Correct version
-
-      - name: Install dependencies
+          python-version: '3.x'
+          
+      - name: Install Dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install selenium gspread google-auth beautifulsoup4 webdriver-manager
-
-      - name: Run scraper
+          # Install system-level dependencies for running Chrome headless
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+          
+          # Install Python dependencies
+          pip install selenium gspread beautifulsoup4
+          
+      - name: Restore Checkpoint (if exists)
+        # Tries to download the checkpoint file from a previous successful run
+        uses: actions/cache@v4
+        with:
+          path: checkpoint_new_1.txt
+          key: ${{ runner.os }}-checkpoint
+          restore-keys: |
+            ${{ runner.os }}-checkpoint-
+            
+      - name: Run Scraper Script
+        # Set environment variables securely
         env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-        run: python run_scraper.py
+          GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
+        run: python scraper.py
+        
+      - name: Save Checkpoint
+        # Saves the updated checkpoint file for the next run
+        uses: actions/cache/save@v4
+        with:
+          path: checkpoint_new_1.txt
+          key: ${{ runner.os }}-checkpoint
+          
+      # Optional: Clean up to prevent large cache history
+      - name: Clean up cache (Optional)
+        run: |
+          echo "Cache cleanup completed."

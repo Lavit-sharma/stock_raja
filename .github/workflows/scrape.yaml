@@ -24,5 +24,5 @@ jobs:
 
       - name: Run scraper
         env:
-          GOOGLE_SHEET_CREDENTIALS: ${{ secrets.GOOGLE_SHEET_CREDENTIALS }}
+          GOOGLE_SHEET_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: python run_scraper.py

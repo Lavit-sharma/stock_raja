@@ -30,7 +30,7 @@ driver_service = Service(ChromeDriverManager().install())
 # Google Sheets Auth
 print("🔐 Authorizing Google Sheets...")
 try:
-    creds_json = os.getenv("GOOGLE_SHEET_CREDENTIALS")
+    creds_json = os.getenv("GOOGLE_CREDENTIALS")
     service_account_info = json.loads(creds_json)
     creds = Credentials.from_service_account_info(service_account_info)
     gc = gspread.authorize(creds)

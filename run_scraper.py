@@ -64,7 +64,7 @@ def scrape_tradingview(company_url):
                 except Exception:
                     pass
             driver.refresh()
-            time.sleep(4)  # increased settle time only, logic unchanged [web:39][web:58]
+            time.sleep(4)  # increased settle time only; logic unchanged [web:96][web:58]
         else:
             print("⚠️ cookies.json not found. The script might fail if login is required.")
             pass
@@ -72,17 +72,16 @@ def scrape_tradingview(company_url):
         # ✅ AFTER LOGIN, OPEN THE TARGET URL
         driver.get(company_url)
 
-        # Minimal navigation guard: wait for URL to actually change/commit before existing visibility wait
-        # This reduces repeats from parsing a previous page shell, without changing selectors or parse logic
+        # NEW: ensure navigation committed to a new URL before existing wait
         try:
             WebDriverWait(driver, 20).until(EC.url_changes("https://www.tradingview.com/"))
         except Exception:
-            pass  # continue to your existing wait even if URL check is inconclusive [web:93][web:95]
+            pass  # proceed regardless; this is a soft guard to avoid stale DOM parses [web:93][web:95]
 
         WebDriverWait(driver, 90).until(
             EC.visibility_of_element_located((By.XPATH,
                 '/html/body/div[2]/div/div[5]/div/div[1]/div/div[2]/div[1]/div[2]/div/div[1]/div[2]/div[2]/div[2]/div[2]/div'))
-        )  # only timeout increased, same locator and flow [web:39][web:58]
+        )  # extended timeout only; same locator [web:96][web:39]
 
         soup = BeautifulSoup(driver.page_source, "html.parser")
         values = [
@@ -114,8 +113,25 @@ for i, company_url in enumerate(company_list[last_i:], last_i):
     values = scrape_tradingview(company_url)
     if values:
         row = [name, current_date] + values
-        sheet_data.append_row(row, table_range='A1')
-        print(f"Successfully scraped and saved data for {name}.")
+
+        # NEW: simple last-row duplicate guard (Name + Date) to avoid repeat appends
+        try:
+            all_vals = sheet_data.get_all_values()
+            last_row_idx = len(all_vals)
+            if last_row_idx >= 1:
+                last_row = all_vals[-1]
+                if len(last_row) >= 2 and last_row[0] == name and last_row[1] == current_date:
+                    print(f"Duplicate detected for {name} {current_date}; skipping append.")
+                else:
+                    sheet_data.append_row(row, table_range='A1')
+                    print(f"Successfully scraped and saved data for {name}.")
+            else:
+                sheet_data.append_row(row, table_range='A1')
+                print(f"Successfully scraped and saved data for {name}.")
+        except Exception as _:
+            # If any read error occurs, proceed to append to avoid data loss
+            sheet_data.append_row(row, table_range='A1')
+            print(f"Successfully scraped and saved data for {name}.")
     else:
         print(f"Skipping {name}: No data scraped.")
 

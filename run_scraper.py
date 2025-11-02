@@ -14,27 +14,22 @@ import json
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- SHARDING (env-driven) ---------------- #
-# SHARD_INDEX: which shard am I (0..9). SHARD_STEP: total shards (10).
 SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
 SHARD_STEP = int(os.getenv("SHARD_STEP", "1"))
 
-# Allow workflow to pass a unique checkpoint filename per shard.
+# Unique checkpoint per shard passed from workflow
 checkpoint_file = os.getenv("CHECKPOINT_FILE", "checkpoint_new_1.txt")
 last_i = int(open(checkpoint_file).read()) if os.path.exists(checkpoint_file) else 1
 
 # ---------------- SETUP ---------------- #
-
-# Chrome Options
 chrome_options = Options()
-# Use the modern headless mode for reliability in CI
-chrome_options.add_argument("--headless=new")  # Selenium/Chrome recommend this form [web:27]
+chrome_options.add_argument("--headless=new")
 chrome_options.add_argument("--disable-gpu")
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
 chrome_options.add_argument("--remote-debugging-port=9222")
 
 # ---------------- GOOGLE SHEETS AUTH ---------------- #
-
 try:
     gc = gspread.service_account("credentials.json")
 except Exception as e:
@@ -96,7 +91,21 @@ def scrape_tradingview(company_url):
     finally:
         driver.quit()
 
+# ---------------- BATCH APPEND HELPERS ---------------- #
+# Use gspread's values_append to append multiple rows in one API call (fast path).
+def flush_rows_buffer(ws, rows_buffer):
+    if not rows_buffer:
+        return
+    a1_range = f"{ws.title}!A1"
+    body = {"values": rows_buffer}
+    # RAW preserves your exact strings; switch to USER_ENTERED if you want Sheets to parse numbers/dates.
+    ws.values_append(a1_range, params={"valueInputOption": "RAW"}, body=body)
+    rows_buffer.clear()
+
 # ---------------- MAIN LOOP (matrix-aware) ---------------- #
+rows_buffer = []
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "150"))  # tune 100–300 based on throughput
+
 for i, company_url in enumerate(company_list[last_i:], last_i):
     # Shard filter: only process indices that belong to this shard
     if i % SHARD_STEP != SHARD_INDEX:
@@ -112,15 +121,40 @@ for i, company_url in enumerate(company_list[last_i:], last_i):
     values = scrape_tradingview(company_url)
     if values:
         row = [name, current_date] + values
-        # Note: if you see rate-limit errors, consider batching or backoff
-        sheet_data.append_row(row, table_range='A1')  # gspread append_row; see rate limits docs if needed [web:7][web:26]
-        print(f"Successfully scraped and saved data for {name}.")
+        rows_buffer.append(row)
+
+        # Flush when buffer reaches BATCH_SIZE
+        if len(rows_buffer) >= BATCH_SIZE:
+            try:
+                flush_rows_buffer(sheet_data, rows_buffer)
+                print(f"Flushed {BATCH_SIZE} rows.")
+            except Exception as e:
+                print(f"Batch flush error: {e}. Retrying once...")
+                time.sleep(1.0)
+                try:
+                    flush_rows_buffer(sheet_data, rows_buffer)
+                    print("Flush retry succeeded.")
+                except Exception as e2:
+                    print(f"Flush retry failed: {e2}. Keeping rows to retry later.")
+        else:
+            # Light pacing to avoid hammering target site
+            time.sleep(0.2)
     else:
         print(f"Skipping {name}: No data scraped.")
 
     with open(checkpoint_file, "w") as f:
         f.write(str(i))
 
-    time.sleep(1)
-
-
+# Final flush at the end of this shard
+if rows_buffer:
+    try:
+        flush_rows_buffer(sheet_data, rows_buffer)
+        print(f"Final flush of {len(rows_buffer)} rows.")
+    except Exception as e:
+        print(f"Final flush error: {e}. Attempting one retry...")
+        time.sleep(1.0)
+        try:
+            flush_rows_buffer(sheet_data, rows_buffer)
+            print("Final flush retry succeeded.")
+        except Exception as e2:
+            print(f"Final flush retry failed: {e2}. Some rows may not be written.")

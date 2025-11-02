@@ -2,17 +2,19 @@ name: TradingView Scraper
 
 on:
   schedule:
-    # Runs at 1:00 AM UTC every day
+    # Runs at 1:00 AM UTC every day (change as needed)
     - cron: '0 1 * * *'
   # Allows manual triggering from the Actions tab
   workflow_dispatch:
 
 jobs:
   scrape:
+    # Use the latest stable Ubuntu environment
     runs-on: ubuntu-latest
 
     steps:
       - name: ⬇️ Checkout Repository
+        # Downloads your code (including run_scraper.py) to the runner
         uses: actions/checkout@v4
 
       - name: 🐍 Set up Python
@@ -21,20 +23,22 @@ jobs:
           python-version: '3.10'
 
       - name: 📦 Install dependencies
+        # Installs all required Python packages
         run: |
           pip install selenium beautifulsoup4 gspread webdriver-manager
 
       - name: 🔑 Set up Google Credentials
-        # Writes the secret to a temporary file
+        # Writes the GSPREAD_CREDENTIALS secret content to the file expected by gspread
         run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
 
       - name: 🍪 Set up TradingView Cookies
-        # Writes the secret to the file the script expects
+        # Writes the TRADINGVIEW_COOKIES secret content to the file expected by the script
         run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
       
       - name: ⚙️ Create Checkpoint File (if missing)
-        # Ensures the script can run the first time
+        # Ensures 'checkpoint_new_1.txt' exists with a starting index '1' for the first run
         run: if [ ! -f checkpoint_new_1.txt ]; then echo "1" > checkpoint_new_1.txt; fi
 
       - name: 🚀 Run Scraper Script
-        run: run_scraper.py # Replace with the actual name of your Python file
+        # ✅ FIX: Uses the 'python' interpreter to correctly execute the script
+        run: python run_scraper.py

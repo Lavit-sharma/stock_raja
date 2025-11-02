@@ -4,6 +4,7 @@ on:
   schedule:
     # Runs at 1:00 AM UTC every day
     - cron: '0 1 * * *'
+  # Allows manual triggering from the Actions tab
   workflow_dispatch:
 
 jobs:
@@ -15,9 +16,9 @@ jobs:
         chunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] 
         # 2500 stocks / 10 chunks = 250 stocks per job
         chunk_size: [250] 
-        start_index: [1] # Start scraping from the 1st index (row 2 in Google Sheet)
+        start_index: [1]
 
-    # Use a dynamic name to show which chunk is running
+    # 👇 FIX IS HERE: The expression must be enclosed in ${{ }}
     name: Scrape Chunk ${{ matrix.chunk + 1 }}/10
 
     runs-on: ubuntu-latest
@@ -45,9 +46,7 @@ jobs:
         id: indices
         run: |
           # Calculate the start and end indices for this specific job
-          # START calculation: 1 + (Chunk ID * 250)
           START=$(( ${{ matrix.start_index }} + (${{ matrix.chunk }} * ${{ matrix.chunk_size }}) ))
-          # END calculation: START + 250 - 1
           END=$(( $START + ${{ matrix.chunk_size }} - 1 ))
           echo "Current Job will scrape from index $START to $END"
           

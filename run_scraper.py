@@ -8,16 +8,16 @@ from selenium.common.exceptions import NoSuchElementException
 from bs4 import BeautifulSoup
 import gspread
 from datetime import date
-import os # <-- Needed to read environment variables
+import os
 import time
 import json
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- SETUP ---------------- #
 
-# Chrome Options
+# Chrome Options (Remains the same for headless operation)
 chrome_options = Options()
-chrome_options.add_argument("--headless=new") # <-- Ensure headless is active for CI/CD
+chrome_options.add_argument("--headless=new")
 chrome_options.add_argument("--disable-gpu")
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
@@ -32,30 +32,44 @@ except Exception as e:
     print(f"Error loading credentials.json: {e}")
     exit(1)
 
-sheet_main = gc.open('Stock List').worksheet('Sheet1')
+# Sheet objects for data writing (only needed for the final batch write)
 sheet_data = gc.open('Tradingview Data Reel Experimental May').worksheet('Sheet5')
 
-company_list = sheet_main.col_values(5)
-name_list = sheet_main.col_values(1)
 current_date = date.today().strftime("%m/%d/%Y")
-
 checkpoint_file = "checkpoint_new_1.txt"
 
-# 1. Read the START index from the checkpoint file (set by the YAML job)
-# This will be the start of the current job's chunk (e.g., 1, 251, 501, etc.)
-last_i = int(open(checkpoint_file).read()) if os.path.exists(checkpoint_file) else 1
+# 1. Load data from local JSON files (created by the 'prepare_data' job)
+try:
+    with open("company_list.json", "r") as f:
+        company_list = json.load(f)
+    with open("name_list.json", "r") as f:
+        name_list = json.load(f)
+    print(f"Successfully loaded {len(company_list)} items from local files.")
+except FileNotFoundError:
+    print("ERROR: JSON data files not found. Check if 'prepare_data.py' ran successfully.")
+    exit(1)
 
-# 2. Read the END index from the environment variable (set by the YAML job)
-# This defines the limit for the current job (e.g., 250, 500, 750, etc.)
-CHUNK_END_INDEX = int(os.environ.get('CHUNK_END_INDEX', 2500))
+
+# 2. Read START and END indices from Environment Variables (set by the YAML job)
+# Note: The YAML sets CHUNK_START_INDEX (e.g., 1, 251, 501...)
+# And CHUNK_END_INDEX (e.g., 250, 500, 750...)
+START_INDEX = int(os.environ.get('CHUNK_START_INDEX', 1))
+END_INDEX = int(os.environ.get('CHUNK_END_INDEX', len(company_list) - 1)) # Default to full list end
+
+# Ensure indices are within bounds
+MAX_INDEX = len(company_list) - 1
+if END_INDEX > MAX_INDEX:
+    END_INDEX = MAX_INDEX
+
+print(f"This job will process indices from {START_INDEX} to {END_INDEX} (inclusive).")
 
 
-# ---------------- SCRAPER FUNCTION ---------------- #
+# ---------------- SCRAPER FUNCTION (No Change) ---------------- #
 def scrape_tradingview(company_url):
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
     driver.set_window_size(1920, 1080)
+    # ... (Login and Scraping logic remains the same) ...
     try:
-        # ✅ LOGIN USING SAVED COOKIES
         if os.path.exists("cookies.json"):
             driver.get("https://www.tradingview.com/")
             with open("cookies.json", "r", encoding="utf-8") as f:
@@ -71,10 +85,9 @@ def scrape_tradingview(company_url):
             driver.refresh()
             time.sleep(2)
         else:
-            print("⚠️ cookies.json not found. The script might fail if login is required.")
+            print("⚠️ cookies.json not found.")
             pass
 
-        # ✅ AFTER LOGIN, OPEN THE TARGET URL
         driver.get(company_url)
         WebDriverWait(driver, 45).until(
             EC.visibility_of_element_located((By.XPATH,
@@ -82,7 +95,6 @@ def scrape_tradingview(company_url):
         )
 
         soup = BeautifulSoup(driver.page_source, "html.parser")
-        # --- CORE LOGIC REMAINS UNCHANGED ---
         values = [
             el.get_text().replace('−', '-').replace('∅', 'None')
             for el in soup.find_all("div", class_="valueValue-l31H9iuA apply-common-tooltip")
@@ -98,43 +110,46 @@ def scrape_tradingview(company_url):
     finally:
         driver.quit()
 
-# ---------------- MAIN LOOP ---------------- #
+
+# ---------------- MAIN LOOP (NEW LOGIC) ---------------- #
 # Initialize a list to hold all the rows we scrape
 data_to_append = [] 
 
-for i, company_url in enumerate(company_list[last_i:], last_i):
-    
-    # 3. Check if the current index is past the job's assigned chunk end
-    if i > CHUNK_END_INDEX: 
-        print(f"Reached chunk end limit ({CHUNK_END_INDEX}). Stopping job.")
-        break
+# We will loop using the index range determined by the YAML job
+# Note: Python lists are 0-indexed, but Google Sheets/your data logic uses 1-indexed.
+# We use the START_INDEX and END_INDEX (which are 1-based) directly as the loop counter 'i'.
 
-    name = name_list[i]
+for i in range(START_INDEX, END_INDEX + 1):
+    
+    # 3. Use 0-based indexing for accessing the lists (i - 1)
+    url_index = i - 1
+    name = name_list[url_index]
+    company_url = company_list[url_index]
+    
     print(f"Scraping {i}: {name} | {company_url}")
 
     values = scrape_tradingview(company_url)
     
     if values:
         row = [name, current_date] + values
-        # 4. Collect the row instead of immediate append
         data_to_append.append(row) 
         print(f"Successfully scraped data for {name}.")
     else:
         print(f"Skipping {name}: No data scraped.")
 
-    # Checkpoint is updated for progress tracking within the job
+    # 4. Checkpoint Update: Saves the last index processed (i).
+    # This is less critical now, but good for tracking the job's progress.
     with open(checkpoint_file, "w") as f:
         f.write(str(i))
 
-    time.sleep(1)
+    time.sleep(1) # Keep the sleep to be gentle on TradingView
 
 # ---------------- BATCH WRITE ---------------- #
 
 if data_to_append:
     print(f"\n✅ Writing {len(data_to_append)} rows to Google Sheet in one batch...")
-    # 5. Use append_rows (plural) for the massive bulk upload!
-    # This prevents hitting single-row API limits.
+    # Use append_rows (plural) for the massive bulk upload!
     sheet_data.append_rows(data_to_append, value_input_option='USER_ENTERED')
     print("✅ Batch write completed successfully.")
 else:
-    print("\n⚠️ No new data scraped in this chunk to write to the sheet.")
+    print(f"\n⚠️ No new data scraped in chunk {START_INDEX} to {END_INDEX} to write to the sheet.")

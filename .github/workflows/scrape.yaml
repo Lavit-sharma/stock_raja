@@ -2,8 +2,8 @@ name: TradingView Scraper
 
 on:
   schedule:
-    - cron: '0 1 * * *'
-  workflow_dispatch:
+    - cron: '0 1 * * *' # Runs daily at 01:00 UTC
+  workflow_dispatch:   # Allows manual trigger
 
 jobs:
   scrape:
@@ -12,11 +12,12 @@ jobs:
       fail-fast: false
       matrix:
         shard: [0,1,2,3,4,5,6,7,8,9]
-      # optionally limit burst concurrency if Google Sheets 429s occur
+      # Optional: limit parallel runs if Google Sheets 429s occur
       # max-parallel: 5
     env:
       SHARD_INDEX: ${{ matrix.shard }}
       SHARD_STEP: 10
+
     steps:
       - name: ⬇️ Checkout Repository
         uses: actions/checkout@v4
@@ -26,24 +27,32 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 📦 Install dependencies
+      - name: 📦 Install Dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install selenium beautifulsoup4 gspread webdriver-manager
 
       - name: 🔑 Set up Google Credentials
-        run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
+        run: |
+          echo "${{ secrets.GSPREAD_CREDENTIALS }}" > credentials.json
+        shell: bash
 
       - name: 🍪 Set up TradingView Cookies
-        run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
+        run: |
+          echo "${{ secrets.TRADINGVIEW_COOKIES }}" > cookies.json
+        shell: bash
 
       - name: ⚙️ Create Checkpoint File (matrix-aware)
         run: |
           FILE="checkpoint_new_1_${{ matrix.shard }}.txt"
-          if [ ! -f "$FILE" ]; then echo "1" > "$FILE"; fi
+          if [ ! -f "$FILE" ]; then
+            echo "1" > "$FILE"
+          fi
+        shell: bash
 
       - name: 🚀 Run Scraper Script
         env:
           CHECKPOINT_FILE: checkpoint_new_1_${{ matrix.shard }}.txt
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/credentials.json
         run: python run_scraper.py
-
-
+        shell: bash

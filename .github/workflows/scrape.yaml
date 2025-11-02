@@ -35,14 +35,12 @@ jobs:
 
       - name: ⚙️ Read and Save Data Locally
         id: prepare
-        # This script must exist and must contain the code to read the Sheet and save to company_list.json and name_list.json
         run: python prepare_data.py
         
       - name: ⬆️ Upload Data Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: stock-data
-          # Upload the generated local JSON files
           path: |
             company_list.json
             name_list.json
@@ -71,7 +69,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: ⬇️ Download Data Artifact
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: stock-data
           path: . # Files (company_list.json, name_list.json) are downloaded here
@@ -103,10 +101,8 @@ jobs:
           echo "CHUNK_START_INDEX=$START" >> $GITHUB_ENV
           echo "CHUNK_END_INDEX=$END" >> $GITHUB_ENV
 
-      # Creates the checkpoint file with the job's starting index
       - name: ⚙️ Create Checkpoint File
         run: echo "${{ env.CHUNK_START_INDEX }}" > checkpoint_new_1.txt
 
       - name: 🚀 Run Scraper Script
-        # This script (run_scraper.py) reads the local JSON files and the env vars
         run: python run_scraper.py

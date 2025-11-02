@@ -30,11 +30,6 @@ jobs:
         run: |
           pip install selenium beautifulsoup4 gspread webdriver-manager
 
-      - name: 🔑 Set up Google Credentials
-        run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
-
-      - name: 🍪 Set up TradingView Cookies
-        run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
 
       - name: ⚙️ Create Checkpoint File (matrix-aware)
         run: |

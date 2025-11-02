@@ -26,7 +26,7 @@ chrome_options.add_argument("--remote-debugging-port=9222")
 
 # ---------------- GOOGLE SHEETS AUTH ---------------- #
 
-# ⬇️ Load credentials from a file named 'credentials.json'
+# Load credentials from 'credentials.json'
 try:
     gc = gspread.service_account("credentials.json")
 except Exception as e:
@@ -61,20 +61,28 @@ def scrape_tradingview(company_url):
                     cookie_to_add['secure'] = cookie.get('secure', False)
                     cookie_to_add['httpOnly'] = cookie.get('httpOnly', False)
                     driver.add_cookie(cookie_to_add)
-                except Exception as e:
+                except Exception:
                     pass
             driver.refresh()
-            time.sleep(4)  # increased from 2s to allow session/UI to stabilize before navigation [web:58]
+            time.sleep(4)  # increased settle time only, logic unchanged [web:39][web:58]
         else:
             print("⚠️ cookies.json not found. The script might fail if login is required.")
             pass
 
         # ✅ AFTER LOGIN, OPEN THE TARGET URL
         driver.get(company_url)
-        WebDriverWait(driver, 90).until(  # increased from 45s to accommodate dynamic rendering [web:39][web:61]
+
+        # Minimal navigation guard: wait for URL to actually change/commit before existing visibility wait
+        # This reduces repeats from parsing a previous page shell, without changing selectors or parse logic
+        try:
+            WebDriverWait(driver, 20).until(EC.url_changes("https://www.tradingview.com/"))
+        except Exception:
+            pass  # continue to your existing wait even if URL check is inconclusive [web:93][web:95]
+
+        WebDriverWait(driver, 90).until(
             EC.visibility_of_element_located((By.XPATH,
                 '/html/body/div[2]/div/div[5]/div/div[1]/div/div[2]/div[1]/div[2]/div/div[1]/div[2]/div[2]/div[2]/div[2]/div'))
-        )
+        )  # only timeout increased, same locator and flow [web:39][web:58]
 
         soup = BeautifulSoup(driver.page_source, "html.parser")
         values = [

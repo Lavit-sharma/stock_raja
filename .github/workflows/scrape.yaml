@@ -2,9 +2,7 @@ name: TradingView Scraper
 
 on:
   schedule:
-    # Runs at 1:00 AM UTC every day
     - cron: '0 1 * * *'
-  # Allows manual triggering from the Actions tab
   workflow_dispatch:
 
 jobs:
@@ -15,8 +13,9 @@ jobs:
         chunk_size: [250]
         start_index: [1]
 
-    # ✅ FIXED LINE
-    name: "Scrape Chunk ${{ matrix.chunk + 1 }}/10"
+    # ❌ GitHub Actions can't evaluate math in job names
+    # ✅ So we’ll just show the chunk number directly
+    name: Scrape Chunk ${{ matrix.chunk }}/9
 
     runs-on: ubuntu-latest
 
@@ -38,7 +37,7 @@ jobs:
 
       - name: 🍪 Set up TradingView Cookies
         run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
-
+      
       - name: ⚙️ Set Chunk Indices
         id: indices
         run: |

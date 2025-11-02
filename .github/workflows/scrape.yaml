@@ -33,9 +33,7 @@ jobs:
       - name: 🔑 Set up Google Credentials
         run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
 
-      - name: ⚙️ Read and Save Data Locally
-        id: prepare
-        run: python prepare_data.py
+    
         
       - name: ⬆️ Upload Data Artifact
         uses: actions/upload-artifact@v4

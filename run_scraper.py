@@ -26,17 +26,12 @@ chrome_options.add_argument("--remote-debugging-port=9222")
 
 # ---------------- GOOGLE SHEETS AUTH ---------------- #
 
-# ⬇️ UPDATED: Load credentials from a file named 'credentials.json'
-# This file will be created by the GitHub Action using a secret.
+# ⬇️ Load credentials from a file named 'credentials.json'
 try:
     gc = gspread.service_account("credentials.json")
 except Exception as e:
-    # Fallback/local testing: you might keep the hardcoded dictionary locally
     print(f"Error loading credentials.json: {e}")
     print("Ensure 'credentials.json' exists or has been created by GitHub Actions.")
-    # For CI, this block should ideally fail, but for a stable script:
-    # You would need to add a safe way to handle the missing file here, 
-    # but for CI, the file creation step is mandatory.
     exit(1)
 
 sheet_main = gc.open('Stock List').worksheet('Sheet1')
@@ -56,32 +51,27 @@ def scrape_tradingview(company_url):
     driver.set_window_size(1920, 1080)
     try:
         # ✅ LOGIN USING SAVED COOKIES
-        # The 'cookies.json' file will be created by the GitHub Action using a secret.
         if os.path.exists("cookies.json"):
             driver.get("https://www.tradingview.com/")
             with open("cookies.json", "r", encoding="utf-8") as f:
-                # ⬇️ UPDATED: Using 'json.load(f)' which is correct for file content
                 cookies = json.load(f)
             for cookie in cookies:
                 try:
-                    # Minor improvement: safer cookie addition logic
                     cookie_to_add = {k: cookie[k] for k in ('name', 'value', 'domain', 'path') if k in cookie}
                     cookie_to_add['secure'] = cookie.get('secure', False)
                     cookie_to_add['httpOnly'] = cookie.get('httpOnly', False)
                     driver.add_cookie(cookie_to_add)
                 except Exception as e:
-                    # print(f"Could not add cookie: {e}") # Optional debug
                     pass
             driver.refresh()
-            time.sleep(4)  # was 2s; longer settle helps dynamic widgets stabilize [web:39][web:40]
+            time.sleep(4)  # increased from 2s to allow session/UI to stabilize before navigation [web:58]
         else:
             print("⚠️ cookies.json not found. The script might fail if login is required.")
-            # Continue without login, which will likely fail on TradingView paywall/data limits
             pass
 
         # ✅ AFTER LOGIN, OPEN THE TARGET URL
         driver.get(company_url)
-        WebDriverWait(driver, 90).until(  # was 45; extend explicit wait to reduce early reads [web:39][web:51][web:53]
+        WebDriverWait(driver, 90).until(  # increased from 45s to accommodate dynamic rendering [web:39][web:61]
             EC.visibility_of_element_located((By.XPATH,
                 '/html/body/div[2]/div/div[5]/div/div[1]/div/div[2]/div[1]/div[2]/div/div[1]/div[2]/div[2]/div[2]/div[2]/div'))
         )

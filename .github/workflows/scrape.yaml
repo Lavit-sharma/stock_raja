@@ -2,19 +2,28 @@ name: TradingView Scraper
 
 on:
   schedule:
-    # Runs at 1:00 AM UTC every day (change as needed)
+    # Runs at 1:00 AM UTC every day
     - cron: '0 1 * * *'
-  # Allows manual triggering from the Actions tab
   workflow_dispatch:
 
 jobs:
   scrape:
-    # Use the latest stable Ubuntu environment
-    runs-on: ubuntu-latest
+    # Define a matrix to split the scraping list into 10 parallel jobs
+    strategy:
+      matrix:
+        # Ten chunks (0 to 9) to handle 2500 stocks
+        chunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] 
+        # 2500 stocks / 10 chunks = 250 stocks per job
+        chunk_size: [250] 
+        start_index: [1] # Start scraping from the 1st index (row 2 in Google Sheet)
 
+    # Use a dynamic name to show which chunk is running
+    name: Scrape Chunk ${{ matrix.chunk + 1 }}/10
+
+    runs-on: ubuntu-latest
+    
     steps:
       - name: ⬇️ Checkout Repository
-        # Downloads your code (including run_scraper.py) to the runner
         uses: actions/checkout@v4
 
       - name: 🐍 Set up Python
@@ -23,22 +32,32 @@ jobs:
           python-version: '3.10'
 
       - name: 📦 Install dependencies
-        # Installs all required Python packages
         run: |
           pip install selenium beautifulsoup4 gspread webdriver-manager
 
       - name: 🔑 Set up Google Credentials
-        # Writes the GSPREAD_CREDENTIALS secret content to the file expected by gspread
         run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
 
       - name: 🍪 Set up TradingView Cookies
-        # Writes the TRADINGVIEW_COOKIES secret content to the file expected by the script
         run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
       
-      - name: ⚙️ Create Checkpoint File (if missing)
-        # Ensures 'checkpoint_new_1.txt' exists with a starting index '1' for the first run
-        run: if [ ! -f checkpoint_new_1.txt ]; then echo "1" > checkpoint_new_1.txt; fi
+      - name: ⚙️ Set Chunk Indices
+        id: indices
+        run: |
+          # Calculate the start and end indices for this specific job
+          # START calculation: 1 + (Chunk ID * 250)
+          START=$(( ${{ matrix.start_index }} + (${{ matrix.chunk }} * ${{ matrix.chunk_size }}) ))
+          # END calculation: START + 250 - 1
+          END=$(( $START + ${{ matrix.chunk_size }} - 1 ))
+          echo "Current Job will scrape from index $START to $END"
+          
+          # Pass the calculated indices as environment variables to the Python script
+          echo "CHUNK_START_INDEX=$START" >> $GITHUB_ENV
+          echo "CHUNK_END_INDEX=$END" >> $GITHUB_ENV
+
+      # The checkpoint file is created with the start index for the Python script to read
+      - name: ⚙️ Create Checkpoint File (Start Point)
+        run: echo "${{ env.CHUNK_START_INDEX }}" > checkpoint_new_1.txt
 
       - name: 🚀 Run Scraper Script
-        # ✅ FIX: Uses the 'python' interpreter to correctly execute the script
         run: python run_scraper.py

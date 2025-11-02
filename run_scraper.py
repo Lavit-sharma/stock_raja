@@ -13,12 +13,21 @@ import time
 import json
 from webdriver_manager.chrome import ChromeDriverManager
 
+# ---------------- SHARDING (env-driven) ---------------- #
+# SHARD_INDEX: which shard am I (0..9). SHARD_STEP: total shards (10).
+SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
+SHARD_STEP = int(os.getenv("SHARD_STEP", "1"))
+
+# Allow workflow to pass a unique checkpoint filename per shard.
+checkpoint_file = os.getenv("CHECKPOINT_FILE", "checkpoint_new_1.txt")
+last_i = int(open(checkpoint_file).read()) if os.path.exists(checkpoint_file) else 1
+
 # ---------------- SETUP ---------------- #
 
 # Chrome Options
 chrome_options = Options()
-# ✅ This line MUST be present and NOT commented out for server environments:
-chrome_options.add_argument("--headless=new")
+# Use the modern headless mode for reliability in CI
+chrome_options.add_argument("--headless=new")  # Selenium/Chrome recommend this form [web:27]
 chrome_options.add_argument("--disable-gpu")
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
@@ -26,7 +35,6 @@ chrome_options.add_argument("--remote-debugging-port=9222")
 
 # ---------------- GOOGLE SHEETS AUTH ---------------- #
 
-# Load credentials from 'credentials.json'
 try:
     gc = gspread.service_account("credentials.json")
 except Exception as e:
@@ -41,16 +49,12 @@ company_list = sheet_main.col_values(5)
 name_list = sheet_main.col_values(1)
 current_date = date.today().strftime("%m/%d/%Y")
 
-checkpoint_file = "checkpoint_new_1.txt"
-last_i = int(open(checkpoint_file).read()) if os.path.exists(checkpoint_file) else 1
-
 # ---------------- SCRAPER FUNCTION ---------------- #
 def scrape_tradingview(company_url):
-    # Ensure the correct driver is installed and initialized
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
     driver.set_window_size(1920, 1080)
     try:
-        # ✅ LOGIN USING SAVED COOKIES
+        # LOGIN USING SAVED COOKIES
         if os.path.exists("cookies.json"):
             driver.get("https://www.tradingview.com/")
             with open("cookies.json", "r", encoding="utf-8") as f:
@@ -64,24 +68,17 @@ def scrape_tradingview(company_url):
                 except Exception:
                     pass
             driver.refresh()
-            time.sleep(4)  # increased settle time only; logic unchanged [web:96][web:58]
+            time.sleep(2)
         else:
-            print("⚠️ cookies.json not found. The script might fail if login is required.")
+            print("⚠️ cookies.json not found. Proceeding without login may limit data.")
             pass
 
-        # ✅ AFTER LOGIN, OPEN THE TARGET URL
+        # AFTER LOGIN, OPEN THE TARGET URL
         driver.get(company_url)
-
-        # NEW: ensure navigation committed to a new URL before existing wait
-        try:
-            WebDriverWait(driver, 20).until(EC.url_changes("https://www.tradingview.com/"))
-        except Exception:
-            pass  # proceed regardless; this is a soft guard to avoid stale DOM parses [web:93][web:95]
-
-        WebDriverWait(driver, 90).until(
+        WebDriverWait(driver, 45).until(
             EC.visibility_of_element_located((By.XPATH,
                 '/html/body/div[2]/div/div[5]/div/div[1]/div/div[2]/div[1]/div[2]/div/div[1]/div[2]/div[2]/div[2]/div[2]/div'))
-        )  # extended timeout only; same locator [web:96][web:39]
+        )
 
         soup = BeautifulSoup(driver.page_source, "html.parser")
         values = [
@@ -93,45 +90,31 @@ def scrape_tradingview(company_url):
     except NoSuchElementException:
         print(f"Data element not found for URL: {company_url}")
         return []
-
     except Exception as e:
         print(f"An error occurred during scraping for {company_url}: {e}")
         return []
-
     finally:
         driver.quit()
 
-# ---------------- MAIN LOOP ---------------- #
+# ---------------- MAIN LOOP (matrix-aware) ---------------- #
 for i, company_url in enumerate(company_list[last_i:], last_i):
+    # Shard filter: only process indices that belong to this shard
+    if i % SHARD_STEP != SHARD_INDEX:
+        continue
+
     if i > 2500:
         print("Reached scraping limit (i > 2500). Stopping.")
         break
 
-    name = name_list[i]
+    name = name_list[i] if i < len(name_list) else f"Row {i}"
     print(f"Scraping {i}: {name} | {company_url}")
 
     values = scrape_tradingview(company_url)
     if values:
         row = [name, current_date] + values
-
-        # NEW: simple last-row duplicate guard (Name + Date) to avoid repeat appends
-        try:
-            all_vals = sheet_data.get_all_values()
-            last_row_idx = len(all_vals)
-            if last_row_idx >= 1:
-                last_row = all_vals[-1]
-                if len(last_row) >= 2 and last_row[0] == name and last_row[1] == current_date:
-                    print(f"Duplicate detected for {name} {current_date}; skipping append.")
-                else:
-                    sheet_data.append_row(row, table_range='A1')
-                    print(f"Successfully scraped and saved data for {name}.")
-            else:
-                sheet_data.append_row(row, table_range='A1')
-                print(f"Successfully scraped and saved data for {name}.")
-        except Exception as _:
-            # If any read error occurs, proceed to append to avoid data loss
-            sheet_data.append_row(row, table_range='A1')
-            print(f"Successfully scraped and saved data for {name}.")
+        # Note: if you see rate-limit errors, consider batching or backoff
+        sheet_data.append_row(row, table_range='A1')  # gspread append_row; see rate limits docs if needed [web:7][web:26]
+        print(f"Successfully scraped and saved data for {name}.")
     else:
         print(f"Skipping {name}: No data scraped.")
 
@@ -139,3 +122,5 @@ for i, company_url in enumerate(company_list[last_i:], last_i):
         f.write(str(i))
 
     time.sleep(1)
+
+

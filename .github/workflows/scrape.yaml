@@ -2,69 +2,39 @@ name: TradingView Scraper
 
 on:
   schedule:
+    # Runs at 1:00 AM UTC every day (change as needed)
     - cron: '0 1 * * *'
   workflow_dispatch:
 
 jobs:
-  prepare_data:
-    name: Prepare Stock List
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - run: pip install gspread
-
-      - run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
-
-      - run: python prepare_data.py
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: stock-data
-          path: |
-            company_list.json
-            name_list.json
-
   scrape:
-    needs: prepare_data
-    strategy:
-      fail-fast: false
-      matrix:
-        chunk: [1,2,3,4,5,6,7,8,9,10]
-        chunk_size: [250]
-        start_index: [1]
-    name: Scrape Chunk ${{ matrix.chunk }}/10
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: ⬇️ Checkout Repository
+        uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: stock-data
-          path: .
-
-      - uses: actions/setup-python@v5
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - run: pip install selenium beautifulsoup4 gspread webdriver-manager
-
-      - run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
-      - run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
-
-      - id: indices
+      - name: 📦 Install dependencies
         run: |
-          ZERO_BASED_CHUNK=$(( ${{ matrix.chunk }} - 1 ))
-          START=$(( ${{ matrix.start_index }} + (ZERO_BASED_CHUNK * ${{ matrix.chunk_size }}) ))
-          END=$(( START + ${{ matrix.chunk_size }} - 1 ))
-          echo "CHUNK_START_INDEX=$START" >> $GITHUB_ENV
-          echo "CHUNK_END_INDEX=$END" >> $GITHUB_ENV
+          pip install --upgrade pip
+          pip install selenium beautifulsoup4 gspread webdriver-manager oauth2client
 
-      - run: echo "${{ env.CHUNK_START_INDEX }}" > checkpoint_new_1.txt
-      - run: python run_scraper.py
+      - name: 🔑 Set up Google Credentials
+        run: echo "${{ secrets.GSPREAD_CREDENTIALS }}" > credentials.json
+
+      - name: 🍪 Set up TradingView Cookies
+        run: echo "${{ secrets.TRADINGVIEW_COOKIES }}" > cookies.json
+
+      - name: ⚙️ Create Checkpoint File (if missing)
+        run: |
+          if [ ! -f checkpoint_new_1.txt ]; then
+            echo "1" > checkpoint_new_1.txt
+          fi
+
+      - name: 🚀 Run Scraper Script
+        run: python run_scraper.py

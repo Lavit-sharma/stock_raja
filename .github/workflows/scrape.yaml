@@ -2,22 +2,21 @@ name: TradingView Scraper
 
 on:
   schedule:
+    # Runs at 1:00 AM UTC every day
     - cron: '0 1 * * *'
+  # Allows manual triggering
   workflow_dispatch:
 
 jobs:
-  scrape:
-    strategy:
-      matrix:
-        chunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        chunk_size: [250]
-        start_index: [1]
-
-    # ❌ GitHub Actions can't evaluate math in job names
-    # ✅ So we’ll just show the chunk number directly
-    name: Scrape Chunk ${{ matrix.chunk }}/9
-
+  # =========================================================
+  # JOB 1: READ DATA ONCE & SAVE AS ARTIFACT (Prevents 429 Error)
+  # =========================================================
+  prepare_data:
+    name: 1. Prepare Stock List (Single Read)
     runs-on: ubuntu-latest
+    outputs:
+      # Pass a simple success indicator to the next job
+      success: ${{ steps.prepare.outcome }}
 
     steps:
       - name: ⬇️ Checkout Repository
@@ -29,8 +28,66 @@ jobs:
           python-version: '3.10'
 
       - name: 📦 Install dependencies
-        run: |
-          pip install selenium beautifulsoup4 gspread webdriver-manager
+        # Need gspread and json handling for the preparation script
+        run: pip install gspread
+
+      - name: 🔑 Set up Google Credentials
+        # Create credentials file for gspread
+        run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
+
+      - name: ⚙️ Read and Save Data Locally
+        id: prepare
+        # This is the NEW script you need to create (prepare_data.py)
+        run: python prepare_data.py
+        
+      - name: ⬆️ Upload Data Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: stock-data
+          # Upload the generated local JSON files
+          path: |
+            company_list.json
+            name_list.json
+          
+  # =========================================================
+  # JOB 2: PARALLEL SCRAPING (10 Jobs)
+  # =========================================================
+  scrape:
+    needs: prepare_data # Wait for data preparation to finish
+    
+    # Define a matrix to split the scraping list into 10 parallel jobs
+    strategy:
+      fail-fast: false # Allows other jobs to finish even if one fails
+      matrix:
+        # Ten chunks (0 to 9) to handle 2500 stocks
+        chunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] 
+        # 2500 stocks / 10 chunks = 250 stocks per job
+        chunk_size: [250] 
+        start_index: [1]
+
+    # Dynamically name the jobs (Chunk 1/10, Chunk 2/10, etc.)
+    name: Scrape Chunk ${{ matrix.chunk + 1 }}/10
+
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: ⬇️ Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: ⬇️ Download Data Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: stock-data
+          path: . # Download files to the root directory
+          
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 📦 Install dependencies
+        # Install all Selenium dependencies for the main scraper script
+        run: pip install selenium beautifulsoup4 gspread webdriver-manager
 
       - name: 🔑 Set up Google Credentials
         run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
@@ -41,14 +98,21 @@ jobs:
       - name: ⚙️ Set Chunk Indices
         id: indices
         run: |
+          # Calculate the start and end indices for this specific job
+          # START is 1-based index (e.g., 501 for chunk 2)
           START=$(( ${{ matrix.start_index }} + (${{ matrix.chunk }} * ${{ matrix.chunk_size }}) ))
-          END=$(( START + ${{ matrix.chunk_size }} - 1 ))
+          # END is 1-based index (e.g., 750 for chunk 2)
+          END=$(( $START + ${{ matrix.chunk_size }} - 1 ))
           echo "Current Job will scrape from index $START to $END"
+          
+          # Set the indices as environment variables for run_scraper.py
           echo "CHUNK_START_INDEX=$START" >> $GITHUB_ENV
           echo "CHUNK_END_INDEX=$END" >> $GITHUB_ENV
 
-      - name: ⚙️ Create Checkpoint File (Start Point)
+      # Creates the checkpoint file with the START index.
+      - name: ⚙️ Create Checkpoint File
         run: echo "${{ env.CHUNK_START_INDEX }}" > checkpoint_new_1.txt
 
       - name: 🚀 Run Scraper Script
+        # Runs the main scraper using the indices from the environment
         run: python run_scraper.py

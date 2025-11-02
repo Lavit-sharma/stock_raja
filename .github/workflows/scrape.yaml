@@ -37,4 +37,4 @@ jobs:
         run: if [ ! -f checkpoint_new_1.txt ]; then echo "1" > checkpoint_new_1.txt; fi
 
       - name: 🚀 Run Scraper Script
-        run: python your_script_name.py # Replace with the actual name of your Python file
+        run: run_scraper.py # Replace with the actual name of your Python file

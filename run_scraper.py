@@ -4,7 +4,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.common.exceptions import NoSuchElementException
 from bs4 import BeautifulSoup
 import gspread
 from datetime import date
@@ -13,12 +13,35 @@ import time
 import json
 from webdriver_manager.chrome import ChromeDriverManager
 
-# ---------------- GOOGLE SHEET SETUP ---------------- #
+# ---------------- SETUP ---------------- #
 
-credentials = json.loads(os.getenv("GOOGLE_SHEET_CREDS"))
-gc = gspread.service_account_from_dict(credentials)
+# Chrome Options
+chrome_options = Options()
+chrome_options.add_argument("--disable-gpu")
+chrome_options.add_argument("--no-sandbox")
+chrome_options.add_argument("--disable-dev-shm-usage")
+chrome_options.add_argument("--remote-debugging-port=9222")
+# Add headless mode for GitHub Actions (uncomment when running on CI)
+# chrome_options.add_argument("--headless")
+
+# ---------------- GOOGLE SHEETS AUTH ---------------- #
+
+# ⬇️ UPDATED: Load credentials from a file named 'credentials.json'
+# This file will be created by the GitHub Action using a secret.
+try:
+    gc = gspread.service_account("credentials.json")
+except Exception as e:
+    # Fallback/local testing: you might keep the hardcoded dictionary locally
+    print(f"Error loading credentials.json: {e}")
+    print("Ensure 'credentials.json' exists or has been created by GitHub Actions.")
+    # For CI, this block should ideally fail, but for a stable script:
+    # You would need to add a safe way to handle the missing file here, 
+    # but for CI, the file creation step is mandatory.
+    exit(1)
+
+
 sheet_main = gc.open('Stock List').worksheet('Sheet1')
-sheet_data = gc.open('Tradingview Data Reel Experimental Nov 25').worksheet('Sheet5')
+sheet_data = gc.open('Tradingview Data Reel Experimental May').worksheet('Sheet5')
 
 company_list = sheet_main.col_values(5)
 name_list = sheet_main.col_values(1)
@@ -27,71 +50,42 @@ current_date = date.today().strftime("%m/%d/%Y")
 checkpoint_file = "checkpoint_new_1.txt"
 last_i = int(open(checkpoint_file).read()) if os.path.exists(checkpoint_file) else 1
 
-# ---------------- SELENIUM CONFIG ---------------- #
-
-chrome_options = Options()
-chrome_options.add_argument("--headless=new")  # headless mode for GitHub runner
-chrome_options.add_argument("--no-sandbox")
-chrome_options.add_argument("--disable-dev-shm-usage")
-chrome_options.add_argument("--disable-gpu")
-chrome_options.add_argument("--window-size=1920,1080")
-
-# ---------------- LOAD COOKIES ---------------- #
-
-def load_cookies(driver, cookies_path="cookies.json"):
-    """Load cookies into driver if available."""
-    if os.path.exists(cookies_path):
-        with open(cookies_path, "r") as f:
-            cookies = json.load(f)
-        driver.get("https://in.tradingview.com")
-        for cookie in cookies:
-            if "sameSite" in cookie:
-                if cookie["sameSite"] not in ["Strict", "Lax", "None"]:
-                    cookie["sameSite"] = "Lax"
-            try:
-                driver.add_cookie(cookie)
-            except Exception:
-                pass
-        driver.refresh()
-        print("✅ Logged in using saved cookies")
-    else:
-        print("⚠️ No cookies.json found — please save cookies first (using savecookies.py)")
-
-
 # ---------------- SCRAPER FUNCTION ---------------- #
-
 def scrape_tradingview(company_url):
+    # Ensure the correct driver is installed and initialized
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
     driver.set_window_size(1920, 1080)
-
     try:
-        # Load cookies (login session)
-        load_cookies(driver)
-
-        driver.get(company_url)
-        print(f"Accessing URL: {company_url}")
-
-        try:
-            WebDriverWait(driver, 45).until(
-                EC.presence_of_element_located((
-                    By.XPATH,
-                    '/html/body/div[2]/div/div[5]/div/div[1]/div/div[2]/div[1]/div[2]/div/div[1]/div[2]/div[2]/div[2]/div[2]/div'
-                ))
-            )
-        except TimeoutException:
-            print(f"⚠️ Timeout: {company_url} not fully loaded, retrying once...")
-            time.sleep(5)
+        # ✅ LOGIN USING SAVED COOKIES
+        # The 'cookies.json' file will be created by the GitHub Action using a secret.
+        if os.path.exists("cookies.json"):
+            driver.get("https://www.tradingview.com/")
+            with open("cookies.json", "r", encoding="utf-8") as f:
+                # ⬇️ UPDATED: Using 'json.load(f)' which is correct for file content
+                cookies = json.load(f) 
+            for cookie in cookies:
+                try:
+                    # Minor improvement: safer cookie addition logic
+                    cookie_to_add = {k: cookie[k] for k in ('name', 'value', 'domain', 'path') if k in cookie}
+                    cookie_to_add['secure'] = cookie.get('secure', False)
+                    cookie_to_add['httpOnly'] = cookie.get('httpOnly', False)
+                    driver.add_cookie(cookie_to_add)
+                except Exception as e:
+                    # print(f"Could not add cookie: {e}") # Optional debug
+                    pass
             driver.refresh()
-            try:
-                WebDriverWait(driver, 30).until(
-                    EC.presence_of_element_located((
-                        By.XPATH,
-                        '/html/body/div[2]/div/div[5]/div/div[1]/div/div[2]/div[1]/div[2]/div/div[1]/div[2]/div[2]/div[2]/div[2]/div'
-                    ))
-                )
-            except TimeoutException:
-                print(f"❌ Skipping {company_url} (still not loaded)")
-                return []
+            time.sleep(2)
+        else:
+            print("⚠️ cookies.json not found. The script might fail if login is required.")
+            # Continue without login, which will likely fail on TradingView paywall/data limits
+            pass
+
+        # ✅ AFTER LOGIN, OPEN THE TARGET URL
+        driver.get(company_url)
+        WebDriverWait(driver, 45).until(
+            EC.visibility_of_element_located((By.XPATH,
+                '/html/body/div[2]/div/div[5]/div/div[1]/div/div[2]/div[1]/div[2]/div/div[1]/div[2]/div[2]/div[2]/div[2]/div'))
+        )
 
         soup = BeautifulSoup(driver.page_source, "html.parser")
         values = [
@@ -101,25 +95,32 @@ def scrape_tradingview(company_url):
         return values
 
     except NoSuchElementException:
-        print(f"❌ Data element not found for {company_url}")
+        print(f"Data element not found for URL: {company_url}")
+        return []
+
+    except Exception as e:
+        print(f"An error occurred during scraping for {company_url}: {e}")
         return []
 
     finally:
         driver.quit()
 
 # ---------------- MAIN LOOP ---------------- #
-
 for i, company_url in enumerate(company_list[last_i:], last_i):
     if i > 2500:
+        print("Reached scraping limit (i > 2500). Stopping.")
         break
 
     name = name_list[i]
-    print(f"\n--- Scraping {i}: {name} | {company_url} ---")
+    print(f"Scraping {i}: {name} | {company_url}")
 
     values = scrape_tradingview(company_url)
     if values:
         row = [name, current_date] + values
         sheet_data.append_row(row, table_range='A1')
+        print(f"Successfully scraped and saved data for {name}.")
+    else:
+        print(f"Skipping {name}: No data scraped.")
 
     with open(checkpoint_file, "w") as f:
         f.write(str(i))

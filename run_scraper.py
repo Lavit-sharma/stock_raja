@@ -15,15 +15,16 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- SETUP ---------------- #
 
+# ---------------- SETUP ---------------- #
+
 # Chrome Options
 chrome_options = Options()
+# ✅ This line MUST be present and NOT commented out for server environments:
+chrome_options.add_argument("--headless=new") 
 chrome_options.add_argument("--disable-gpu")
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
 chrome_options.add_argument("--remote-debugging-port=9222")
-# Add headless mode for GitHub Actions (uncomment when running on CI)
-# chrome_options.add_argument("--headless")
-
 # ---------------- GOOGLE SHEETS AUTH ---------------- #
 
 # ⬇️ UPDATED: Load credentials from a file named 'credentials.json'

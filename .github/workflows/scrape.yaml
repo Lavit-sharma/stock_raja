@@ -2,19 +2,23 @@ name: TradingView Scraper
 
 on:
   schedule:
-    # Runs at 1:00 AM UTC every day (change as needed)
     - cron: '0 1 * * *'
-  # Allows manual triggering from the Actions tab
   workflow_dispatch:
 
 jobs:
   scrape:
-    # Use the latest stable Ubuntu environment
     runs-on: ubuntu-latest
-
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0,1,2,3,4,5,6,7,8,9]
+      # optionally limit burst concurrency if Google Sheets 429s occur
+      # max-parallel: 5
+    env:
+      SHARD_INDEX: ${{ matrix.shard }}
+      SHARD_STEP: 10
     steps:
       - name: ⬇️ Checkout Repository
-        # Downloads your code (including run_scraper.py) to the runner
         uses: actions/checkout@v4
 
       - name: 🐍 Set up Python
@@ -23,24 +27,23 @@ jobs:
           python-version: '3.10'
 
       - name: 📦 Install dependencies
-        # Installs all required Python packages
         run: |
           pip install selenium beautifulsoup4 gspread webdriver-manager
 
       - name: 🔑 Set up Google Credentials
-        # Writes the GSPREAD_CREDENTIALS secret content to the file expected by gspread
         run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
 
       - name: 🍪 Set up TradingView Cookies
-        # Writes the TRADINGVIEW_COOKIES secret content to the file expected by the script
         run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
-      
-      - name: ⚙️ Create Checkpoint File (if missing)
-        # Ensures 'checkpoint_new_1.txt' exists with a starting index '1' for the first run
-        run: if [ ! -f checkpoint_new_1.txt ]; then echo "1" > checkpoint_new_1.txt; fi
+
+      - name: ⚙️ Create Checkpoint File (matrix-aware)
+        run: |
+          FILE="checkpoint_new_1_${{ matrix.shard }}.txt"
+          if [ ! -f "$FILE" ]; then echo "1" > "$FILE"; fi
 
       - name: 🚀 Run Scraper Script
-        # ✅ FIX: Uses the 'python' interpreter to correctly execute the script
+        env:
+          CHECKPOINT_FILE: checkpoint_new_1_${{ matrix.shard }}.txt
         run: python run_scraper.py
 
 

@@ -2,105 +2,69 @@ name: TradingView Scraper
 
 on:
   schedule:
-    # Runs at 1:00 AM UTC every day
     - cron: '0 1 * * *'
-  # Allows manual triggering
   workflow_dispatch:
 
 jobs:
-  # =========================================================
-  # JOB 1: READ DATA ONCE & SAVE AS ARTIFACT
-  # This prevents 10 simultaneous 'Read requests' that cause the 429 error.
-  # =========================================================
   prepare_data:
-    name: 1. Prepare Stock List (Single Read)
+    name: Prepare Stock List
     runs-on: ubuntu-latest
-    outputs:
-      success: ${{ steps.prepare.outcome }}
 
     steps:
-      - name: ⬇️ Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 🐍 Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: 📦 Install dependencies
-        run: pip install gspread
+      - run: pip install gspread
 
-      - name: 🔑 Set up Google Credentials
-        run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
+      - run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
 
-    
-        
-      - name: ⬆️ Upload Data Artifact
-        uses: actions/upload-artifact@v4
+      - run: python prepare_data.py
+
+      - uses: actions/upload-artifact@v4
         with:
           name: stock-data
           path: |
             company_list.json
             name_list.json
-          
-  # =========================================================
-  # JOB 2: PARALLEL SCRAPING (10 Jobs)
-  # =========================================================
+
   scrape:
-    needs: prepare_data # Wait for data preparation
-    
+    needs: prepare_data
     strategy:
       fail-fast: false
       matrix:
-        # Ten chunks (1 to 10) — 1-based so no arithmetic needed in job name
-        chunk: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        chunk_size: [250] # 2500 stocks / 10 jobs = 250 per job
+        chunk: [1,2,3,4,5,6,7,8,9,10]
+        chunk_size: [250]
         start_index: [1]
-
-    # Use the 1-based chunk directly (no '+' arithmetic)
     name: Scrape Chunk ${{ matrix.chunk }}/10
-
     runs-on: ubuntu-latest
-    
-    steps:
-      - name: ⬇️ Checkout Repository
-        uses: actions/checkout@v4
 
-      - name: ⬇️ Download Data Artifact
-        uses: actions/download-artifact@v4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
         with:
           name: stock-data
-          path: . # Files (company_list.json, name_list.json) are downloaded here
-          
-      - name: 🐍 Set up Python
-        uses: actions/setup-python@v5
+          path: .
+
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: 📦 Install dependencies
-        run: pip install selenium beautifulsoup4 gspread webdriver-manager
+      - run: pip install selenium beautifulsoup4 gspread webdriver-manager
 
-      - name: 🔑 Set up Google Credentials
-        run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
+      - run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
+      - run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
 
-      - name: 🍪 Set up TradingView Cookies
-        run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
-      
-      - name: ⚙️ Set Chunk Indices
-        id: indices
+      - id: indices
         run: |
-          # matrix.chunk is 1-based here. Convert to 0-based for math:
           ZERO_BASED_CHUNK=$(( ${{ matrix.chunk }} - 1 ))
           START=$(( ${{ matrix.start_index }} + (ZERO_BASED_CHUNK * ${{ matrix.chunk_size }}) ))
           END=$(( START + ${{ matrix.chunk_size }} - 1 ))
-          echo "Current Job will scrape from index $START to $END"
-          
-          # Set the environment variables
           echo "CHUNK_START_INDEX=$START" >> $GITHUB_ENV
           echo "CHUNK_END_INDEX=$END" >> $GITHUB_ENV
 
-      - name: ⚙️ Create Checkpoint File
-        run: echo "${{ env.CHUNK_START_INDEX }}" > checkpoint_new_1.txt
-
-      - name: 🚀 Run Scraper Script
-        run: python run_scraper.py
+      - run: echo "${{ env.CHUNK_START_INDEX }}" > checkpoint_new_1.txt
+      - run: python run_scraper.py

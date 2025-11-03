@@ -12,6 +12,8 @@ jobs:
       fail-fast: false
       matrix:
         shard: [0,1,2,3,4,5,6,7,8,9]
+      # optionally limit burst concurrency if Google Sheets 429s occur
+      # max-parallel: 5
     env:
       SHARD_INDEX: ${{ matrix.shard }}
       SHARD_STEP: 10
@@ -29,7 +31,7 @@ jobs:
           pip install selenium beautifulsoup4 gspread webdriver-manager
 
       - name: 🔑 Set up Google Credentials
-        run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' | python3 -c "import sys, json; print(json.dumps(json.loads(sys.stdin.read())))" > credentials.json
+        run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
 
       - name: 🍪 Set up TradingView Cookies
         run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
@@ -43,3 +45,5 @@ jobs:
         env:
           CHECKPOINT_FILE: checkpoint_new_1_${{ matrix.shard }}.txt
         run: python run_scraper.py
+
+

@@ -14,20 +14,10 @@ import json
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- BATCH CONTROL ---------------- #
-START_INDEX = int(os.getenv("START_INDEX", "1"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "200"))
-END_INDEX = START_INDEX + BATCH_SIZE - 1
-print(f"[Batch Config] START_INDEX={START_INDEX}, END_INDEX={END_INDEX}")
+BATCH_SIZE = int(os.getenv("INPUT_BATCH_SIZE", "200"))
+MATRIX_BATCH = int(os.getenv("MATRIX_BATCH", "1"))
 
-# ---------------- SETUP ---------------- #
-chrome_options = Options()
-chrome_options.add_argument("--headless=new")
-chrome_options.add_argument("--disable-gpu")
-chrome_options.add_argument("--no-sandbox")
-chrome_options.add_argument("--disable-dev-shm-usage")
-chrome_options.add_argument("--remote-debugging-port=9222")
-
-# ---------------- GOOGLE SHEETS AUTH ---------------- #
+# Read Google Sheet data first
 try:
     gc = gspread.service_account("credentials.json")
 except Exception as e:
@@ -41,11 +31,25 @@ company_list = sheet_main.col_values(5)
 name_list = sheet_main.col_values(1)
 current_date = date.today().strftime("%m/%d/%Y")
 
-# ---------------- SCRAPER FUNCTION (UNTOUCHED) ---------------- #
+# Correct batch slicing to prevent repeats
+START_INDEX = (MATRIX_BATCH - 1) * BATCH_SIZE
+END_INDEX = min(START_INDEX + BATCH_SIZE, len(company_list))
+print(f"[Batch {MATRIX_BATCH}] START_INDEX={START_INDEX}, END_INDEX={END_INDEX}")
+
+# ---------------- SETUP CHROME ---------------- #
+chrome_options = Options()
+chrome_options.add_argument("--headless=new")
+chrome_options.add_argument("--disable-gpu")
+chrome_options.add_argument("--no-sandbox")
+chrome_options.add_argument("--disable-dev-shm-usage")
+chrome_options.add_argument("--remote-debugging-port=9222")
+
+# ---------------- SCRAPER FUNCTION ---------------- #
 def scrape_tradingview(company_url):
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
     driver.set_window_size(1920, 1080)
     try:
+        # LOGIN USING SAVED COOKIES
         if os.path.exists("cookies.json"):
             driver.get("https://www.tradingview.com/")
             with open("cookies.json", "r", encoding="utf-8") as f:
@@ -63,6 +67,7 @@ def scrape_tradingview(company_url):
         else:
             print("⚠️ cookies.json not found. Proceeding without login may limit data.")
 
+        # OPEN TARGET URL
         driver.get(company_url)
         WebDriverWait(driver, 45).until(
             EC.visibility_of_element_located((By.XPATH,
@@ -86,7 +91,7 @@ def scrape_tradingview(company_url):
         driver.quit()
 
 # ---------------- MAIN LOOP ---------------- #
-for i in range(START_INDEX - 1, min(END_INDEX, len(company_list))):
+for i in range(START_INDEX, END_INDEX):
     name = name_list[i] if i < len(name_list) else f"Row {i+1}"
     company_url = company_list[i]
     print(f"Scraping {i+1}: {name} | {company_url}")
@@ -99,4 +104,4 @@ for i in range(START_INDEX - 1, min(END_INDEX, len(company_list))):
     else:
         print(f"⚠️ Skipping {name}: No data scraped.")
 
-    time.sleep(1)
+    time.sleep(1)  # keep short pause between requests

@@ -1,4 +1,4 @@
-name: TradingView Scraper (10x shards, quota-safe)
+name: TradingView Scraper
 
 on:
   schedule:
@@ -12,7 +12,10 @@ jobs:
       fail-fast: false
       matrix:
         shard: [0,1,2,3,4,5,6,7,8,9]
+      # optionally limit burst concurrency if Google Sheets 429s occur
+      # max-parallel: 5
     env:
+      SHARD_INDEX: ${{ matrix.shard }}
       SHARD_STEP: 10
     steps:
       - name: ⬇️ Checkout Repository
@@ -25,7 +28,6 @@ jobs:
 
       - name: 📦 Install dependencies
         run: |
-          python -m pip install --upgrade pip
           pip install selenium beautifulsoup4 gspread webdriver-manager
 
       - name: 🔑 Set up Google Credentials
@@ -33,12 +35,6 @@ jobs:
 
       - name: 🍪 Set up TradingView Cookies
         run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
-
-      - name: ⏳ Stagger shard start (reduce read bursts)
-        run: |
-          SLEEP=$(( ${{ matrix.shard }} * 10 ))
-          echo "Staggering ${SLEEP}s for shard ${{ matrix.shard }}"
-          sleep "${SLEEP}"
 
       - name: ⚙️ Create Checkpoint File (matrix-aware)
         run: |
@@ -48,6 +44,5 @@ jobs:
       - name: 🚀 Run Scraper Script
         env:
           CHECKPOINT_FILE: checkpoint_new_1_${{ matrix.shard }}.txt
-        run: |
-          echo "Shard ${{ matrix.shard }} starting with CHECKPOINT_FILE=$CHECKPOINT_FILE"
-          python run_scraper.py
+        run: python run_scraper.py
+

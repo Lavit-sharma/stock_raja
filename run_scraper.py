@@ -13,15 +13,33 @@ import time
 import json
 from webdriver_manager.chrome import ChromeDriverManager
 
-# ---------------- BATCH CONTROL ---------------- #
-BATCH_SIZE = int(os.getenv("INPUT_BATCH_SIZE", "200"))
-MATRIX_BATCH = int(os.getenv("MATRIX_BATCH", "1"))
+# ---------------- SHARDING (env-driven) ---------------- #
+# SHARD_INDEX: which shard am I (0..9). SHARD_STEP: total shards (10).
+SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
+SHARD_STEP = int(os.getenv("SHARD_STEP", "1"))
 
-# Read Google Sheet data
+# Allow workflow to pass a unique checkpoint filename per shard.
+checkpoint_file = os.getenv("CHECKPOINT_FILE", "checkpoint_new_1.txt")
+last_i = int(open(checkpoint_file).read()) if os.path.exists(checkpoint_file) else 1
+
+# ---------------- SETUP ---------------- #
+
+# Chrome Options
+chrome_options = Options()
+# Use the modern headless mode for reliability in CI
+chrome_options.add_argument("--headless=new")  # Selenium/Chrome recommend this form [web:27]
+chrome_options.add_argument("--disable-gpu")
+chrome_options.add_argument("--no-sandbox")
+chrome_options.add_argument("--disable-dev-shm-usage")
+chrome_options.add_argument("--remote-debugging-port=9222")
+
+# ---------------- GOOGLE SHEETS AUTH ---------------- #
+
 try:
     gc = gspread.service_account("credentials.json")
 except Exception as e:
     print(f"Error loading credentials.json: {e}")
+    print("Ensure 'credentials.json' exists or has been created by GitHub Actions.")
     exit(1)
 
 sheet_main = gc.open('Stock List').worksheet('Sheet1')
@@ -31,20 +49,7 @@ company_list = sheet_main.col_values(5)
 name_list = sheet_main.col_values(1)
 current_date = date.today().strftime("%m/%d/%Y")
 
-# ---------------- BATCH SLICING ---------------- #
-START_INDEX = (MATRIX_BATCH - 1) * BATCH_SIZE
-END_INDEX = min(START_INDEX + BATCH_SIZE, len(company_list))
-print(f"[Batch {MATRIX_BATCH}] START_INDEX={START_INDEX}, END_INDEX={END_INDEX}")
-
-# ---------------- SETUP CHROME ---------------- #
-chrome_options = Options()
-chrome_options.add_argument("--headless=new")
-chrome_options.add_argument("--disable-gpu")
-chrome_options.add_argument("--no-sandbox")
-chrome_options.add_argument("--disable-dev-shm-usage")
-chrome_options.add_argument("--remote-debugging-port=9222")
-
-# ---------------- SCRAPER FUNCTION (UNCHANGED) ---------------- #
+# ---------------- SCRAPER FUNCTION ---------------- #
 def scrape_tradingview(company_url):
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
     driver.set_window_size(1920, 1080)
@@ -66,8 +71,9 @@ def scrape_tradingview(company_url):
             time.sleep(2)
         else:
             print("⚠️ cookies.json not found. Proceeding without login may limit data.")
+            pass
 
-        # OPEN TARGET URL
+        # AFTER LOGIN, OPEN THE TARGET URL
         driver.get(company_url)
         WebDriverWait(driver, 45).until(
             EC.visibility_of_element_located((By.XPATH,
@@ -90,18 +96,30 @@ def scrape_tradingview(company_url):
     finally:
         driver.quit()
 
-# ---------------- MAIN LOOP (BATCH-RESPECTING) ---------------- #
-for i in range(START_INDEX, END_INDEX):
-    name = name_list[i] if i < len(name_list) else f"Row {i+1}"
-    company_url = company_list[i]
-    print(f"Scraping {i+1}: {name} | {company_url}")
+# ---------------- MAIN LOOP (matrix-aware) ---------------- #
+for i, company_url in enumerate(company_list[last_i:], last_i):
+    # Shard filter: only process indices that belong to this shard
+    if i % SHARD_STEP != SHARD_INDEX:
+        continue
+
+    if i > 2500:
+        print("Reached scraping limit (i > 2500). Stopping.")
+        break
+
+    name = name_list[i] if i < len(name_list) else f"Row {i}"
+    print(f"Scraping {i}: {name} | {company_url}")
 
     values = scrape_tradingview(company_url)
     if values:
         row = [name, current_date] + values
-        sheet_data.append_row(row, table_range='A1')
-        print(f"✅ Saved data for {name}")
+        # Note: if you see rate-limit errors, consider batching or backoff
+        sheet_data.append_row(row, table_range='A1')  # gspread append_row; see rate limits docs if needed [web:7][web:26]
+        print(f"Successfully scraped and saved data for {name}.")
     else:
-        print(f"⚠️ Skipping {name}: No data scraped.")
+        print(f"Skipping {name}: No data scraped.")
 
-    time.sleep(1)  # keep pause between requests (same as original)
+    with open(checkpoint_file, "w") as f:
+        f.write(str(i))
+
+    time.sleep(1)
+

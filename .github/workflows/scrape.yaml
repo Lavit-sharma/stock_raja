@@ -1,48 +1,122 @@
-name: TradingView Scraper
+name: 🚀 Concurrent TradingView Scraper
 
 on:
+  # 1. Manual trigger: Allows you to run the workflow on demand from the GitHub UI.
+  workflow_dispatch:
+  # 2. Scheduled trigger: Runs the workflow daily at 1:00 AM UTC (adjust as needed).
   schedule:
     - cron: '0 1 * * *'
-  workflow_dispatch:
 
 jobs:
-  scrape:
-    runs-on: ubuntu-latest
+  scrape_data:
+    # Use the Matrix strategy to run multiple jobs in parallel (sharding)
     strategy:
-      fail-fast: false
+      fail-fast: false  # Allows other shards to continue even if one fails
       matrix:
-        shard: [0,1,2,3,4,5,6,7,8,9]
-      # optionally limit burst concurrency if Google Sheets 429s occur
-      # max-parallel: 5
+        # Define the total number of shards (e.g., 5 jobs running concurrently)
+        shard_index: [0, 1, 2, 3, 4]
+        # Set the total number of shards (SHARD_STEP) based on the list size
+        SHARD_STEP: [5] 
+        # Optional: Define a unique checkpoint file name for each shard
+        CHECKPOINT_FILE: 
+          - checkpoint_0.txt
+          - checkpoint_1.txt
+          - checkpoint_2.txt
+          - checkpoint_3.txt
+          - checkpoint_4.txt
+
+    # The runner environment where the job will execute
+    runs-on: ubuntu-latest
+
     env:
-      SHARD_INDEX: ${{ matrix.shard }}
-      SHARD_STEP: 10
+      # Pass the SHARD_STEP value from the matrix to the Python script
+      SHARD_STEP: ${{ matrix.SHARD_STEP }} 
+      # Pass the SHARD_INDEX value from the matrix to the Python script
+      SHARD_INDEX: ${{ matrix.shard_index }}
+      # Pass the CHECKPOINT_FILE value from the matrix to the Python script
+      CHECKPOINT_FILE: ${{ matrix.CHECKPOINT_FILE }}
+      # Set the maximum workers for the ThreadPoolExecutor inside the Python script
+      PYTHON_MAX_WORKERS: 8 
+      
     steps:
       - name: ⬇️ Checkout Repository
         uses: actions/checkout@v4
 
+      # --- 1. System Setup (Install Chrome) ---
+      # Selenium requires a full Chrome installation on the runner.
+      - name: 🌐 Install Google Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+
+      # --- 2. Python Setup ---
       - name: 🐍 Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.x'
 
-      - name: 📦 Install dependencies
+      # --- 3. Dependency Installation ---
+      # NOTE: Ensure you have a requirements.txt file listing your dependencies:
+      # selenium, webdriver-manager, beautifulsoup4, lxml, gspread, oauth2client
+      - name: 📦 Install Python Dependencies
         run: |
-          pip install selenium beautifulsoup4 gspread webdriver-manager
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: 🔑 Set up Google Credentials
-        run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
-
-      - name: 🍪 Set up TradingView Cookies
-        run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
-
-      - name: ⚙️ Create Checkpoint File (matrix-aware)
+      # --- 4. Secrets Setup ---
+      # This step handles the Google Sheets credentials file and the cookies.
+      - name: 🔑 Configure Secrets
         run: |
-          FILE="checkpoint_new_1_${{ matrix.shard }}.txt"
-          if [ ! -f "$FILE" ]; then echo "1" > "$FILE"; fi
+          # Create credentials.json from GitHub secret
+          echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
+          
+          # Create cookies.json from GitHub secret (if available)
+          if [ -n "${{ secrets.TRADINGVIEW_COOKIES }}" ]; then
+            echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
+          else
+            echo "::warning::TRADINGVIEW_COOKIES secret not found. Proceeding without login."
+          fi
 
-      - name: 🚀 Run Scraper Script
-        env:
-          CHECKPOINT_FILE: checkpoint_new_1_${{ matrix.shard }}.txt
-        run: python run_scraper.py
+      # --- 5. Run Scraper ---
+      # Check for and download the checkpoint file from previous runs (if it exists)
+      - name: 📥 Restore Checkpoint
+        uses: actions/cache/restore@v4
+        id: checkpoint-restore
+        with:
+          path: ${{ env.CHECKPOINT_FILE }}
+          key: ${{ env.CHECKPOINT_FILE }}
 
+      - name: 🚀 Run Python Scraper (Shard ${{ matrix.shard_index }})
+        # The script automatically uses the SHARD_INDEX/SHARD_STEP environment variables
+        run: python run_scraper.py 
+
+      # --- 6. Persist Checkpoint ---
+      # Save the updated checkpoint file (i.e., the progress) for the next run.
+      - name: 💾 Save Checkpoint
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CHECKPOINT_FILE }}
+          key: ${{ env.CHECKPOINT_FILE }}
+          
+      # --- 7. Commit Checkpoint (Optional, for persistent tracking) ---
+      # This step is highly recommended to permanently save the checkpoint file in the repo.
+      # Only run this step if the job completed successfully.
+      - name: 💾 Commit Checkpoint File
+        if: success()
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: 'CI(checkpoint): Update shard ${{ matrix.shard_index }} checkpoint to ${{ env.CHECKPOINT_FILE }}'
+          files: ${{ env.CHECKPOINT_FILE }}
+
+---
+
+### Key Optimization Notes:
+
+1.  **Concurrency:** The `strategy: matrix` block creates **5 separate, parallel jobs**. Since each job runs your Python script with a different `SHARD_INDEX` (0 to 4), they scrape 1/5th of the total stocks simultaneously.
+2.  **Environment Variables:** The variables in the `env` block automatically pass the necessary sharding parameters (`SHARD_INDEX`, `SHARD_STEP`, `CHECKPOINT_FILE`) to your Python script, linking the matrix job to your internal logic.
+3.  **Persistence (Checkpoints):**
+    * The `actions/cache/restore` step tries to retrieve the last saved checkpoint file for that specific shard.
+    * The `actions/cache/save` step saves the final checkpoint file after the run.
+    * The final **`stefanzweifel/git-auto-commit-action`** is crucial: it **commits the checkpoint file back to your repository**. This ensures that if the action is run again, it starts exactly where it left off, providing robustness and preventing redundant work.
+
+This YAML structure will fully leverage the concurrency you built into your Python code, achieving the significant time reduction you need.

@@ -13,33 +13,25 @@ import time
 import json
 from webdriver_manager.chrome import ChromeDriverManager
 
-# ---------------- SHARDING (env-driven) ---------------- #
-# SHARD_INDEX: which shard am I (0..9). SHARD_STEP: total shards (10).
-SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
-SHARD_STEP = int(os.getenv("SHARD_STEP", "1"))
-
-# Allow workflow to pass a unique checkpoint filename per shard.
-checkpoint_file = os.getenv("CHECKPOINT_FILE", "checkpoint_new_1.txt")
-last_i = int(open(checkpoint_file).read()) if os.path.exists(checkpoint_file) else 1
+# ---------------- BATCH CONTROL ---------------- #
+START_INDEX = int(os.getenv("START_INDEX", "1"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "200"))
+END_INDEX = START_INDEX + BATCH_SIZE - 1
+print(f"[Batch Config] START_INDEX={START_INDEX}, END_INDEX={END_INDEX}")
 
 # ---------------- SETUP ---------------- #
-
-# Chrome Options
 chrome_options = Options()
-# Use the modern headless mode for reliability in CI
-chrome_options.add_argument("--headless=new")  # Selenium/Chrome recommend this form [web:27]
+chrome_options.add_argument("--headless=new")
 chrome_options.add_argument("--disable-gpu")
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
 chrome_options.add_argument("--remote-debugging-port=9222")
 
 # ---------------- GOOGLE SHEETS AUTH ---------------- #
-
 try:
     gc = gspread.service_account("credentials.json")
 except Exception as e:
     print(f"Error loading credentials.json: {e}")
-    print("Ensure 'credentials.json' exists or has been created by GitHub Actions.")
     exit(1)
 
 sheet_main = gc.open('Stock List').worksheet('Sheet1')
@@ -49,12 +41,11 @@ company_list = sheet_main.col_values(5)
 name_list = sheet_main.col_values(1)
 current_date = date.today().strftime("%m/%d/%Y")
 
-# ---------------- SCRAPER FUNCTION ---------------- #
+# ---------------- SCRAPER FUNCTION (UNTOUCHED) ---------------- #
 def scrape_tradingview(company_url):
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
     driver.set_window_size(1920, 1080)
     try:
-        # LOGIN USING SAVED COOKIES
         if os.path.exists("cookies.json"):
             driver.get("https://www.tradingview.com/")
             with open("cookies.json", "r", encoding="utf-8") as f:
@@ -71,9 +62,7 @@ def scrape_tradingview(company_url):
             time.sleep(2)
         else:
             print("⚠️ cookies.json not found. Proceeding without login may limit data.")
-            pass
 
-        # AFTER LOGIN, OPEN THE TARGET URL
         driver.get(company_url)
         WebDriverWait(driver, 45).until(
             EC.visibility_of_element_located((By.XPATH,
@@ -96,30 +85,18 @@ def scrape_tradingview(company_url):
     finally:
         driver.quit()
 
-# ---------------- MAIN LOOP (matrix-aware) ---------------- #
-for i, company_url in enumerate(company_list[last_i:], last_i):
-    # Shard filter: only process indices that belong to this shard
-    if i % SHARD_STEP != SHARD_INDEX:
-        continue
-
-    if i > 2500:
-        print("Reached scraping limit (i > 2500). Stopping.")
-        break
-
-    name = name_list[i] if i < len(name_list) else f"Row {i}"
-    print(f"Scraping {i}: {name} | {company_url}")
+# ---------------- MAIN LOOP ---------------- #
+for i in range(START_INDEX - 1, min(END_INDEX, len(company_list))):
+    name = name_list[i] if i < len(name_list) else f"Row {i+1}"
+    company_url = company_list[i]
+    print(f"Scraping {i+1}: {name} | {company_url}")
 
     values = scrape_tradingview(company_url)
     if values:
         row = [name, current_date] + values
-        # Note: if you see rate-limit errors, consider batching or backoff
-        sheet_data.append_row(row, table_range='A1')  # gspread append_row; see rate limits docs if needed [web:7][web:26]
-        print(f"Successfully scraped and saved data for {name}.")
+        sheet_data.append_row(row, table_range='A1')
+        print(f"✅ Saved data for {name}")
     else:
-        print(f"Skipping {name}: No data scraped.")
-
-    with open(checkpoint_file, "w") as f:
-        f.write(str(i))
+        print(f"⚠️ Skipping {name}: No data scraped.")
 
     time.sleep(1)
-

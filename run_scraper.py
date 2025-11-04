@@ -34,8 +34,8 @@ except Exception as e:
 sheet_main = gc.open('Stock List').worksheet('Sheet1')
 sheet_data = gc.open('Tradingview Data Reel Experimental May').worksheet('Sheet5')
 
-company_list = sheet_main.col_values(5)
 name_list = sheet_main.col_values(1)
+company_list = sheet_main.col_values(5)
 current_date = date.today().strftime("%m/%d/%Y")
 
 def scrape_tradingview_with_driver(driver, company_url):
@@ -54,6 +54,8 @@ def scrape_tradingview_with_driver(driver, company_url):
                     pass
             driver.refresh()
             time.sleep(2)
+        else:
+            print("⚠️ cookies.json not found. Proceeding without login may limit data.")
 
         driver.get(company_url)
         WebDriverWait(driver, 45).until(
@@ -67,6 +69,7 @@ def scrape_tradingview_with_driver(driver, company_url):
             for el in soup.find_all("div", class_="valueValue-l31H9iuA apply-common-tooltip")
         ]
         return values
+
     except NoSuchElementException:
         print(f"Data element not found for URL: {company_url}")
         return []
@@ -85,17 +88,17 @@ def flush_buffer():
         try:
             sheet_data.spreadsheet.values_append(
                 'Sheet5!A1',
-                {'valueInputOption':'USER_ENTERED', 'insertDataOption':'INSERT_ROWS'},
+                {'valueInputOption': 'USER_ENTERED', 'insertDataOption': 'INSERT_ROWS'},
                 {'values': buffer}
             )
-            print(f"APPEND OK: {len(buffer)} rows")
+            print(f"[PUSH] {len(buffer)} rows appended")
             buffer = []
             return
         except Exception as e:
             wait = (attempt + 1) * 5
             print(f"Append retry in {wait}s due to: {str(e)}")
             time.sleep(wait)
-    print("Failed to append batch after retries")
+    print("✗ Failed to append after retries")
 
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 driver.set_window_size(1920, 1080)
@@ -116,7 +119,7 @@ try:
         if values:
             row = [name, current_date] + values
             buffer.append(row)
-            print(f"Queued row for {name} (buffer={len(buffer)})")
+            print(f"Queued {name} (buffer={len(buffer)})")
             if len(buffer) >= BATCH_SIZE_APPEND:
                 flush_buffer()
         else:

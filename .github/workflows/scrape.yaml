@@ -46,8 +46,9 @@ jobs:
       - name: 🚀 Run Scraper Batch ${{ matrix.batch }}
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
-          START_INDEX: ${{ (matrix.batch - 1) * fromJSON(github.event.inputs.batch_size || '200') + 1 }}
-          BATCH_SIZE: ${{ github.event.inputs.batch_size || '200' }}
+          # Fixed arithmetic expression for START_INDEX
+          START_INDEX: ${{ ((matrix.batch - 1) * (github.event.inputs.batch_size || 200) + 1) }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size || 200 }}
         run: |
           echo "Batch ${{ matrix.batch }}: START_INDEX=${{ env.START_INDEX }}, BATCH_SIZE=${{ env.BATCH_SIZE }}"
           python run_scraper.py

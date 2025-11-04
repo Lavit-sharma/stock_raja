@@ -17,7 +17,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 BATCH_SIZE = int(os.getenv("INPUT_BATCH_SIZE", "200"))
 MATRIX_BATCH = int(os.getenv("MATRIX_BATCH", "1"))
 
-# Read Google Sheet data first
+# Read Google Sheet data
 try:
     gc = gspread.service_account("credentials.json")
 except Exception as e:
@@ -31,7 +31,7 @@ company_list = sheet_main.col_values(5)
 name_list = sheet_main.col_values(1)
 current_date = date.today().strftime("%m/%d/%Y")
 
-# Correct batch slicing to prevent repeats
+# ---------------- BATCH SLICING ---------------- #
 START_INDEX = (MATRIX_BATCH - 1) * BATCH_SIZE
 END_INDEX = min(START_INDEX + BATCH_SIZE, len(company_list))
 print(f"[Batch {MATRIX_BATCH}] START_INDEX={START_INDEX}, END_INDEX={END_INDEX}")
@@ -44,7 +44,7 @@ chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
 chrome_options.add_argument("--remote-debugging-port=9222")
 
-# ---------------- SCRAPER FUNCTION ---------------- #
+# ---------------- SCRAPER FUNCTION (UNCHANGED) ---------------- #
 def scrape_tradingview(company_url):
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
     driver.set_window_size(1920, 1080)
@@ -90,7 +90,7 @@ def scrape_tradingview(company_url):
     finally:
         driver.quit()
 
-# ---------------- MAIN LOOP ---------------- #
+# ---------------- MAIN LOOP (BATCH-RESPECTING) ---------------- #
 for i in range(START_INDEX, END_INDEX):
     name = name_list[i] if i < len(name_list) else f"Row {i+1}"
     company_url = company_list[i]
@@ -104,4 +104,4 @@ for i in range(START_INDEX, END_INDEX):
     else:
         print(f"⚠️ Skipping {name}: No data scraped.")
 
-    time.sleep(1)  # keep short pause between requests
+    time.sleep(1)  # keep pause between requests (same as original)

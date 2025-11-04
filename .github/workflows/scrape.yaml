@@ -1,8 +1,8 @@
-name: TradingView Scraper (Parallel Batches)
+name: TradingView Scraper (Parallel 10x, quota-safe)
 
 on:
   schedule:
-    - cron: '30 3 * * *'  # 09:00 IST
+    - cron: '30 3 * * *'  # runs at 03:30 UTC (~09:00 IST)
   workflow_dispatch:
     inputs:
       total_batches:
@@ -18,35 +18,65 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-
     strategy:
       matrix:
-        batch: [1,2,3,4,5,6,7,8,9,10]
+        batch: [1,2,3,4,5,6,7,8,9,10]  # 10 parallel jobs
       max-parallel: 10
+      fail-fast: false
 
     steps:
-      - name: ⬇️ Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🐍 Setup Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: 📦 Install Dependencies
+      - name: Install Chrome
         run: |
-          pip install selenium beautifulsoup4 gspread webdriver-manager
+          set -e
+          curl -fsSL "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" -o chrome.deb
+          sudo dpkg -i chrome.deb || sudo apt-get -f install -y
+          google-chrome --version || true
 
-      - name: 🔑 Setup Google Credentials
-        run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-input selenium beautifulsoup4 gspread webdriver-manager
 
-      - name: 🍪 Setup TradingView Cookies
-        run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
+      - name: Write credentials and cookies
+        run: |
+          echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
+          echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
 
-      - name: 🚀 Run Scraper Batch ${{ matrix.batch }}
+      - name: Calculate batch range
+        id: calc
+        shell: bash
         env:
           MATRIX_BATCH: ${{ matrix.batch }}
-          INPUT_BATCH_SIZE: ${{ github.event.inputs.batch_size || '200' }}
+          BATCH_SIZE: ${{ inputs.batch_size || '200' }}
+          TOTAL_BATCHES: ${{ inputs.total_batches || '10' }}
         run: |
-          echo "Running batch ${{ matrix.batch }} with batch size ${{ env.INPUT_BATCH_SIZE }}"
+          START=$(( (MATRIX_BATCH - 1) * BATCH_SIZE + 1 ))
+          echo "start=${START}" >> "$GITHUB_OUTPUT"
+          echo "size=${BATCH_SIZE}" >> "$GITHUB_OUTPUT"
+          echo "step=${TOTAL_BATCHES}" >> "$GITHUB_OUTPUT"
+          SLEEP=$(( (MATRIX_BATCH - 1) * 10 ))   # stagger start times
+          echo "sleep=${SLEEP}" >> "$GITHUB_OUTPUT"
+
+      - name: Stagger start
+        shell: bash
+        run: |
+          echo "Staggering ${{ steps.calc.outputs.sleep }}s"
+          sleep "${{ steps.calc.outputs.sleep }}"
+
+      - name: Run scraper batch ${{ matrix.batch }}
+        env:
+          START_INDEX: ${{ steps.calc.outputs.start }}
+          BATCH_SIZE: ${{ steps.calc.outputs.size }}
+          SHARD_INDEX: ${{ matrix.batch }}
+          SHARD_STEP: ${{ steps.calc.outputs.step }}
+        run: |
+          echo "Batch ${{ matrix.batch }} → START_INDEX=$START_INDEX, BATCH_SIZE=$BATCH_SIZE, SHARD_INDEX=$SHARD_INDEX/$SHARD_STEP"
           python run_scraper.py

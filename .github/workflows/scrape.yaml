@@ -1,8 +1,14 @@
-name: TradingView Scraper (Parallel 10x)
+name: TradingView Scraper (Parallel Batches)
 
 on:
+  schedule:
+    - cron: '30 3 * * *'  # 09:00 IST
   workflow_dispatch:
     inputs:
+      total_batches:
+        description: 'Number of parallel batches'
+        required: false
+        default: '10'
       batch_size:
         description: 'Companies per batch'
         required: false
@@ -11,26 +17,36 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+
     strategy:
       matrix:
         batch: [1,2,3,4,5,6,7,8,9,10]
       max-parallel: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - name: ⬇️ Checkout Repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - run: pip install selenium beautifulsoup4 gspread webdriver-manager
+      - name: 📦 Install Dependencies
+        run: |
+          pip install selenium beautifulsoup4 gspread webdriver-manager
 
-      - run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
+      - name: 🔑 Setup Google Credentials
+        run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
 
-      - run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
+      - name: 🍪 Setup TradingView Cookies
+        run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
 
-      - name: Run Scraper Batch
+      - name: 🚀 Run Scraper Batch ${{ matrix.batch }}
         env:
           MATRIX_BATCH: ${{ matrix.batch }}
-          INPUT_BATCH_SIZE: ${{ github.event.inputs.batch_size }}
-        run: python run_scraper.py
+          INPUT_BATCH_SIZE: ${{ github.event.inputs.batch_size || '200' }}
+        run: |
+          echo "Running batch ${{ matrix.batch }} with batch size ${{ env.INPUT_BATCH_SIZE }}"
+          python run_scraper.py

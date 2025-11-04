@@ -1,4 +1,4 @@
-name: TradingView Scraper (10x shards, optimized jobs)
+name: TradingView Scraper (10x shards, quota-safe)
 
 on:
   schedule:
@@ -33,6 +33,12 @@ jobs:
 
       - name: 🍪 Set up TradingView Cookies
         run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
+
+      - name: ⏳ Stagger shard start (reduce read bursts)
+        run: |
+          SLEEP=$(( ${{ matrix.shard }} * 10 ))
+          echo "Staggering ${SLEEP}s for shard ${{ matrix.shard }}"
+          sleep "${SLEEP}"
 
       - name: ⚙️ Create Checkpoint File (matrix-aware)
         run: |

@@ -2,7 +2,7 @@ name: TradingView Scraper (Parallel 10x)
 
 on:
   schedule:
-    - cron: '30 3 * * *'   # Runs daily at 09:00 AM IST (03:30 UTC)
+    - cron: '30 3 * * *'   # 9:00 AM IST
   workflow_dispatch:
     inputs:
       total_batches:
@@ -46,10 +46,8 @@ jobs:
       - name: 🚀 Run Scraper Batch ${{ matrix.batch }}
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
-          TRADINGVIEW_EMAIL: ${{ secrets.TRADINGVIEW_EMAIL }}
-          TRADINGVIEW_PASSWORD: ${{ secrets.TRADINGVIEW_PASSWORD }}
           START_INDEX: ${{ (matrix.batch - 1) * fromJSON(github.event.inputs.batch_size || '200') + 1 }}
           BATCH_SIZE: ${{ github.event.inputs.batch_size || '200' }}
         run: |
-          echo "Batch ${{ matrix.batch }} starting..."
+          echo "Batch ${{ matrix.batch }}: START_INDEX=${{ env.START_INDEX }}, BATCH_SIZE=${{ env.BATCH_SIZE }}"
           python run_scraper.py

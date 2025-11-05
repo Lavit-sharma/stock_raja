@@ -2,7 +2,7 @@ name: TradingView Scraper (Parallel 10x, 50-row batching)
 
 on:
   schedule:
-    - cron: '0 1 * * *' # UTC schedule (~06:30 AM IST)
+    - cron: '0 1 * * *' # UTC time
   workflow_dispatch:
     inputs:
       total_batches:
@@ -22,12 +22,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] # 10 parallel shards
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]  # 10 jobs
       max-parallel: 10
 
     env:
-      SHARD_INDEX: ${{ matrix.shard }}                 # modulus sharding still available
-      SHARD_STEP:  ${{ inputs.total_batches || '10' }} # 10 shards by default
+      SHARD_INDEX: ${{ matrix.shard }}
+      SHARD_STEP: ${{ inputs.total_batches || '10' }}
 
     steps:
       - name: ⬇️ Checkout Repository
@@ -43,7 +43,7 @@ jobs:
           set -e
           curl -fsSL "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" -o chrome.deb
           sudo dpkg -i chrome.deb || sudo apt-get -f install -y
-          google-chrome --version || true  # verify install
+          google-chrome --version || true
 
       - name: 📦 Install dependencies
         run: |
@@ -60,16 +60,14 @@ jobs:
         id: calc
         shell: bash
         env:
-          MATRIX_BATCH:  ${{ matrix.shard }}                 # 0..9
-          BATCH_SIZE:    ${{ inputs.batch_size   || '200' }} # 200
+          MATRIX_BATCH: ${{ matrix.shard }}
+          BATCH_SIZE: ${{ inputs.batch_size || '200' }}
         run: |
-          # Convert 0-based shard to 1-based batches for range math
           BATCH_NUM=$(( ${MATRIX_BATCH} + 1 ))
           START=$(( ( ${BATCH_NUM} - 1 ) * ${BATCH_SIZE} + 1 ))
           echo "start=${START}" >> "$GITHUB_OUTPUT"
           echo "size=${BATCH_SIZE}" >> "$GITHUB_OUTPUT"
-          # Gentle stagger to smooth read/write bursts
-          SLEEP=$(( ${BATCH_NUM} * 10 ))  # 10s,20s,...,100s
+          SLEEP=$(( ${BATCH_NUM} * 10 ))
           echo "sleep=${SLEEP}" >> "$GITHUB_OUTPUT"
 
       - name: ⏳ Stagger start
@@ -81,10 +79,10 @@ jobs:
       - name: 🚀 Run Scraper Script
         env:
           CHECKPOINT_FILE: checkpoint_new_1_${{ matrix.shard }}.txt
-          START_INDEX:  ${{ steps.calc.outputs.start }}  # direct range mode
-          BATCH_SIZE:   ${{ steps.calc.outputs.size }}
-          SHARD_INDEX:  ${{ env.SHARD_INDEX }}           # still exported for modulus path
-          SHARD_STEP:   ${{ env.SHARD_STEP }}
+          START_INDEX: ${{ steps.calc.outputs.start }}
+          BATCH_SIZE: ${{ steps.calc.outputs.size }}
+          SHARD_INDEX: ${{ env.SHARD_INDEX }}
+          SHARD_STEP: ${{ env.SHARD_STEP }}
         run: |
           FILE="$CHECKPOINT_FILE"
           if [ ! -f "$FILE" ]; then echo "1" > "$FILE"; fi

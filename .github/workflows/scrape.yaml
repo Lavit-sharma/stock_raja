@@ -10,10 +10,17 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    
+    # 🌟 FIX APPLIED HERE 🌟
+    # Grant the GITHUB_TOKEN write permission to commit the checkpoint file.
+    permissions:
+      contents: write 
+    # 🌟 ----------------- 🌟
+      
     strategy:
       fail-fast: false
       matrix:
-        # INCREASED SHARDS: Divide 2000 tasks among 15 parallel runners for faster wall-clock time.
+        # INCREASED SHARDS: Divide tasks among 15 parallel runners.
         shard_index: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] 
     
     env:
@@ -64,6 +71,7 @@ jobs:
 
       # --- 5. Run Scraper ---
       - name: 🚀 Run Scraper Script (Shard ${{ env.SHARD_INDEX }})
+        # Note: Ensure your Python file is named 'run_scraper.py'
         run: python run_scraper.py 
 
       # --- 6. Persist Checkpoint ---
@@ -73,8 +81,9 @@ jobs:
           path: ${{ env.CHECKPOINT_FILE }}
           key: ${{ env.CHECKPOINT_FILE }}
           
-      # --- 7. Commit Checkpoint (For permanent tracking in git) ---
+      # --- 7. Commit Checkpoint ---
       - name: 💾 Commit Checkpoint File
+        # This step will now succeed due to the 'permissions: contents: write' setting.
         if: success()
         uses: stefanzweifel/git-auto-commit-action@v5
         with:

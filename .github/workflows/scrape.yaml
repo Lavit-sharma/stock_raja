@@ -11,21 +11,18 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     
-    # 🌟 FIX APPLIED HERE 🌟
-    # Grant the GITHUB_TOKEN write permission to commit the checkpoint file.
+    # 🌟 FIX 1: Grant write permission to resolve 403 (Permission Denied) 🌟
     permissions:
       contents: write 
-    # 🌟 ----------------- 🌟
       
     strategy:
       fail-fast: false
       matrix:
-        # INCREASED SHARDS: Divide tasks among 15 parallel runners.
+        # Optimized for speed: 15 parallel shards
         shard_index: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] 
     
     env:
       SHARD_INDEX: ${{ matrix.shard_index }}
-      # MUST MATCH the number of shards in the matrix
       SHARD_STEP: 15 
       CHECKPOINT_FILE: checkpoint_${{ matrix.shard_index }}.txt
 
@@ -47,7 +44,6 @@ jobs:
 
       - name: 📦 Install dependencies
         run: |
-          # Use lxml for fast BeautifulSoup parsing
           pip install selenium beautifulsoup4 lxml gspread webdriver-manager
 
       # --- 3. Secrets Setup ---
@@ -71,21 +67,26 @@ jobs:
 
       # --- 5. Run Scraper ---
       - name: 🚀 Run Scraper Script (Shard ${{ env.SHARD_INDEX }})
-        # Note: Ensure your Python file is named 'run_scraper.py'
         run: python run_scraper.py 
 
-      # --- 6. Persist Checkpoint ---
+      # --- 6. Persist Checkpoint (Cache) ---
       - name: 💾 Save Checkpoint Cache
         uses: actions/cache/save@v4
         with:
           path: ${{ env.CHECKPOINT_FILE }}
           key: ${{ env.CHECKPOINT_FILE }}
           
-      # --- 7. Commit Checkpoint ---
+      # 🌟 FIX 2: Pull before commit to resolve 'non-fast-forward' push error 🌟
+      - name: 🔄 Pull Latest Remote Changes
+        if: success()
+        run: |
+          git pull origin ${{ github.ref_name }}
+          
+      # --- 7. Commit Checkpoint (Push to Git) ---
       - name: 💾 Commit Checkpoint File
-        # This step will now succeed due to the 'permissions: contents: write' setting.
         if: success()
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: 'CI(checkpoint): Update shard ${{ env.SHARD_INDEX }} progress'
-          files: ${{ env.CHECKPOINT_FILE }}
+          # FIX 3: Using 'file_pattern' to remove the deprecation warning
+          file_pattern: ${{ env.CHECKPOINT_FILE }}

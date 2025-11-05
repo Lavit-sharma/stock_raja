@@ -1,4 +1,4 @@
-name: 🚀 Concurrent TradingView Scraper
+name: 🚀 Concurrent TradingView Scraper (Optimized for Speed)
 
 on:
   # 1. Scheduled trigger: Runs the workflow daily at 1:00 AM UTC
@@ -13,13 +13,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Renamed 'shard' to 'shard_index' for consistency with Python ENV
-        shard_index: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] 
+        # INCREASED SHARDS: Divide 2000 tasks among 15 parallel runners for faster wall-clock time.
+        shard_index: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] 
     
     env:
       SHARD_INDEX: ${{ matrix.shard_index }}
-      SHARD_STEP: 10
-      # Define the checkpoint file name based on the matrix index
+      # MUST MATCH the number of shards in the matrix
+      SHARD_STEP: 15 
       CHECKPOINT_FILE: checkpoint_${{ matrix.shard_index }}.txt
 
     steps:
@@ -27,7 +27,6 @@ jobs:
         uses: actions/checkout@v4
 
       # --- 1. System Setup (Install Chrome) ---
-      # Essential for any Selenium job using Chrome on a GitHub Runner
       - name: 🌐 Install Google Chrome
         run: |
           sudo apt-get update
@@ -41,7 +40,7 @@ jobs:
 
       - name: 📦 Install dependencies
         run: |
-          # Use lxml for fast BeautifulSoup parsing (as used in the Python update)
+          # Use lxml for fast BeautifulSoup parsing
           pip install selenium beautifulsoup4 lxml gspread webdriver-manager
 
       # --- 3. Secrets Setup ---
@@ -52,7 +51,6 @@ jobs:
         run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
 
       # --- 4. Checkpoint Management (Using Cache) ---
-      # Restore the checkpoint file from the last successful run for this specific shard.
       - name: 📥 Restore Checkpoint Cache
         uses: actions/cache/restore@v4
         id: checkpoint-restore
@@ -60,28 +58,22 @@ jobs:
           path: ${{ env.CHECKPOINT_FILE }}
           key: ${{ env.CHECKPOINT_FILE }}
           
-      # If cache missed, initialize the file to ensure 'last_i' is defined in Python
       - name: ⚙️ Initialize Checkpoint File (if cache missed)
         if: steps.checkpoint-restore.outputs.cache-hit != 'true'
-        run: echo "0" > ${{ env.CHECKPOINT_FILE }} # Start index 0 (or 1 depending on your script)
-        # Note: Your Python script handles setting 'last_i' from this file.
+        run: echo "0" > ${{ env.CHECKPOINT_FILE }}
 
       # --- 5. Run Scraper ---
       - name: 🚀 Run Scraper Script (Shard ${{ env.SHARD_INDEX }})
-        # The CHECKPOINT_FILE env variable is already set at the job level.
         run: python run_scraper.py 
 
       # --- 6. Persist Checkpoint ---
-      # Save the updated checkpoint file (progress) back to the cache.
       - name: 💾 Save Checkpoint Cache
         uses: actions/cache/save@v4
         with:
           path: ${{ env.CHECKPOINT_FILE }}
           key: ${{ env.CHECKPOINT_FILE }}
-        
-      # --- 7. Commit Checkpoint (Optional: For permanent tracking in git) ---
-      # This commits the checkpoint file back to the repository for true persistence 
-      # and visibility outside of the GitHub Actions cache.
+          
+      # --- 7. Commit Checkpoint (For permanent tracking in git) ---
       - name: 💾 Commit Checkpoint File
         if: success()
         uses: stefanzweifel/git-auto-commit-action@v5

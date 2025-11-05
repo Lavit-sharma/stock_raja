@@ -1,42 +1,26 @@
-name: 🚀 Concurrent TradingView Scraper (Optimized for Speed)
+name: TradingView Scraper
 
 on:
-  # 1. Scheduled trigger: Runs the workflow daily at 1:00 AM UTC
   schedule:
     - cron: '0 1 * * *'
-  # 2. Manual trigger
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    
-    # 🌟 FIX 1: Grant write permission to resolve 403 (Permission Denied) 🌟
-    permissions:
-      contents: write 
-      
     strategy:
       fail-fast: false
       matrix:
-        # Optimized for speed: 15 parallel shards
-        shard_index: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] 
-    
+        shard: [0,1,2,3,4,5,6,7,8,9]
+      # optionally limit burst concurrency if Google Sheets 429s occur
+      # max-parallel: 5
     env:
-      SHARD_INDEX: ${{ matrix.shard_index }}
-      SHARD_STEP: 15 
-      CHECKPOINT_FILE: checkpoint_${{ matrix.shard_index }}.txt
-
+      SHARD_INDEX: ${{ matrix.shard }}
+      SHARD_STEP: 10
     steps:
       - name: ⬇️ Checkout Repository
         uses: actions/checkout@v4
 
-      # --- 1. System Setup (Install Chrome) ---
-      - name: 🌐 Install Google Chrome
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-
-      # --- 2. Python Setup & Dependencies ---
       - name: 🐍 Set up Python
         uses: actions/setup-python@v5
         with:
@@ -44,49 +28,21 @@ jobs:
 
       - name: 📦 Install dependencies
         run: |
-          pip install selenium beautifulsoup4 lxml gspread webdriver-manager
+          pip install selenium beautifulsoup4 gspread webdriver-manager
 
-      # --- 3. Secrets Setup ---
       - name: 🔑 Set up Google Credentials
         run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
 
       - name: 🍪 Set up TradingView Cookies
         run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
 
-      # --- 4. Checkpoint Management (Using Cache) ---
-      - name: 📥 Restore Checkpoint Cache
-        uses: actions/cache/restore@v4
-        id: checkpoint-restore
-        with:
-          path: ${{ env.CHECKPOINT_FILE }}
-          key: ${{ env.CHECKPOINT_FILE }}
-          
-      - name: ⚙️ Initialize Checkpoint File (if cache missed)
-        if: steps.checkpoint-restore.outputs.cache-hit != 'true'
-        run: echo "0" > ${{ env.CHECKPOINT_FILE }}
-
-      # --- 5. Run Scraper ---
-      - name: 🚀 Run Scraper Script (Shard ${{ env.SHARD_INDEX }})
-        run: python run_scraper.py 
-
-      # --- 6. Persist Checkpoint (Cache) ---
-      - name: 💾 Save Checkpoint Cache
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ env.CHECKPOINT_FILE }}
-          key: ${{ env.CHECKPOINT_FILE }}
-          
-      # 🌟 FIX 2: Pull before commit to resolve 'non-fast-forward' push error 🌟
-      - name: 🔄 Pull Latest Remote Changes
-        if: success()
+      - name: ⚙️ Create Checkpoint File (matrix-aware)
         run: |
-          git pull origin ${{ github.ref_name }}
-          
-      # --- 7. Commit Checkpoint (Push to Git) ---
-      - name: 💾 Commit Checkpoint File
-        if: success()
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: 'CI(checkpoint): Update shard ${{ env.SHARD_INDEX }} progress'
-          # FIX 3: Using 'file_pattern' to remove the deprecation warning
-          file_pattern: ${{ env.CHECKPOINT_FILE }}
+          FILE="checkpoint_new_1_${{ matrix.shard }}.txt"
+          if [ ! -f "$FILE" ]; then echo "1" > "$FILE"; fi
+
+      - name: 🚀 Run Scraper Script
+        env:
+          CHECKPOINT_FILE: checkpoint_new_1_${{ matrix.shard }}.txt
+        run: python run_scraper.py
+

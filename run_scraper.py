@@ -6,27 +6,25 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import NoSuchElementException
 from bs4 import BeautifulSoup
-import gspread
 from datetime import date
+import pandas as pd
 import os
 import time
 import json
+import requests
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- SHARDING (env-driven) ---------------- #
 SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
 SHARD_STEP = int(os.getenv("SHARD_STEP", "1"))
 
-# Range limits (for workflow batches)
 START_INDEX = int(os.getenv("START_INDEX", "1"))
 END_INDEX = int(os.getenv("END_INDEX", "2500"))
 
-# Allow workflow to pass a unique checkpoint filename per shard.
 checkpoint_file = os.getenv("CHECKPOINT_FILE", "checkpoint_new_1.txt")
 last_i = int(open(checkpoint_file).read()) if os.path.exists(checkpoint_file) else START_INDEX
 
 # ---------------- SETUP ---------------- #
-
 chrome_options = Options()
 chrome_options.add_argument("--headless=new")
 chrome_options.add_argument("--disable-gpu")
@@ -34,19 +32,28 @@ chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
 chrome_options.add_argument("--remote-debugging-port=9222")
 
-# ---------------- GOOGLE SHEETS AUTH ---------------- #
+# ---------------- READ STOCK LIST FROM GITHUB EXCEL ---------------- #
+
+# 🔹 Replace this URL with your actual raw Excel URL
+EXCEL_URL = "https://raw.githubusercontent.com/<username>/<repo>/main/stock_list.xlsx"
+
+print("📥 Fetching stock list from GitHub...")
 
 try:
-    gc = gspread.service_account("credentials.json")
+    response = requests.get(EXCEL_URL)
+    response.raise_for_status()
+    with open("stocks.xlsx", "wb") as f:
+        f.write(response.content)
+
+    df = pd.read_excel("stocks.xlsx")
+    # ✅ Assumes columns: 'Name' and 'URL' (or adjust below)
+    name_list = df.iloc[:, 0].fillna("").tolist()
+    company_list = df.iloc[:, 4].fillna("").tolist()  # 5th column like earlier Google Sheet
+
 except Exception as e:
-    print(f"Error loading credentials.json: {e}")
+    print(f"❌ Error reading Excel from GitHub: {e}")
     exit(1)
 
-sheet_main = gc.open('Stock List').worksheet('Sheet1')
-sheet_data = gc.open('Tradingview Data Reel Experimental May').worksheet('Sheet5')
-
-company_list = sheet_main.col_values(5)
-name_list = sheet_main.col_values(1)
 current_date = date.today().strftime("%m/%d/%Y")
 
 # ---------------- SCRAPER FUNCTION ---------------- #
@@ -71,9 +78,7 @@ def scrape_tradingview(company_url):
             time.sleep(2)
         else:
             print("⚠️ cookies.json not found. Proceeding without login may limit data.")
-            pass
 
-        # AFTER LOGIN, OPEN THE TARGET URL
         driver.get(company_url)
         WebDriverWait(driver, 45).until(
             EC.visibility_of_element_located((By.XPATH,
@@ -96,13 +101,11 @@ def scrape_tradingview(company_url):
     finally:
         driver.quit()
 
-# ---------------- MAIN LOOP (matrix-aware) ---------------- #
+# ---------------- MAIN LOOP ---------------- #
 for i, company_url in enumerate(company_list[last_i:], last_i):
-    # Range control (for workflow split)
     if i < START_INDEX or i > END_INDEX:
         continue
 
-    # Shard filter
     if i % SHARD_STEP != SHARD_INDEX:
         continue
 
@@ -116,7 +119,9 @@ for i, company_url in enumerate(company_list[last_i:], last_i):
     values = scrape_tradingview(company_url)
     if values:
         row = [name, current_date] + values
-        sheet_data.append_row(row, table_range='A1')
+        # 💾 Save locally instead of Google Sheet (append to CSV for now)
+        with open("output_data.csv", "a", encoding="utf-8") as f:
+            f.write(",".join(map(str, row)) + "\n")
         print(f"✅ Successfully scraped and saved data for {name}.")
     else:
         print(f"⚠️ Skipping {name}: No data scraped.")

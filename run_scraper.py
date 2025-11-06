@@ -35,7 +35,7 @@ chrome_options.add_argument("--remote-debugging-port=9222")
 # ---------------- READ STOCK LIST FROM GITHUB EXCEL ---------------- #
 
 # 🔹 Replace this URL with your actual raw Excel URL
-EXCEL_URL = "https://raw.githubusercontent.com/<username>/<repo>/main/stock_list.xlsx"
+EXCEL_URL = "https://github.com/Lavit-sharma/stock_raja/blob/main/Stock%20List.xlsx"
 
 print("📥 Fetching stock list from GitHub...")
 

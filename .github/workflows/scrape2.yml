@@ -1,8 +1,8 @@
-name: TradingView Scraper (Part 2 - Stocks 1001–2000)
+name: TradingView Scraper (Part 2 - Stocks 501–1000)
 
 on:
   schedule:
-    - cron: '30 1 * * *' # runs 30 minutes after Part 1
+    - cron: '15 1 * * *'
   workflow_dispatch:
 
 jobs:
@@ -16,8 +16,8 @@ jobs:
     env:
       SHARD_INDEX: ${{ matrix.shard }}
       SHARD_STEP: 10
-      START_INDEX: 1001
-      END_INDEX: 2000
+      START_INDEX: 501
+      END_INDEX: 1000
 
     steps:
       - name: ⬇️ Checkout Repository
@@ -39,7 +39,7 @@ jobs:
       - name: 🍪 Set up TradingView Cookies
         run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
 
-      - name: ⚙️ Create Checkpoint File (matrix-aware)
+      - name: ⚙️ Create Checkpoint File
         run: |
           FILE="checkpoint_part2_${{ matrix.shard }}.txt"
           if [ ! -f "$FILE" ]; then echo "${{ env.START_INDEX }}" > "$FILE"; fi

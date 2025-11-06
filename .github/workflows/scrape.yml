@@ -1,8 +1,8 @@
-name: TradingView Scraper (Part 1 - Stocks 1–1000)
+name: TradingView Scraper (Part 1 - Stocks 1–500)
 
 on:
   schedule:
-    - cron: '0 1 * * *'  # runs daily at 01:00 UTC (~6:30 AM IST)
+    - cron: '0 1 * * *'
   workflow_dispatch:
 
 jobs:
@@ -17,7 +17,7 @@ jobs:
       SHARD_INDEX: ${{ matrix.shard }}
       SHARD_STEP: 10
       START_INDEX: 1
-      END_INDEX: 1000
+      END_INDEX: 500
 
     steps:
       - name: ⬇️ Checkout Repository
@@ -28,10 +28,10 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 📦 Install Dependencies
+      - name: 📦 Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install selenium beautifulsoup4 gspread webdriver-manager openpyxl pandas requests
+          pip install --upgrade pip
+          pip install pandas openpyxl requests selenium beautifulsoup4 webdriver-manager gspread
 
       - name: 🔑 Set up Google Credentials
         run: echo '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
@@ -39,7 +39,7 @@ jobs:
       - name: 🍪 Set up TradingView Cookies
         run: echo '${{ secrets.TRADINGVIEW_COOKIES }}' > cookies.json
 
-      - name: ⚙️ Create Checkpoint File (matrix-aware)
+      - name: ⚙️ Create Checkpoint File
         run: |
           FILE="checkpoint_part1_${{ matrix.shard }}.txt"
           if [ ! -f "$FILE" ]; then echo "${{ env.START_INDEX }}" > "$FILE"; fi
@@ -50,10 +50,3 @@ jobs:
           START_INDEX: ${{ env.START_INDEX }}
           END_INDEX: ${{ env.END_INDEX }}
         run: python run_scraper.py
-
-      - name: 📤 Upload Checkpoints
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: checkpoint_part1-${{ matrix.shard }}
-          path: checkpoint_part1_${{ matrix.shard }}.txt

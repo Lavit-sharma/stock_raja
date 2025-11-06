@@ -6,11 +6,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import NoSuchElementException
 from bs4 import BeautifulSoup
+import gspread
 from datetime import date
-import pandas as pd
 import os
 import time
 import json
+import pandas as pd
 import requests
 from io import BytesIO
 from webdriver_manager.chrome import ChromeDriverManager
@@ -18,10 +19,8 @@ from webdriver_manager.chrome import ChromeDriverManager
 # ---------------- SHARDING (env-driven) ---------------- #
 SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
 SHARD_STEP = int(os.getenv("SHARD_STEP", "1"))
-
 START_INDEX = int(os.getenv("START_INDEX", "1"))
 END_INDEX = int(os.getenv("END_INDEX", "2500"))
-
 checkpoint_file = os.getenv("CHECKPOINT_FILE", "checkpoint_new_1.txt")
 last_i = int(open(checkpoint_file).read()) if os.path.exists(checkpoint_file) else START_INDEX
 
@@ -33,22 +32,26 @@ chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
 chrome_options.add_argument("--remote-debugging-port=9222")
 
-# ---------------- READ STOCK LIST FROM GITHUB EXCEL ---------------- #
+# ---------------- GOOGLE SHEETS AUTH ---------------- #
+try:
+    gc = gspread.service_account("credentials.json")
+except Exception as e:
+    print(f"Error loading credentials.json: {e}")
+    exit(1)
 
-print("📥 Fetching stock list from GitHub...")
+sheet_data = gc.open('Tradingview Data Reel Experimental May').worksheet('Sheet5')
+
+# ---------------- READ STOCK LIST FROM GITHUB EXCEL ---------------- #
+print("📥 Fetching stock list from GitHub Excel...")
 
 try:
-    # ✅ Use the RAW GitHub link, not the normal blob link
     EXCEL_URL = "https://raw.githubusercontent.com/Lavit-sharma/stock_raja/main/Stock%20List.xlsx"
     response = requests.get(EXCEL_URL)
     response.raise_for_status()
 
-    # ✅ Read directly from memory (no need to save)
-    df = pd.read_excel(BytesIO(response.content), engine='openpyxl')
-
-    # Assuming column A = name, column E = company link
-    name_list = df.iloc[:, 0].fillna("").tolist()
-    company_list = df.iloc[:, 4].fillna("").tolist()
+    df = pd.read_excel(BytesIO(response.content), engine="openpyxl")
+    name_list = df.iloc[:, 0].fillna("").tolist()   # Column A - Name
+    company_list = df.iloc[:, 4].fillna("").tolist()  # Column E - URL
 
     print(f"✅ Loaded {len(company_list)} companies from GitHub Excel.")
 except Exception as e:
@@ -106,13 +109,8 @@ def scrape_tradingview(company_url):
 for i, company_url in enumerate(company_list[last_i:], last_i):
     if i < START_INDEX or i > END_INDEX:
         continue
-
     if i % SHARD_STEP != SHARD_INDEX:
         continue
-
-    if i > END_INDEX:
-        print("Reached scraping limit for this batch. Stopping.")
-        break
 
     name = name_list[i] if i < len(name_list) else f"Row {i}"
     print(f"Scraping {i}: {name} | {company_url}")
@@ -120,10 +118,11 @@ for i, company_url in enumerate(company_list[last_i:], last_i):
     values = scrape_tradingview(company_url)
     if values:
         row = [name, current_date] + values
-        # 💾 Save locally instead of Google Sheet
-        with open("output_data.csv", "a", encoding="utf-8") as f:
-            f.write(",".join(map(str, row)) + "\n")
-        print(f"✅ Successfully scraped and saved data for {name}.")
+        try:
+            sheet_data.append_row(row, table_range='A1')
+            print(f"✅ Successfully scraped and saved data for {name}.")
+        except Exception as e:
+            print(f"⚠️ Failed to append for {name}: {e}")
     else:
         print(f"⚠️ Skipping {name}: No data scraped.")
 

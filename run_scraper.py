@@ -12,21 +12,24 @@ import os
 import time
 import json
 from webdriver_manager.chrome import ChromeDriverManager
+import random  # ✅ added for random delay
+
+
+# ✅ Add random stagger delay to avoid API quota spikes
+delay = random.randint(5, 60)
+print(f"⏳ Waiting {delay}s before starting to avoid Google API 429...")
+time.sleep(delay)
 
 
 # ---------------- SHARDING (env-driven) ----------------
 SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
 SHARD_STEP = int(os.getenv("SHARD_STEP", "10"))
 
-# Batch range for this workflow
-BATCH_START = int(os.getenv("BATCH_START", "0"))
-BATCH_END = int(os.getenv("BATCH_END", "0"))
-if BATCH_END == 0:
-    BATCH_END = 2500
+START_INDEX = int(os.getenv("START_INDEX", "1"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "0"))
 
-# Allow workflow to pass a unique checkpoint filename per shard
-checkpoint_file = os.getenv("CHECKPOINT_FILE", f"checkpoint_batch_{BATCH_START}_{BATCH_END}_{SHARD_INDEX}.txt")
-last_i = int(open(checkpoint_file).read()) if os.path.exists(checkpoint_file) else BATCH_START
+checkpoint_file = os.getenv("CHECKPOINT_FILE", "checkpoint_new_1.txt")
+last_i = int(open(checkpoint_file).read()) if os.path.exists(checkpoint_file) else START_INDEX
 
 
 # ---------------- SETUP ----------------
@@ -43,6 +46,7 @@ try:
     gc = gspread.service_account("credentials.json")
 except Exception as e:
     print(f"Error loading credentials.json: {e}")
+    print("Ensure 'credentials.json' exists or has been created by GitHub Actions.")
     exit(1)
 
 sheet_main = gc.open('Stock List').worksheet('Sheet1')
@@ -100,9 +104,10 @@ def scrape_tradingview(company_url, driver):
         return []
 
 
-# ---------------- BUFFERED APPEND ----------------
+# ---------------- BUFFER & APPEND ----------------
 buffer = []
 BATCH_SIZE_APPEND = 50
+
 
 def flush_buffer():
     global buffer
@@ -125,28 +130,27 @@ def flush_buffer():
     print("✗ Failed to append after retries")
 
 
-# ---------------- MAIN LOOP (Batch + Shard) ----------------
+# ---------------- MAIN LOOP ----------------
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 driver.set_window_size(1920, 1080)
 
 try:
     processed = 0
+    i_start = last_i
 
-    # Define subrange per shard
-    batch_range = list(range(BATCH_START, BATCH_END))
-    shard_size = len(batch_range) // SHARD_STEP
-    my_start = BATCH_START + (SHARD_INDEX * shard_size)
-    my_end = my_start + shard_size
-    my_range = range(my_start, my_end)
+    for i, company_url in enumerate(company_list[i_start:], i_start):
+        if BATCH_SIZE > 0:
+            if processed >= BATCH_SIZE:
+                break
+        else:
+            if i % SHARD_STEP != SHARD_INDEX:
+                continue
 
-    print(f"Shard {SHARD_INDEX}: processing range {my_start}–{my_end}")
-
-    for i in my_range:
-        if i >= len(company_list):
+        if i > 2500:
+            print("Reached scraping limit (i > 2500). Stopping.")
             break
 
         name = name_list[i] if i < len(name_list) else f"Row {i}"
-        company_url = company_list[i]
         print(f"Scraping {i}: {name} | {company_url}")
 
         values = scrape_tradingview(company_url, driver)

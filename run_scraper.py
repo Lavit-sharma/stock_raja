@@ -12,6 +12,7 @@ import os
 import time
 import json
 import requests
+from io import BytesIO
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- SHARDING (env-driven) ---------------- #
@@ -34,22 +35,23 @@ chrome_options.add_argument("--remote-debugging-port=9222")
 
 # ---------------- READ STOCK LIST FROM GITHUB EXCEL ---------------- #
 
-# 🔹 Replace this URL with your actual raw Excel URL
-EXCEL_URL = "https://github.com/Lavit-sharma/stock_raja/blob/main/Stock%20List.xlsx"
-
 print("📥 Fetching stock list from GitHub...")
 
 try:
+    # ✅ Use the RAW GitHub link, not the normal blob link
+    EXCEL_URL = "https://raw.githubusercontent.com/Lavit-sharma/stock_raja/main/Stock%20List.xlsx"
+
     response = requests.get(EXCEL_URL)
     response.raise_for_status()
-    with open("stocks.xlsx", "wb") as f:
-        f.write(response.content)
 
-    df = pd.read_excel("stocks.xlsx")
-    # ✅ Assumes columns: 'Name' and 'URL' (or adjust below)
+    # ✅ Read directly from memory (no need to save)
+    df = pd.read_excel(BytesIO(response.content), engine='openpyxl')
+
+    # Assuming column A = name, column E = company link
     name_list = df.iloc[:, 0].fillna("").tolist()
-    company_list = df.iloc[:, 4].fillna("").tolist()  # 5th column like earlier Google Sheet
+    company_list = df.iloc[:, 4].fillna("").tolist()
 
+    print(f"✅ Loaded {len(company_list)} companies from GitHub Excel.")
 except Exception as e:
     print(f"❌ Error reading Excel from GitHub: {e}")
     exit(1)
@@ -119,7 +121,7 @@ for i, company_url in enumerate(company_list[last_i:], last_i):
     values = scrape_tradingview(company_url)
     if values:
         row = [name, current_date] + values
-        # 💾 Save locally instead of Google Sheet (append to CSV for now)
+        # 💾 Save locally instead of Google Sheet
         with open("output_data.csv", "a", encoding="utf-8") as f:
             f.write(",".join(map(str, row)) + "\n")
         print(f"✅ Successfully scraped and saved data for {name}.")

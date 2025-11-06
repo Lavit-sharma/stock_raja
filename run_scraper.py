@@ -39,7 +39,7 @@ print("📥 Fetching stock list from GitHub...")
 
 try:
     # ✅ Use the RAW GitHub link, not the normal blob link
-    EXCEL_URL = "https://raw.githubusercontent.com/Lavit-sharma/stock_raja/main/Stock%20List.xlsx
+    EXCEL_URL = "https://raw.githubusercontent.com/Lavit-sharma/stock_raja/main/Stock%20List.xlsx"
 "
 
     response = requests.get(EXCEL_URL)

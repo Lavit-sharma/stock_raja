@@ -7,17 +7,17 @@ on:
         description: 'Start index'
         required: false
         default: '0'
-        type: number
+        type: string # Changed to string for better compatibility with env vars
       end_index:
         description: 'End index'
         required: false
         default: '2500'
-        type: number
+        type: string
       max_workers:
         description: 'Workers'
         required: false
         default: '10'
-        type: number
+        type: string
   schedule:
     - cron: '0 3 * * 1'
 
@@ -27,40 +27,38 @@ jobs:
     timeout-minutes: 60
     
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         
-    - name: Install dependencies
-      run: pip install -r requirements.txt
+      - name: Create credentials
+        env:
+          GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
+        run: |
+          echo "$GSPREAD_CREDENTIALS" > credentials.json
+          echo "✅ Credentials ready"
       
-    - name: Create credentials
-      env:
-        GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
-      run: |
-        echo "$GSPREAD_CREDENTIALS" | python -c "
-import sys, json
-data = json.loads(sys.stdin.read())
-with open('credentials.json', 'w') as f:
-    json.dump(data, f)
-print('✅ Credentials ready')
-"
-    
-    - name: Run AI Sector Scraper
-      env:
-        START_INDEX: ${{ github.event.inputs.start_index || '0' }}
-        END_INDEX: ${{ github.event.inputs.end_index || '2500' }}
-        MAX_WORKERS: ${{ github.event.inputs.max_workers || '10' }}
-        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
-      run: python sector_ai.py
-      
-    - name: Upload checkpoint
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: checkpoint
-        path: checkpoint.txt
+      - name: Run AI Sector Scraper
+        env:
+          START_INDEX: ${{ github.event.inputs.start_index || '0' }}
+          END_INDEX: ${{ github.event.inputs.end_index || '2500' }}
+          MAX_WORKERS: ${{ github.event.inputs.max_workers || '10' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
+        run: python sector_ai.py
+        
+      - name: Upload checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkpoint
+          path: checkpoint.txt

@@ -1,4 +1,8 @@
-import os, time, json, gspread, concurrent.futures
+import os
+import time
+import json
+import gspread
+import concurrent.futures
 from datetime import date
 from openai import OpenAI
 
@@ -8,11 +12,11 @@ NEW_MV2_URL    = "https://docs.google.com/spreadsheets/d/1GKlzomaK4l_Yh8pzVtzucC
 
 START_INDEX = int(os.getenv("START_INDEX", "0"))
 END_INDEX   = int(os.getenv("END_INDEX", "2500"))
-CHECKPOINT_FILE = os.getenv("CHECKPOINT_FILE", "checkpoint.txt")
+CHECKPOINT_FILE = "checkpoint.txt"
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "10"))
 BATCH_SIZE = 50
 
-# Resume from checkpoint
+# Resume logic
 last_i = START_INDEX
 if os.path.exists(CHECKPOINT_FILE):
     try:
@@ -27,28 +31,30 @@ print(f"🔧 Range: {START_INDEX}-{END_INDEX} | Resume: {last_i} | Workers: {MAX
 try:
     creds_json = os.getenv("GSPREAD_CREDENTIALS")
     if creds_json:
-        client = gspread.service_account_from_dict(json.loads(creds_json))
+        # Renamed to gs_client to avoid conflict with OpenAI client
+        gs_client = gspread.service_account_from_dict(json.loads(creds_json))
     else:
-        client = gspread.service_account(filename="credentials.json")
+        gs_client = gspread.service_account(filename="credentials.json")
         
-    source_sheet = client.open_by_url(STOCK_LIST_URL).worksheet("Sheet1")
-    dest_sheet   = client.open_by_url(NEW_MV2_URL).worksheet("Sheet10")
+    source_sheet = gs_client.open_by_url(STOCK_LIST_URL).worksheet("Sheet1")
+    dest_sheet   = gs_client.open_by_url(NEW_MV2_URL).worksheet("Sheet10")
     data_rows = source_sheet.get_all_values()[1:]
-    print(f"✅ Connected. Processing {END_INDEX-START_INDEX+1} symbols")
+    print(f"✅ Connected. Total rows found: {len(data_rows)}")
 except Exception as e:
     print(f"❌ Connection Error: {e}")
     raise
 
 # ---------------- AI CLIENT ---------------- #
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Initialize OpenAI client clearly
+ai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def ask_ai_sector(symbol):
     try:
-        response = client.chat.completions.create(
+        response = ai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a stock market expert. For any stock symbol, respond ONLY with 'Sector: [name] | Industry: [name]' format. If unknown, use 'N/A | N/A'."},
-                {"role": "user", "content": f"What is the sector and industry of stock {symbol}? (broader sector first, then specific industry)"}
+                {"role": "system", "content": "You are a stock market expert. Respond ONLY in format 'Sector: [name] | Industry: [name]'. If unknown, use 'N/A | N/A'."},
+                {"role": "user", "content": f"Symbol: {symbol}"}
             ],
             max_tokens=50,
             temperature=0.1
@@ -58,37 +64,30 @@ def ask_ai_sector(symbol):
         if "Sector:" in text and "|" in text:
             parts = text.split("|")
             sector = parts[0].replace("Sector:", "").strip()
-            industry = parts[1].strip()
+            industry = parts[1].replace("Industry:", "").strip()
             return [sector, industry]
-        else:
-            return ["N/A", "N/A"]
+        return ["N/A", "N/A"]
             
     except Exception as e:
-        print(f"  ❌ AI Error: {e}")
+        print(f"   ❌ AI Error for {symbol}: {e}")
         return ["N/A", "N/A"]
 
-# ---------------- PARALLEL PROCESSING ---------------- #
+# ---------------- PROCESSING ---------------- #
 def process_single_row(args):
     i, row = args
     symbol = row[0].strip()
-    
-    print(f"[{i+1:4d}] 🤖 {symbol}")
     sector, industry = ask_ai_sector(symbol)
-    print(f"  📊 {sector} | {industry}")
-    
-    return [[symbol, sector, industry]], i
+    return [symbol, sector, industry], i
 
-# ---------------- MAIN LOOP ---------------- #
-print(f"\n🚀 AI MODE: Asking GPT about sectors!")
+print(f"\n🚀 AI MODE: Starting processing...")
 
 to_process = []
 for i, row in enumerate(data_rows):
     if last_i <= i < END_INDEX:
         to_process.append((i, row))
 
-print(f"📋 {len(to_process)} symbols to process")
+print(f"📋 {len(to_process)} symbols remaining")
 
-results = []
 success_count = 0
 start_time = time.time()
 
@@ -102,30 +101,25 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         batch_results = []
         for future in concurrent.futures.as_completed(futures):
             try:
-                row_data, orig_i = future.result(timeout=15)
-                batch_results.extend(row_data)
-                if any(v not in ("N/A", "") for v in row_data[0][1:]):
+                row_data, orig_i = future.result(timeout=20)
+                batch_results.append(row_data)
+                if row_data[1] != "N/A":
                     success_count += 1
             except Exception as e:
-                print(f"⚠️ Error: {e}")
-                symbol = data_rows[orig_i][0]
-                batch_results.append([symbol, "Error", "N/A"])
+                print(f"⚠️ Worker Error: {e}")
         
         if batch_results:
             try:
-                first_row = batch_start + 2
-                range_name = f"A{first_row}:C{first_row+len(batch_results)-1}"
-                dest_sheet.update(range_name, batch_results)
-                print(f"💾 Batch saved to Sheet10: {range_name}")
-                time.sleep(0.3)
+                # Basic write logic: this appends or updates based on your needs
+                # For simplicity, we write the batch we just finished
+                dest_sheet.append_rows(batch_results)
+                print(f"💾 Saved batch up to index {batch_start + len(batch_results)}")
             except Exception as e:
                 print(f"❌ Batch write error: {e}")
         
+        # Save checkpoint
         with open(CHECKPOINT_FILE, "w") as f:
-            f.write(str(batch_end))
+            f.write(str(last_i + batch_end))
 
 elapsed = time.time() - start_time
-print(f"\n🎉 AI SHEET10 COMPLETE!")
-print(f"📊 Processed: {len(to_process)} | Success: {success_count}")
-print(f"✅ Success rate: {success_count/len(to_process)*100:.1f}%")
-print(f"⚡ Speed: ~{len(to_process)/elapsed:.0f} symbols/min")
+print(f"\n🎉 COMPLETE! Processed: {len(to_process)} | Success: {success_count}")

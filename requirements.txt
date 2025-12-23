@@ -3,3 +3,5 @@ webdriver-manager
 beautifulsoup4
 gspread
 oauth2client
+gspread==6.1.2
+openai==1.40.0

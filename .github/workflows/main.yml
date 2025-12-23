@@ -1,0 +1,72 @@
+name: AI Stock Sectors
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_index:
+        description: 'Start index'
+        required: false
+        default: '0'
+        type: number
+      end_index:
+        description: 'End index'
+        required: false
+        default: '2500'
+        type: number
+      max_workers:
+        description: 'Workers'
+        required: false
+        default: '10'
+        type: number
+  schedule:
+    - cron: '0 3 * * 1'  # Monday 3AM UTC
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: pip install -r requirements.txt
+      
+    - name: Create credentials
+      env:
+        GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
+      run: |
+        echo "$GSPREAD_CREDENTIALS" | python -c "
+import sys, json
+data = json.loads(sys.stdin.read())
+with open('credentials.json', 'w') as f:
+    json.dump(data, f)
+print('✅ Credentials ready')
+"
+    
+    - name: Run AI Sector Scraper
+      env:
+        START_INDEX: ${{ inputs.start_index || 0 }}
+        END_INDEX: ${{ inputs.end_index || 2500 }}
+        MAX_WORKERS: ${{ inputs.max_workers || 10 }}
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
+      run: python sector_ai.py
+      
+    - name: Upload checkpoint
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: checkpoint
+        path: checkpoint.txt
+        
+    - name: Summary
+      if: success()
+      run: |
+        echo "✅ Sheet10 populated with AI sectors!"
+        echo "📊 Check your Google Sheet"

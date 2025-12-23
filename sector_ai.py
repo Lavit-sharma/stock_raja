@@ -3,7 +3,6 @@ import time
 import json
 import gspread
 import concurrent.futures
-from datetime import date
 from openai import OpenAI
 
 # ---------------- CONFIG ---------------- #
@@ -29,97 +28,87 @@ print(f"🔧 Range: {START_INDEX}-{END_INDEX} | Resume: {last_i} | Workers: {MAX
 
 # ---------------- GOOGLE SHEETS ---------------- #
 try:
-    creds_json = os.getenv("GSPREAD_CREDENTIALS")
-    if creds_json:
-        # Renamed to gs_client to avoid conflict with OpenAI client
-        gs_client = gspread.service_account_from_dict(json.loads(creds_json))
+    creds_env = os.getenv("GSPREAD_CREDENTIALS")
+    if creds_env:
+        gs_client = gspread.service_account_from_dict(json.loads(creds_env))
     else:
         gs_client = gspread.service_account(filename="credentials.json")
         
     source_sheet = gs_client.open_by_url(STOCK_LIST_URL).worksheet("Sheet1")
     dest_sheet   = gs_client.open_by_url(NEW_MV2_URL).worksheet("Sheet10")
-    data_rows = source_sheet.get_all_values()[1:]
-    print(f"✅ Connected. Total rows found: {len(data_rows)}")
+    
+    # Get data and slice it based on range
+    full_data = source_sheet.get_all_values()[1:]
+    data_rows = full_data  # We will filter during the loop
+    print(f"✅ Connected. Total rows in source: {len(full_data)}")
 except Exception as e:
-    print(f"❌ Connection Error: {e}")
+    print(f"❌ Google Sheets Connection Error: {e}")
     raise
 
 # ---------------- AI CLIENT ---------------- #
-# Initialize OpenAI client clearly
-ai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Initializing with explicit environment variable check
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise ValueError("❌ OPENAI_API_KEY is missing from secrets!")
+
+ai_client = OpenAI(api_key=api_key)
 
 def ask_ai_sector(symbol):
     try:
         response = ai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a stock market expert. Respond ONLY in format 'Sector: [name] | Industry: [name]'. If unknown, use 'N/A | N/A'."},
-                {"role": "user", "content": f"Symbol: {symbol}"}
+                {"role": "system", "content": "Respond ONLY as 'Sector: [Name] | Industry: [Name]'. Use 'N/A' if unknown."},
+                {"role": "user", "content": f"What is the sector/industry for {symbol}?"}
             ],
-            max_tokens=50,
-            temperature=0.1
+            max_tokens=40,
+            temperature=0
         )
-        
         text = response.choices[0].message.content.strip()
-        if "Sector:" in text and "|" in text:
-            parts = text.split("|")
-            sector = parts[0].replace("Sector:", "").strip()
-            industry = parts[1].replace("Industry:", "").strip()
-            return [sector, industry]
+        if "|" in text:
+            parts = [p.split(":")[-1].strip() for p in text.split("|")]
+            return parts if len(parts) == 2 else ["N/A", "N/A"]
         return ["N/A", "N/A"]
-            
     except Exception as e:
-        print(f"   ❌ AI Error for {symbol}: {e}")
-        return ["N/A", "N/A"]
+        print(f"   ⚠️ AI Error ({symbol}): {e}")
+        return ["Error", "Error"]
 
 # ---------------- PROCESSING ---------------- #
 def process_single_row(args):
-    i, row = args
+    idx, row = args
     symbol = row[0].strip()
     sector, industry = ask_ai_sector(symbol)
-    return [symbol, sector, industry], i
+    print(f"[{idx+1}] {symbol} -> {sector}")
+    return [symbol, sector, industry], idx
 
-print(f"\n🚀 AI MODE: Starting processing...")
+print(f"\n🚀 Starting AI Processing from index {last_i}...")
 
-to_process = []
-for i, row in enumerate(data_rows):
-    if last_i <= i < END_INDEX:
-        to_process.append((i, row))
-
-print(f"📋 {len(to_process)} symbols remaining")
-
+to_process = [(i, row) for i, row in enumerate(data_rows) if last_i <= i < END_INDEX]
 success_count = 0
-start_time = time.time()
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
     for batch_start in range(0, len(to_process), BATCH_SIZE):
         batch_end = min(batch_start + BATCH_SIZE, len(to_process))
         batch_args = to_process[batch_start:batch_end]
         
-        futures = [executor.submit(process_single_row, args) for args in batch_args]
-        
+        futures = [executor.submit(process_single_row, arg) for arg in batch_args]
         batch_results = []
+        
         for future in concurrent.futures.as_completed(futures):
-            try:
-                row_data, orig_i = future.result(timeout=20)
-                batch_results.append(row_data)
-                if row_data[1] != "N/A":
-                    success_count += 1
-            except Exception as e:
-                print(f"⚠️ Worker Error: {e}")
+            res, _ = future.result()
+            batch_results.append(res)
+            if res[1] not in ["N/A", "Error"]:
+                success_count += 1
         
         if batch_results:
             try:
-                # Basic write logic: this appends or updates based on your needs
-                # For simplicity, we write the batch we just finished
                 dest_sheet.append_rows(batch_results)
-                print(f"💾 Saved batch up to index {batch_start + len(batch_results)}")
+                # Update checkpoint
+                current_checkpoint = to_process[batch_end-1][0] + 1
+                with open(CHECKPOINT_FILE, "w") as f:
+                    f.write(str(current_checkpoint))
+                print(f"💾 Saved batch. Next start index: {current_checkpoint}")
             except Exception as e:
-                print(f"❌ Batch write error: {e}")
-        
-        # Save checkpoint
-        with open(CHECKPOINT_FILE, "w") as f:
-            f.write(str(last_i + batch_end))
+                print(f"❌ Write Error: {e}")
 
-elapsed = time.time() - start_time
-print(f"\n🎉 COMPLETE! Processed: {len(to_process)} | Success: {success_count}")
+print(f"\n🎉 DONE! Processed {len(to_process)} symbols. Success: {success_count}")

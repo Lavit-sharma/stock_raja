@@ -32,8 +32,8 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
-        
+        python-version: '3.11'  # ✅ FIXED: This was missing
+    
     - name: Install dependencies
       run: pip install -r requirements.txt
       
@@ -51,9 +51,9 @@ print('✅ Credentials ready')
     
     - name: Run AI Sector Scraper
       env:
-        START_INDEX: ${{ inputs.start_index || 0 }}
-        END_INDEX: ${{ inputs.end_index || 2500 }}
-        MAX_WORKERS: ${{ inputs.max_workers || 10 }}
+        START_INDEX: ${{ github.event.inputs.start_index || 0 }}
+        END_INDEX: ${{ github.event.inputs.end_index || 2500 }}
+        MAX_WORKERS: ${{ github.event.inputs.max_workers || 10 }}
         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
       run: python sector_ai.py

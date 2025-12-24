@@ -7,7 +7,7 @@ on:
 
 env:
   START_INDEX: ${{ github.event.inputs.start_index || 0 }}
-  END_INDEX: ${{ github.event.inputs.end_index || 25 }}
+  END_INDEX: ${{ github.event.inputs.end_index || 2500 }}
   MAX_WORKERS: 5
 
 jobs:

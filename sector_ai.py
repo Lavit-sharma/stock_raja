@@ -74,7 +74,7 @@ try:
         gs_client = gspread.service_account(filename="credentials.json")
         
     source_sheet = gs_client.open_by_url(STOCK_LIST_URL).worksheet("Sheet1")
-    dest_sheet   = gs_client.open_by_url(NEW_MV2_URL).worksheet("Sheet10")
+    dest_sheet   = gs_client.open_by_url(NEW_MV2_URL).worksheet("Sheet13")
     
     full_data = source_sheet.get_all_values()[1:]
     print(f"✅ Connected. Total rows in source: {len(full_data)}")

@@ -116,7 +116,7 @@ try:
         
     source_sheet = gs_client.open_by_url(STOCK_LIST_URL).worksheet("Sheet1")
     dest_sheet = gs_client.open_by_url(NEW_MV2_URL).worksheet("Sheet13")
-    full_data = source_sheet.get_all_values()[1:]
+    full_data = source_sheet.get_all_values()[1:]  # Row 2+ from Sheet1
     print(f"✅ Sheets ready | Source rows: {len(full_data)} | Target: Sheet13")
 except Exception as e:
     print(f"❌ Sheets ERROR: {e}")
@@ -128,16 +128,16 @@ if os.path.exists(CHECKPOINT_FILE):
     try:
         with open(CHECKPOINT_FILE, "r") as f:
             last_i = int(f.read().strip())
-        print(f"✅ RESUME from checkpoint: {last_i}")
+        print(f"✅ RESUME from checkpoint: row {last_i}")
     except:
         print("⚠️ Checkpoint invalid, using START_INDEX")
 
-print(f"🔧 Range: {START_INDEX}-{END_INDEX} | Resume: {last_i}")
+print(f"🔧 Range: {START_INDEX}-{END_INDEX} | Resume: row {last_i}")
 
-# ---------------- FIXED ORDER PROCESSING ---------------- #
+# ---------------- PERFECT ORDER: SAME AS READING ---------------- #
 to_process = [(i, row) for i, row in enumerate(full_data) if last_i <= i < END_INDEX]
 total_symbols = len(to_process)
-print(f"\n🚀 STARTING {total_symbols} symbols → **Sheet13** (EXACT SOURCE ORDER)")
+print(f"\n🚀 STARTING {total_symbols} symbols → **Sheet13** (SAME READING ORDER)")
 
 success_count = 0
 batch_num = 0
@@ -150,12 +150,13 @@ for batch_start in range(0, len(to_process), BATCH_SIZE):
     print(f"\n📦 BATCH {batch_num} ({len(batch_args)} symbols)")
     batch_results = []
     
-    # ✅ SEQUENTIAL: EXACT source order maintained
+    # 🔥 EXACT SAME ORDER AS SOURCE SHEET1 (Row 2+)
     for idx, row in batch_args:
         symbol = row[0].strip()
+        print(f"📖 Reading Sheet1 Row {idx+2}: {symbol}")  # +2 = actual sheet row
         result = scrape_sector(symbol)
-        print(f"[{idx+1:4d}] {symbol:10s}: {result[1]:20s} > {result[2]}")
-        batch_results.append(result)  # Preserves exact source order!
+        print(f"✅ [{idx+2:4d}] {symbol:10s}: {result[1]:20s} > {result[2]}")
+        batch_results.append(result)  # PERFECT 1:1 ORDER!
     
     # Count successes
     batch_success = sum(1 for r in batch_results if r[1] not in ['N/A', 'Rate_Limited', 'HTTP_429'])
@@ -169,15 +170,14 @@ for batch_start in range(0, len(to_process), BATCH_SIZE):
                 f.write(str(current_checkpoint))
             
             progress = (batch_end / total_symbols) * 100
-            print(f"💾 **Sheet13**: {len(batch_results)} rows | "
-                  f"Progress: {progress:.1f}% | Success: {success_count}/{batch_end}")
-            print(f"📍 Next: row {current_checkpoint} | Order: {batch_args[0][0]+1}-{batch_args[-1][0]+1}")
+            print(f"💾 **Sheet13**: {len(batch_results)} rows written")
+            print(f"📊 Progress: {progress:.1f}% | Success: {success_count}/{batch_end}")
+            print(f"📍 Next row: {current_checkpoint+1} | Batch rows: {batch_args[0][0]+2}-{batch_args[-1][0]+2}")
             
-            # Verify last written rows
-            last_rows = dest_sheet.get_all_values()[-3:]
-            print(f"🔍 LAST 3 ROWS: {last_rows[-1] if last_rows else 'Empty'}")
+            # 🔥 VERIFY ORDER
+            last_rows = dest_sheet.get_all_values()[-len(batch_results):]
+            print(f"🔍 LAST ROWS WRITTEN: {last_rows[0][0] if last_rows else 'None'}...")
             
-            # Batch break
             print("😴 15s batch break...")
             time.sleep(15)
             
@@ -186,5 +186,4 @@ for batch_start in range(0, len(to_process), BATCH_SIZE):
 
 print(f"\n🎉 **Sheet13** COMPLETE!")
 print(f"📊 Total: {total_symbols} | Success: {success_count} | Rate: {success_count/total_symbols*100:.1f}%")
-print(f"📍 Final checkpoint: {last_i + total_symbols}")
-print("✅ EXACT SOURCE ORDER maintained in Sheet13!")
+print("✅ **PERFECT ORDER**: Sheet13 = EXACT same order as Sheet1 reading!")

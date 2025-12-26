@@ -2,7 +2,6 @@ import os
 import time
 import json
 import gspread
-import concurrent.futures
 import requests
 from bs4 import BeautifulSoup
 import random
@@ -15,7 +14,6 @@ NEW_MV2_URL    = "https://docs.google.com/spreadsheets/d/1GKlzomaK4l_Yh8pzVtzucC
 START_INDEX = int(os.getenv("START_INDEX", "0"))
 END_INDEX   = int(os.getenv("END_INDEX", "2500"))
 CHECKPOINT_FILE = "checkpoint.txt"
-MAX_WORKERS = 2      # Safe for production
 BATCH_SIZE = 10      # Safe batch size
 
 def load_cookies():
@@ -134,57 +132,59 @@ if os.path.exists(CHECKPOINT_FILE):
     except:
         print("⚠️ Checkpoint invalid, using START_INDEX")
 
-print(f"🔧 Range: {START_INDEX}-{END_INDEX} | Resume: {last_i} | Workers: {MAX_WORKERS}")
+print(f"🔧 Range: {START_INDEX}-{END_INDEX} | Resume: {last_i}")
 
-def process_row(args: Tuple[int, List[str]]) -> List[str]:
-    idx, row = args
-    symbol = row[0].strip()
-    result = scrape_sector(symbol)
-    print(f"[{idx+1:3d}] {symbol:10s}: {result[1]:20s} > {result[2]}")
-    return result
-
-# ---------------- MAIN PROCESSING ---------------- #
+# ---------------- FIXED ORDER PROCESSING ---------------- #
 to_process = [(i, row) for i, row in enumerate(full_data) if last_i <= i < END_INDEX]
 total_symbols = len(to_process)
-print(f"\n🚀 STARTING {total_symbols} symbols → **Sheet13**")
-print(f"⏱️  ETA: ~{total_symbols*3.5/60:.1f} hours (safe speed)")
+print(f"\n🚀 STARTING {total_symbols} symbols → **Sheet13** (EXACT SOURCE ORDER)")
 
 success_count = 0
 batch_num = 0
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-    for batch_start in range(0, len(to_process), BATCH_SIZE):
-        batch_end = min(batch_start + BATCH_SIZE, len(to_process))
-        batch_args = to_process[batch_start:batch_end]
-        batch_num += 1
-        
-        print(f"\n📦 BATCH {batch_num} ({len(batch_args)} symbols)")
-        futures = [executor.submit(process_row, arg) for arg in batch_args]
-        batch_results = [future.result() for future in concurrent.futures.as_completed(futures)]
-        
-        # Count successes
-        batch_success = sum(1 for r in batch_results if r[1] not in ['N/A', 'Rate_Limited', 'HTTP_429', 'Error'])
-        success_count += batch_success
-        
-        if batch_results:
-            try:
-                dest_sheet.append_rows(batch_results)
-                current_checkpoint = to_process[batch_end-1][0] + 1
-                with open(CHECKPOINT_FILE, "w") as f:
-                    f.write(str(current_checkpoint))
-                
-                progress = (batch_end / total_symbols) * 100
-                print(f"💾 **Sheet13**: {len(batch_results)} rows | "
-                      f"Progress: {progress:.1f}% | Success: {success_count}/{batch_end}")
-                print(f"📍 Next checkpoint: {current_checkpoint}")
-                
-                # Batch break
-                print("😴 15s batch break...")
-                time.sleep(15)
-                
-            except Exception as e:
-                print(f"❌ Sheet13 write ERROR: {e}")
+for batch_start in range(0, len(to_process), BATCH_SIZE):
+    batch_end = min(batch_start + BATCH_SIZE, len(to_process))
+    batch_args = to_process[batch_start:batch_end]
+    batch_num += 1
+    
+    print(f"\n📦 BATCH {batch_num} ({len(batch_args)} symbols)")
+    batch_results = []
+    
+    # ✅ SEQUENTIAL: EXACT source order maintained
+    for idx, row in batch_args:
+        symbol = row[0].strip()
+        result = scrape_sector(symbol)
+        print(f"[{idx+1:4d}] {symbol:10s}: {result[1]:20s} > {result[2]}")
+        batch_results.append(result)  # Preserves exact source order!
+    
+    # Count successes
+    batch_success = sum(1 for r in batch_results if r[1] not in ['N/A', 'Rate_Limited', 'HTTP_429'])
+    success_count += batch_success
+    
+    if batch_results:
+        try:
+            dest_sheet.append_rows(batch_results)
+            current_checkpoint = to_process[batch_end-1][0] + 1
+            with open(CHECKPOINT_FILE, "w") as f:
+                f.write(str(current_checkpoint))
+            
+            progress = (batch_end / total_symbols) * 100
+            print(f"💾 **Sheet13**: {len(batch_results)} rows | "
+                  f"Progress: {progress:.1f}% | Success: {success_count}/{batch_end}")
+            print(f"📍 Next: row {current_checkpoint} | Order: {batch_args[0][0]+1}-{batch_args[-1][0]+1}")
+            
+            # Verify last written rows
+            last_rows = dest_sheet.get_all_values()[-3:]
+            print(f"🔍 LAST 3 ROWS: {last_rows[-1] if last_rows else 'Empty'}")
+            
+            # Batch break
+            print("😴 15s batch break...")
+            time.sleep(15)
+            
+        except Exception as e:
+            print(f"❌ Sheet13 write ERROR: {e}")
 
 print(f"\n🎉 **Sheet13** COMPLETE!")
 print(f"📊 Total: {total_symbols} | Success: {success_count} | Rate: {success_count/total_symbols*100:.1f}%")
 print(f"📍 Final checkpoint: {last_i + total_symbols}")
+print("✅ EXACT SOURCE ORDER maintained in Sheet13!")

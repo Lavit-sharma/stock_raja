@@ -7,7 +7,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 # ---------------- CONFIG ---------------- #
 # The URLs for your two separate spreadsheets
 STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
-MV2_SQL_URL    = "https://docs.google.com/spreadsheets/d/1GKlzomaK4l_Yh8pzVtzucCogWW5d-ikVeqCxC6gvBuc/edit#gid=0"
+MV2_SQL_URL    = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skcBi1OFtaK8h1905oZOc/edit?ouid=101450253683874914240&usp=sheets_home&ths=true"
 
 SCREENSHOT_DIR = "screenshots"
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)

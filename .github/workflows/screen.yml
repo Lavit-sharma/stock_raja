@@ -2,16 +2,16 @@ name: Strategy Chart Bot
 
 on:
   schedule:
-    # This runs the bot automatically every day at 10:00 AM UTC
+    # Runs automatically at 10:00 AM UTC daily
     - cron: '0 10 * * *'
-  # This allows you to run the bot manually whenever you want from the Actions tab
+  # Allows you to click "Run workflow" manually for testing
   workflow_dispatch:
 
 jobs:
-  scrape-and-push:
+  scrape-and-deploy:
     runs-on: ubuntu-latest
     
-    # Permissions are required to allow the script to commit and push images
+    # Required to allow the Python script to 'git push' screenshots back to your repo
     permissions:
       contents: write
 
@@ -19,8 +19,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          # Fetch depth 0 is needed to allow git push back to the repo
-          fetch-depth: 0
+          fetch-depth: 0 # Fetches full history so git push works correctly
 
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
@@ -30,21 +29,21 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install gspread pandas selenium webdriver-manager oauth2client requests
+          pip install gspread pandas selenium webdriver-manager oauth2client
 
-      - name: Run Automation Script
+      - name: Run Strategy Bot
         env:
-          # These link your GitHub Secrets to the Python script
+          # Link your GitHub Secrets to the script environment
           GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
           TRADINGVIEW_COOKIES: ${{ secrets.TRADINGVIEW_COOKIES }}
-          # Forces logs to appear in real-time
+          # Forces Python to print logs to the console immediately
           PYTHONUNBUFFERED: 1
-        run: python screen.py
+        run: python main.py
 
-      - name: Upload Artifacts (Backup)
-        # Even if git push fails, this saves the screenshots in the Actions tab
+      - name: Archive Screenshots
+        # This saves the folders as a backup in the "Actions" tab even if git fails
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: stock-screenshots
+          name: strategy-alerts
           path: screenshots/

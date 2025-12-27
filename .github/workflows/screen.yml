@@ -1,34 +1,50 @@
-name: Stock Chart Automation
+name: Strategy Chart Bot
+
 on:
   schedule:
-    - cron: '0 10 * * *' # Runs daily at 10 AM UTC
-  workflow_dispatch:      # Allows manual trigger button
+    # This runs the bot automatically every day at 10:00 AM UTC
+    - cron: '0 10 * * *'
+  # This allows you to run the bot manually whenever you want from the Actions tab
+  workflow_dispatch:
 
 jobs:
-  scrape-and-deploy:
+  scrape-and-push:
     runs-on: ubuntu-latest
+    
+    # Permissions are required to allow the script to commit and push images
     permissions:
-      contents: write # Needed to push to gh-pages
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      contents: write
 
-      - name: Set up Python
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch depth 0 is needed to allow git push back to the repo
+          fetch-depth: 0
+
+      - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Install Dependencies
         run: |
-          pip install gspread pandas selenium webdriver-manager oauth2client
+          python -m pip install --upgrade pip
+          pip install gspread pandas selenium webdriver-manager oauth2client requests
 
       - name: Run Automation Script
         env:
+          # These link your GitHub Secrets to the Python script
           GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
+          TRADINGVIEW_COOKIES: ${{ secrets.TRADINGVIEW_COOKIES }}
+          # Forces logs to appear in real-time
+          PYTHONUNBUFFERED: 1
         run: python screen.py
 
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
+      - name: Upload Artifacts (Backup)
+        # Even if git push fails, this saves the screenshots in the Actions tab
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./screenshots
+          name: stock-screenshots
+          path: screenshots/

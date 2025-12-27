@@ -1,0 +1,34 @@
+name: Stock Chart Automation
+on:
+  schedule:
+    - cron: '0 10 * * *' # Runs daily at 10 AM UTC
+  workflow_dispatch:      # Allows manual trigger button
+
+jobs:
+  scrape-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to push to gh-pages
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install gspread pandas selenium webdriver-manager oauth2client
+
+      - name: Run Automation Script
+        env:
+          GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
+        run: python screen.py
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./screenshots

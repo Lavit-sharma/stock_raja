@@ -38,7 +38,7 @@ jobs:
           TRADINGVIEW_COOKIES: ${{ secrets.TRADINGVIEW_COOKIES }}
           # Forces Python to print logs to the console immediately
           PYTHONUNBUFFERED: 1
-        run: python main.py
+        run: python screen.py
 
       - name: Archive Screenshots
         # This saves the folders as a backup in the "Actions" tab even if git fails

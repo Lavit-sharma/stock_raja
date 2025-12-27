@@ -1,6 +1,5 @@
 import os, time, json, gspread, subprocess
 import pandas as pd
-from datetime import date
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -22,13 +21,14 @@ os.makedirs(MONTHLY_DIR, exist_ok=True)
 # ---------------- HELPERS ---------------- #
 
 def git_push_screenshot(path):
+    """Instantly pushes to GitHub to monitor live progress."""
     try:
         subprocess.run(["git", "config", "user.name", "github-actions"], check=True)
         subprocess.run(["git", "config", "user.email", "github-actions@github.com"], check=True)
         subprocess.run(["git", "add", path], check=True)
         subprocess.run(["git", "commit", "-m", f"📸 Update: {path}"], check=True)
         subprocess.run(["git", "push"], check=True)
-        print(f"🚀 Deployed {path}", flush=True)
+        print(f"🚀 [GIT] Pushed {path}", flush=True)
     except: pass
 
 def get_driver():
@@ -38,7 +38,7 @@ def get_driver():
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
     
-    # YOUR PROVEN STEALTH OPTIONS (EXACT)
+    # YOUR PROVEN STEALTH OPTIONS
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
@@ -50,18 +50,17 @@ def get_driver():
     return driver
 
 def inject_tv_cookies(driver):
-    """YOUR EXACT PROVEN COOKIE LOGIC"""
+    """Injects cookies and VERIFIES login status."""
+    print("🔑 Starting Login Process...", flush=True)
     try:
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
         if not cookie_data:
             print("❌ Error: TRADINGVIEW_COOKIES secret is missing!", flush=True)
             return False
 
-        # Load JSON from secret
         cookies = json.loads(cookie_data)
-        
         driver.get("https://www.tradingview.com/")
-        time.sleep(2)
+        time.sleep(3)
         
         for c in cookies:
             try:
@@ -73,39 +72,60 @@ def inject_tv_cookies(driver):
                 })
             except: pass
             
+        print("💉 Cookies Injected. Refreshing page...", flush=True)
         driver.refresh()
-        time.sleep(4)
-        print("✅ Cookies injected successfully.", flush=True)
-        return True
+        time.sleep(5)
+
+        # VERIFICATION: Look for the user profile button or 'header-user-menu'
+        try:
+            # This selector is common for the logged-in user menu
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "button[id*='user-menu'], .tv-header__user-menu-button"))
+            )
+            print("✅ LOGIN SUCCESSFUL: TradingView Session Active!", flush=True)
+            return True
+        except:
+            print("⚠️ LOGIN WARNING: Could not verify user menu, but proceeding anyway...", flush=True)
+            return True # Still try, sometimes TV UI changes
+            
     except Exception as e:
-        print(f"❌ Cookie Injection Failed: {e}", flush=True)
+        print(f"❌ LOGIN FAILED: {e}", flush=True)
         return False
 
 # ---------------- MAIN ---------------- #
 
 def main():
+    print("🛰️ Bot Initializing...", flush=True)
+    
     # Load Sheets
-    creds_json = os.getenv("GSPREAD_CREDENTIALS")
-    client = gspread.service_account_from_dict(json.loads(creds_json))
-    
-    mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
-    df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
-    
-    stock_raw = client.open_by_url(STOCK_LIST_URL).sheet1.get_all_values()
-    df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
-    
-    link_map = dict(zip(df_stocks.iloc[:, 0].astype(str).str.strip(), 
-                        df_stocks.iloc[:, 2].astype(str).str.strip()))
+    try:
+        creds_json = os.getenv("GSPREAD_CREDENTIALS")
+        client = gspread.service_account_from_dict(json.loads(creds_json))
+        
+        mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
+        df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
+        
+        stock_raw = client.open_by_url(STOCK_LIST_URL).sheet1.get_all_values()
+        df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
+        
+        link_map = dict(zip(df_stocks.iloc[:, 0].astype(str).str.strip(), 
+                            df_stocks.iloc[:, 2].astype(str).str.strip()))
+        print(f"📡 Sheets Connected. {len(df_mv2)} symbols found.", flush=True)
+    except Exception as e:
+        print(f"❌ Connection Error: {e}", flush=True)
+        return
 
     driver = get_driver()
     if not inject_tv_cookies(driver):
         driver.quit()
         return
 
-    print(f"📊 Scanning {len(df_mv2)} symbols...", flush=True)
+    print("🔎 Starting Scan for Strategy Alerts...", flush=True)
+    count = 0
 
     for index, row in df_mv2.iterrows():
         symbol = str(row.get('Symbol', '')).strip()
+        
         try:
             daily = float(str(row.get('dailychange', '0')).replace('%', '').strip() or 0)
             monthly = float(str(row.get('monthlychange', '0')).replace('%', '').strip() or 0)
@@ -115,34 +135,37 @@ def main():
             url = link_map.get(symbol)
             if not url or "tradingview.com" not in url: continue
 
-            print(f"🔍 Capturing {symbol}...", flush=True)
+            print(f"✨ Match Found: {symbol} [Daily: {daily}% | Monthly: {monthly}%]", flush=True)
             driver.get(url)
-            time.sleep(10)
-
+            
             try:
+                # Optimized Wait
                 chart = WebDriverWait(driver, 30).until(
                     EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]"))
                 )
-                
+                time.sleep(8) # Core wait for indicators to paint
+
                 if daily >= 0.07:
-                    # Switch to Daily
                     webdriver.ActionChains(driver).send_keys("1D").send_keys(Keys.ENTER).perform()
                     time.sleep(5)
                     path = f"{DAILY_DIR}/{symbol}.png"
                     chart.screenshot(path)
                     git_push_screenshot(path)
+                    count += 1
 
                 if monthly >= 0.25:
-                    # Switch to Monthly
                     webdriver.ActionChains(driver).send_keys("1M").send_keys(Keys.ENTER).perform()
                     time.sleep(5)
                     path = f"{MONTHLY_DIR}/{symbol}.png"
                     chart.screenshot(path)
                     git_push_screenshot(path)
+                    count += 1
+                    
             except Exception as e:
-                print(f"⚠️ Error for {symbol}: {e}", flush=True)
+                print(f"⚠️ Screenshot Error ({symbol}): {e}", flush=True)
 
     driver.quit()
+    print(f"🏁 DONE! Processed {count} charts.", flush=True)
 
 if __name__ == "__main__":
     main()

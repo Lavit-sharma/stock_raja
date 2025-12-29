@@ -9,10 +9,6 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
 
-    services:
-      # If you don't have an external DB and want to test, you'd put a service here.
-      # Assuming you are connecting to your OWN external MySQL server.
-
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4

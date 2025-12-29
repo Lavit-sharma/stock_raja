@@ -14,40 +14,34 @@ from webdriver_manager.chrome import ChromeDriverManager
 STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
 MV2_SQL_URL    = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skcBi1OFtaK8h1905oZOc/edit"
 
-# MySQL Config from Env Vars
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
-    "database": os.getenv("DB_NAME"),
-    "connect_timeout": 30
+    "database": os.getenv("DB_NAME")
 }
-
-# Temp directories for processing
-DAILY_DIR = "temp_daily"
-MONTHLY_DIR = "temp_monthly"
-os.makedirs(DAILY_DIR, exist_ok=True)
-os.makedirs(MONTHLY_DIR, exist_ok=True)
 
 # ---------------- HELPERS ---------------- #
 
-def save_to_mysql(symbol, timeframe, image_path):
-    """Inserts the screenshot into MySQL as a LONGBLOB."""
+def save_to_mysql(symbol, timeframe, image_data):
+    """Inserts a new chart or updates the existing one if symbol+timeframe exists."""
     try:
-        with open(image_path, 'rb') as file:
-            binary_data = file.read()
-
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
         
-        # Table must have columns: symbol (varchat), timeframe (varchar), screenshot (longblob)
-        query = "INSERT INTO stock_screenshots (symbol, timeframe, screenshot) VALUES (%s, %s, %s)"
-        cursor.execute(query, (symbol, timeframe, binary_data))
-        
+        # SQL logic: If symbol+timeframe exists, update the screenshot and timestamp
+        query = """
+            INSERT INTO stock_screenshots (symbol, timeframe, screenshot) 
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE 
+                screenshot = VALUES(screenshot),
+                created_at = CURRENT_TIMESTAMP
+        """
+        cursor.execute(query, (symbol, timeframe, image_data))
         conn.commit()
-        print(f"🗄️ [DB] Saved {symbol} {timeframe} screenshot.", flush=True)
+        print(f"✅ [DB] Updated/Saved {symbol} ({timeframe})", flush=True)
     except Exception as e:
-        print(f"❌ DB Error: {e}", flush=True)
+        print(f"❌ Database Error: {e}", flush=True)
     finally:
         if 'conn' in locals() and conn.is_connected():
             cursor.close()
@@ -59,25 +53,33 @@ def get_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
+    
+    # PROVEN STEALTH OPTIONS
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
     opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
     
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=opts)
+    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     return driver
 
 def inject_tv_cookies(driver):
-    print("🔑 Injected Cookies...", flush=True)
+    print("🔑 Injecting TradingView Session...", flush=True)
     try:
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
         if not cookie_data: return False
-        
+
         cookies = json.loads(cookie_data)
         driver.get("https://www.tradingview.com/")
-        time.sleep(2)
+        time.sleep(3)
         for c in cookies:
-            try: driver.add_cookie(c)
+            try:
+                driver.add_cookie({
+                    "name": c.get("name"), "value": c.get("value"),
+                    "domain": c.get("domain", ".tradingview.com"), "path": c.get("path", "/")
+                })
             except: pass
         driver.refresh()
         time.sleep(5)
@@ -87,28 +89,24 @@ def inject_tv_cookies(driver):
 # ---------------- MAIN ---------------- #
 
 def main():
-    # Load Google Sheets
     try:
-        creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
-        client = gspread.service_account_from_dict(creds)
-        
+        creds_json = os.getenv("GSPREAD_CREDENTIALS")
+        client = gspread.service_account_from_dict(json.loads(creds_json))
         mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
         df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
-        
         stock_raw = client.open_by_url(STOCK_LIST_URL).sheet1.get_all_values()
         df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
-        link_map = dict(zip(df_stocks.iloc[:, 0].str.strip(), df_stocks.iloc[:, 2].str.strip()))
+        link_map = dict(zip(df_stocks.iloc[:, 0].astype(str).str.strip(), 
+                            df_stocks.iloc[:, 2].astype(str).str.strip()))
     except Exception as e:
-        print(f"❌ Setup Error: {e}")
+        print(f"❌ Sheet Error: {e}")
         return
 
     driver = get_driver()
     if not inject_tv_cookies(driver):
-        print("❌ Login Failed")
         driver.quit()
         return
 
-    count = 0
     for _, row in df_mv2.iterrows():
         symbol = str(row.get('Symbol', '')).strip()
         try:
@@ -118,33 +116,30 @@ def main():
 
         if daily >= 0.07 or monthly >= 0.25:
             url = link_map.get(symbol)
-            if not url: continue
-            
+            if not url or "tradingview.com" not in url: continue
+
             driver.get(url)
             try:
-                chart = WebDriverWait(driver, 20).until(EC.visibility_of_element_located((By.CLASS_NAME, "chart-container-border")))
-                time.sleep(8)
+                chart = WebDriverWait(driver, 30).until(
+                    EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]"))
+                )
+                time.sleep(8) 
 
                 if daily >= 0.07:
                     webdriver.ActionChains(driver).send_keys("1D").send_keys(Keys.ENTER).perform()
-                    time.sleep(4)
-                    path = f"{DAILY_DIR}/{symbol}.png"
-                    chart.screenshot(path)
-                    save_to_mysql(symbol, "daily", path)
-                    count += 1
+                    time.sleep(5)
+                    save_to_mysql(symbol, "daily", chart.screenshot_as_png)
 
                 if monthly >= 0.25:
                     webdriver.ActionChains(driver).send_keys("1M").send_keys(Keys.ENTER).perform()
-                    time.sleep(4)
-                    path = f"{MONTHLY_DIR}/{symbol}.png"
-                    chart.screenshot(path)
-                    save_to_mysql(symbol, "monthly", path)
-                    count += 1
+                    time.sleep(5)
+                    save_to_mysql(symbol, "monthly", chart.screenshot_as_png)
+                    
             except Exception as e:
-                print(f"⚠️ Error {symbol}: {e}")
+                print(f"⚠️ Screenshot Error ({symbol}): {e}")
 
     driver.quit()
-    print(f"🏁 Finished. {count} records added.")
+    print("🏁 DONE!")
 
 if __name__ == "__main__":
     main()

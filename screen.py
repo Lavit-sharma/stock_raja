@@ -11,7 +11,6 @@ from selenium.webdriver.common.keys import Keys
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- CONFIG ---------------- #
-# We still use the Stock List for URLs, but alerts now come from wp_mv2 table
 STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
 
 DB_CONFIG = {
@@ -24,7 +23,6 @@ DB_CONFIG = {
 # ---------------- HELPERS ---------------- #
 
 def clear_db_before_run():
-    """Wipes the screenshot table so only current day data is shown in the gallery."""
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
@@ -39,28 +37,29 @@ def clear_db_before_run():
             conn.close()
 
 def get_filtered_alerts_from_db():
-    """Fetches ONLY the symbols from wp_mv2 that meet the 7% or 25% criteria."""
+    """Fetches alerts and fixes the Pandas UserWarning by using a dictionary cursor."""
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
-        # Filters directly in SQL to save memory and time
+        cursor = conn.cursor(dictionary=True)
         query = """
             SELECT Symbol, dailychange, monthlychange 
             FROM wp_mv2 
             WHERE (CAST(REPLACE(dailychange, '%', '') AS DECIMAL(10,4)) >= 0.07)
                OR (CAST(REPLACE(monthlychange, '%', '') AS DECIMAL(10,4)) >= 0.25)
         """
-        df = pd.read_sql(query, conn)
-        print(f"📊 [DB] SQL Filtered: {len(df)} symbols matching conditions.", flush=True)
-        return df
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        print(f"📊 [DB] SQL Filtered: {len(rows)} symbols matching conditions.", flush=True)
+        return pd.DataFrame(rows) 
     except Exception as e:
         print(f"❌ Error fetching alerts: {e}")
         return pd.DataFrame()
     finally:
         if 'conn' in locals() and conn.is_connected():
+            cursor.close()
             conn.close()
 
 def save_to_mysql(symbol, timeframe, image_data):
-    """Inserts a new chart or updates existing one."""
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
@@ -91,7 +90,6 @@ def get_driver():
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
     opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
-    
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=opts)
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
@@ -120,12 +118,9 @@ def inject_tv_cookies(driver):
 # ---------------- MAIN ---------------- #
 
 def main():
-    # 1. Clean the table for the new day
     clear_db_before_run()
 
-    # 2. Setup Data Sources
     try:
-        # Get URLs from Google Sheet
         creds_json = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds_json))
         stock_raw = client.open_by_url(STOCK_LIST_URL).sheet1.get_all_values()
@@ -133,7 +128,6 @@ def main():
         link_map = dict(zip(df_stocks.iloc[:, 0].astype(str).str.strip(), 
                             df_stocks.iloc[:, 2].astype(str).str.strip()))
 
-        # Get Alerts from wp_mv2 DB table (replacing the second Google Sheet)
         df_mv2 = get_filtered_alerts_from_db()
         
         if df_mv2.empty:
@@ -143,19 +137,21 @@ def main():
         print(f"❌ Initialization Error: {e}")
         return
 
-    # 3. Start Selenium
     driver = get_driver()
     if not inject_tv_cookies(driver):
         driver.quit()
         return
 
-    # 4. Process Filtered Symbols
     for _, row in df_mv2.iterrows():
         symbol = str(row.get('Symbol', '')).strip()
         
-        # SQL query already filtered these, we just convert types for logic
-        daily_val = float(str(row.get('dailychange', '0')).replace('%', '').strip() or 0)
-        monthly_val = float(str(row.get('monthlychange', '0')).replace('%', '').strip() or 0)
+        # FIX: Added .replace('−', '-') to handle Unicode minus signs from TradingView
+        try:
+            daily_val = float(str(row.get('dailychange', '0')).replace('−', '-').replace('%', '').strip() or 0)
+            monthly_val = float(str(row.get('monthlychange', '0')).replace('−', '-').replace('%', '').strip() or 0)
+        except ValueError:
+            print(f"⚠️ Could not parse values for {symbol}, skipping...")
+            continue
 
         url = link_map.get(symbol)
         if not url or "tradingview.com" not in url: 
@@ -169,13 +165,11 @@ def main():
             )
             time.sleep(8) 
 
-            # Take Daily Screenshot
             if daily_val >= 0.07:
                 webdriver.ActionChains(driver).send_keys("1D").send_keys(Keys.ENTER).perform()
                 time.sleep(5)
                 save_to_mysql(symbol, "daily", chart.screenshot_as_png)
 
-            # Take Monthly Screenshot
             if monthly_val >= 0.25:
                 webdriver.ActionChains(driver).send_keys("1M").send_keys(Keys.ENTER).perform()
                 time.sleep(5)

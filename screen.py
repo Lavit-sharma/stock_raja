@@ -12,7 +12,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- CONFIG ---------------- #
 STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
-MV2_SQL_URL    = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skcBi1OFtaK8h1905oZOc/edit"
+# MV2_SQL_URL is no longer needed as we fetch from DB now
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -23,8 +23,24 @@ DB_CONFIG = {
 
 # ---------------- HELPERS ---------------- #
 
+def get_mv2_data_from_db():
+    """Fetches alert data from the local wp_mv2 table instead of Google Sheets."""
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        # Fetch as dictionary to make it compatible with your existing logic
+        query = "SELECT Symbol, dailychange, monthlychange FROM wp_mv2"
+        df = pd.read_sql(query, conn)
+        print(f"📊 [DB] Fetched {len(df)} rows from wp_mv2 table.", flush=True)
+        return df
+    except Exception as e:
+        print(f"❌ Error fetching from wp_mv2: {e}", flush=True)
+        return pd.DataFrame()
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
+
 def clear_db_before_run():
-    """Wipes all existing charts so the gallery only shows fresh data for the new day."""
+    """Wipes all existing charts so the gallery only shows fresh data."""
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
@@ -40,11 +56,9 @@ def clear_db_before_run():
             conn.close()
 
 def save_to_mysql(symbol, timeframe, image_data):
-    """Inserts a new chart or updates the existing one if symbol+timeframe exists."""
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
-        
         query = """
             INSERT INTO stock_screenshots (symbol, timeframe, screenshot) 
             VALUES (%s, %s, %s)
@@ -54,7 +68,7 @@ def save_to_mysql(symbol, timeframe, image_data):
         """
         cursor.execute(query, (symbol, timeframe, image_data))
         conn.commit()
-        print(f"✅ [DB] Updated/Saved {symbol} ({timeframe})", flush=True)
+        print(f"✅ [DB] Saved Chart: {symbol} ({timeframe})", flush=True)
     except Exception as e:
         print(f"❌ Database Error: {e}", flush=True)
     finally:
@@ -68,12 +82,10 @@ def get_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-    
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
     opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
-    
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=opts)
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
@@ -84,7 +96,6 @@ def inject_tv_cookies(driver):
     try:
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
         if not cookie_data: return False
-
         cookies = json.loads(cookie_data)
         driver.get("https://www.tradingview.com/")
         time.sleep(3)
@@ -103,30 +114,41 @@ def inject_tv_cookies(driver):
 # ---------------- MAIN ---------------- #
 
 def main():
-    # --- NEW: CLEAR TABLE BEFORE STARTING --- #
+    # 1. Clear old screenshots
     clear_db_before_run()
 
+    # 2. Fetch Data
     try:
+        # Fetch Symbols/URLs from Google Sheets (Stock List)
         creds_json = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds_json))
-        mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
-        df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
         stock_raw = client.open_by_url(STOCK_LIST_URL).sheet1.get_all_values()
         df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
         link_map = dict(zip(df_stocks.iloc[:, 0].astype(str).str.strip(), 
                             df_stocks.iloc[:, 2].astype(str).str.strip()))
+
+        # NEW: Fetch change data from MySQL table wp_mv2 instead of Google Sheets
+        df_mv2 = get_mv2_data_from_db()
+        
+        if df_mv2.empty:
+            print("Empty alert list from wp_mv2. Exiting.")
+            return
+            
     except Exception as e:
-        print(f"❌ Sheet Error: {e}")
+        print(f"❌ Setup Error: {e}")
         return
 
+    # 3. Start Selenium
     driver = get_driver()
     if not inject_tv_cookies(driver):
         driver.quit()
         return
 
+    # 4. Process Charts
     for _, row in df_mv2.iterrows():
         symbol = str(row.get('Symbol', '')).strip()
         try:
+            # Note: Pandas read_sql preserves column types, but we keep the cleanup just in case
             daily = float(str(row.get('dailychange', '0')).replace('%', '').strip() or 0)
             monthly = float(str(row.get('monthlychange', '0')).replace('%', '').strip() or 0)
         except: continue
@@ -135,6 +157,7 @@ def main():
             url = link_map.get(symbol)
             if not url or "tradingview.com" not in url: continue
 
+            print(f"🚀 Processing: {symbol}...")
             driver.get(url)
             try:
                 chart = WebDriverWait(driver, 30).until(

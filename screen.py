@@ -23,13 +23,28 @@ DB_CONFIG = {
 
 # ---------------- HELPERS ---------------- #
 
+def clear_db_before_run():
+    """Wipes all existing charts so the gallery only shows fresh data for the new day."""
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+        print("🧹 Clearing old database entries...", flush=True)
+        cursor.execute("TRUNCATE TABLE stock_screenshots")
+        conn.commit()
+        print("✅ Database is clean.", flush=True)
+    except Exception as e:
+        print(f"❌ Error clearing database: {e}", flush=True)
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            cursor.close()
+            conn.close()
+
 def save_to_mysql(symbol, timeframe, image_data):
     """Inserts a new chart or updates the existing one if symbol+timeframe exists."""
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
         
-        # SQL logic: If symbol+timeframe exists, update the screenshot and timestamp
         query = """
             INSERT INTO stock_screenshots (symbol, timeframe, screenshot) 
             VALUES (%s, %s, %s)
@@ -54,7 +69,6 @@ def get_driver():
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
     
-    # PROVEN STEALTH OPTIONS
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
@@ -89,6 +103,9 @@ def inject_tv_cookies(driver):
 # ---------------- MAIN ---------------- #
 
 def main():
+    # --- NEW: CLEAR TABLE BEFORE STARTING --- #
+    clear_db_before_run()
+
     try:
         creds_json = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds_json))

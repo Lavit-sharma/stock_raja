@@ -1,0 +1,28 @@
+name: NSE Delivery Scraper
+
+on:
+  schedule:
+    - cron: '30 11 * * 1-5' # 5:00 PM IST (11:30 AM UTC) Mon-Fri
+  workflow_dispatch:      # Allows manual trigger
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: pip install gspread requests
+
+      - name: Run Scraper
+        env:
+          GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
+          START_INDEX: 0
+          END_INDEX: 2000
+        run: python nse.py

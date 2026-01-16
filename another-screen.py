@@ -1,7 +1,6 @@
 import os, time, json, gspread
 import pandas as pd
 import mysql.connector
-from datetime import datetime, timedelta
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -9,7 +8,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.action_chains import ActionChains
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- CONFIG ---------------- #
@@ -19,67 +17,62 @@ DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
-    "database": os.getenv("DB_NAME"),
-    "autocommit": True
+    "database": os.getenv("DB_NAME")
 }
 
 # ---------------- HELPERS ---------------- #
 
-def calculate_target_date(input_val):
-    """Calculates YYYY-MM-DD from '104 before' style strings."""
-    try:
-        if not input_val or str(input_val).strip() == "":
-            return None
-        digits = ''.join(filter(str.isdigit, str(input_val)))
-        if not digits: return None
-        
-        days = int(digits)
-        target_dt = datetime.now() - timedelta(days=days)
-        return target_dt.strftime('%Y-%m-%d')
-    except Exception as e:
-        print(f"   ⚠️ Date Calc Error: {e}")
-        return None
-
-def save_to_mysql(symbol, timeframe, image_data, chart_date):
-    """Saves to DB with explicit commit to prevent empty tables."""
-    conn = None
+def setup_database():
+    """Creates the table if it doesn't exist and clears old data."""
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
         
-        query = """
-            INSERT INTO another_screenshot (symbol, timeframe, screenshot, chart_date) 
-            VALUES (%s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE 
-                screenshot = VALUES(screenshot),
-                chart_date = VALUES(chart_date),
-                created_at = CURRENT_TIMESTAMP
-        """
+        # 1. Create table if missing
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS another_screenshot (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                symbol VARCHAR(50) NOT NULL,
+                timeframe VARCHAR(20) NOT NULL,
+                screenshot LONGBLOB NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY symbol_tf (symbol, timeframe)
+            ) ENGINE=InnoDB;
+        """)
         
-        cursor.execute(query, (symbol, timeframe, image_data, chart_date))
-        conn.commit() # Save the data
-        print(f"   ∟ ✅ DB Updated: {symbol} ({timeframe}) on {chart_date if chart_date else 'Current'}")
+        # 2. Clear old data
+        print("🧹 Clearing old entries from another_screenshot...", flush=True)
+        cursor.execute("TRUNCATE TABLE another_screenshot")
         
-    except mysql.connector.Error as err:
-        print(f"   ❌ DB Error: {err}")
+        conn.commit()
+        print("✅ Database setup and cleaned.", flush=True)
+    except Exception as e:
+        print(f"❌ Database Setup Error: {e}", flush=True)
     finally:
-        if conn and conn.is_connected():
+        if 'conn' in locals() and conn.is_connected():
             cursor.close()
             conn.close()
 
-def navigate_to_date(driver, date_str):
-    """Triggers Alt+G and enters the calculated date."""
-    if not date_str: return
+def save_to_mysql(symbol, timeframe, image_data):
     try:
-        actions = ActionChains(driver)
-        # Send Alt+G
-        actions.key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
-        time.sleep(2)
-        # Type date and Enter
-        actions.send_keys(date_str).send_keys(Keys.ENTER).perform()
-        time.sleep(5) # Wait for chart to travel
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+        query = """
+            INSERT INTO another_screenshot (symbol, timeframe, screenshot) 
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE 
+                screenshot = VALUES(screenshot),
+                created_at = CURRENT_TIMESTAMP
+        """
+        cursor.execute(query, (symbol, timeframe, image_data))
+        conn.commit()
+        print(f"   ∟ ✅ Saved {symbol} ({timeframe})", flush=True)
     except Exception as e:
-        print(f"   ⚠️ Alt+G Failed: {e}")
+        print(f"   ∟ ❌ Save Error: {e}", flush=True)
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            cursor.close()
+            conn.close()
 
 def get_driver():
     opts = Options()
@@ -87,6 +80,10 @@ def get_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
+    opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=opts)
 
@@ -98,80 +95,73 @@ def inject_tv_cookies(driver):
         driver.get("https://www.tradingview.com/")
         time.sleep(3)
         for c in cookies:
-            driver.add_cookie({
-                "name": c.get("name"), 
-                "value": c.get("value"), 
-                "domain": ".tradingview.com", 
-                "path": "/"
-            })
+            try:
+                driver.add_cookie({
+                    "name": c.get("name"), 
+                    "value": c.get("value"), 
+                    "domain": ".tradingview.com", 
+                    "path": "/"
+                })
+            except: pass
         driver.refresh()
-        time.sleep(4)
+        time.sleep(5)
         return True
     except: return False
 
 # ---------------- MAIN ---------------- #
 
 def main():
-    # 1. Load and Clean Google Sheet Data
+    setup_database()
+
     try:
-        creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
-        gc = gspread.service_account_from_dict(creds)
-        sheet = gc.open_by_url(STOCK_LIST_URL).sheet1
+        creds_json = os.getenv("GSPREAD_CREDENTIALS")
+        client = gspread.service_account_from_dict(json.loads(creds_json))
+        sheet = client.open_by_url(STOCK_LIST_URL).sheet1
+        data = sheet.get_all_values()
         
-        # Avoid get_all_records() to prevent 'duplicate header' error
-        raw_data = sheet.get_all_values()
-        if not raw_data: return
-        
-        headers = [h.strip() if h.strip() else f"Col_{i}" for i, h in enumerate(raw_data[0])]
-        df = pd.DataFrame(raw_data[1:], columns=headers)
+        # Structure: [Symbol, Name, Week_Link, Day_Link]
+        df = pd.DataFrame(data[1:], columns=data[0])
     except Exception as e:
-        print(f"❌ Sheet Loading Error: {e}")
+        print(f"❌ Google Sheet Error: {e}")
         return
 
     driver = get_driver()
     if not inject_tv_cookies(driver):
-        print("❌ TV Authentication Failed")
+        print("❌ TradingView Authentication Failed")
         driver.quit()
         return
 
     for _, row in df.iterrows():
-        # Match your exact structure
-        symbol = str(row.get('Symbol', '')).strip()
-        day_url = str(row.get('Day', '')).strip()
-        week_url = str(row.get('Week', '')).strip()
-        day_before_val = row.get('Days before')
-        week_before_val = row.get('Months before')
+        symbol = str(row.iloc[0]).strip()
+        week_url = str(row.iloc[2]).strip()
+        day_url = str(row.iloc[3]).strip()
 
         if not symbol or "tradingview.com" not in day_url:
             continue
 
-        print(f"🚀 Processing {symbol}...")
+        print(f"📸 Processing {symbol}...")
 
-        # --- DAY VIEW ---
+        # --- Capture DAY ---
         try:
             driver.get(day_url)
-            target_date = calculate_target_date(day_before_val)
-            if target_date:
-                navigate_to_date(driver, target_date)
-            
-            WebDriverWait(driver, 20).until(EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]")))
-            img = driver.find_element(By.XPATH, "//div[contains(@class, 'chart-container')]").screenshot_as_png
-            save_to_mysql(symbol, "day", img, target_date)
+            chart = WebDriverWait(driver, 25).until(
+                EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]"))
+            )
+            time.sleep(5) # Allow indicators to load
+            save_to_mysql(symbol, "day", chart.screenshot_as_png)
         except Exception as e:
-            print(f"   ⚠️ Day View Error: {e}")
+            print(f"   ⚠️ Day Error: {e}")
 
-        # --- WEEK VIEW ---
+        # --- Capture WEEK ---
         try:
             driver.get(week_url)
-            target_date = calculate_target_date(week_before_val)
-            if target_date:
-                navigate_to_date(driver, target_date)
-            
-            WebDriverWait(driver, 20).until(EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]")))
-            img = driver.find_element(By.XPATH, "//div[contains(@class, 'chart-container')]").screenshot_as_png
-            save_to_mysql(symbol, "week", img, target_date)
+            chart = WebDriverWait(driver, 25).until(
+                EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]"))
+            )
+            time.sleep(5)
+            save_to_mysql(symbol, "week", chart.screenshot_as_png)
         except Exception as e:
-            print(f"   ⚠️ Week View Error: {e}")
+            print(f"   ⚠️ Week Error: {e}")
 
     driver.quit()
     print("🏁 PROCESS COMPLETE!")

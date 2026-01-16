@@ -1,4 +1,4 @@
-name: TradingView Screenshot Bot
+name: TradingView Another Screenshot Bot
 
 on:
   schedule:

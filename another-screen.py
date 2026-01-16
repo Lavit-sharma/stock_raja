@@ -12,7 +12,8 @@ from selenium.webdriver.common.action_chains import ActionChains
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- CONFIG ---------------- #
-STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
+# UPDATED SHEET LINK
+STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=1400370843"
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -79,7 +80,6 @@ def get_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-    # Forces high-quality rendering for canvas-based indicators
     opts.add_argument("--force-device-scale-factor=1")
     opts.add_argument("--hide-scrollbars")
     opts.add_argument("--disable-blink-features=AutomationControlled")
@@ -111,24 +111,20 @@ def inject_tv_cookies(driver):
     except: return False
 
 def navigate_to_date(driver, date_str):
-    """Triggers Alt+G, inputs the date, and presses Enter."""
     try:
         if not date_str or str(date_str).strip() == "":
             return False
             
         print(f"   ∟ 📅 Navigating to date: {date_str}")
-        
         body = driver.find_element(By.TAG_NAME, "body")
         body.click()
         time.sleep(1)
 
         actions = ActionChains(driver)
         actions.key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
-        time.sleep(2) # Wait for dialog
+        time.sleep(2)
 
         actions.send_keys(str(date_str)).send_keys(Keys.ENTER).perform()
-        
-        # Initial wait for the jump
         time.sleep(5)
         return True
     except Exception as e:
@@ -143,9 +139,14 @@ def main():
     try:
         creds_json = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds_json))
-        sheet = client.open_by_url(STOCK_LIST_URL).sheet1
+        
+        # Access specifically by GID to ensure correct tab is loaded
+        spreadsheet = client.open_by_url(STOCK_LIST_URL)
+        sheet = spreadsheet.get_worksheet_by_id(1400370843)
+        
         data = sheet.get_all_values()
         df = pd.DataFrame(data[1:], columns=data[0])
+        print(f"📊 Loaded {len(df)} symbols from Google Sheet.")
     except Exception as e:
         print(f"❌ Google Sheet Error: {e}")
         return
@@ -171,7 +172,7 @@ def main():
 
         print(f"📸 Processing {symbol}...")
 
-        # --- Capture DAY (Enhanced Rendering) ---
+        # --- Capture DAY ---
         try:
             driver.get(day_url)
             chart = WebDriverWait(driver, 30).until(
@@ -181,16 +182,10 @@ def main():
             if target_date:
                 navigate_to_date(driver, target_date)
             
-            # THE FIX: Force indicators to paint
-            print(f"    ⏳ Waiting for Day indicators to calculate...")
+            print(f"    ⏳ Rendering Day indicators...")
             time.sleep(12) 
-            
-            # Force layout recalculation to wake up invisible indicators
             driver.execute_script("window.dispatchEvent(new Event('resize'));")
             time.sleep(2)
-            
-            # Final mouse wiggle to ensure interactive layers are active
-            ActionChains(driver).move_by_offset(10, 10).perform()
             
             save_to_mysql(symbol, "day", chart.screenshot_as_png)
         except Exception as e:
@@ -206,9 +201,8 @@ def main():
             if target_date:
                 navigate_to_date(driver, target_date)
             
-            print(f"    ⏳ Waiting for Week indicators...")
+            print(f"    ⏳ Rendering Week indicators...")
             time.sleep(8)
-            
             driver.execute_script("window.dispatchEvent(new Event('resize'));")
             time.sleep(1)
                 

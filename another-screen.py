@@ -24,12 +24,9 @@ DB_CONFIG = {
 # ---------------- HELPERS ---------------- #
 
 def setup_database():
-    """Creates the table if it doesn't exist and clears old data."""
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
-        
-        # 1. Create table if missing
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS another_screenshot (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -40,13 +37,10 @@ def setup_database():
                 UNIQUE KEY symbol_tf (symbol, timeframe)
             ) ENGINE=InnoDB;
         """)
-        
-        # 2. Clear old data
-        print("清理 Clearing old entries from another_screenshot...", flush=True)
+        print("🧹 Clearing old entries...", flush=True)
         cursor.execute("TRUNCATE TABLE another_screenshot")
-        
         conn.commit()
-        print("✅ Database setup and cleaned.", flush=True)
+        print("✅ Database cleaned.", flush=True)
     except Exception as e:
         print(f"❌ Database Setup Error: {e}", flush=True)
     finally:
@@ -81,6 +75,9 @@ def get_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
+    # CRITICAL: These flags help render "colorful" indicators in headless mode
+    opts.add_argument("--force-device-scale-factor=1")
+    opts.add_argument("--hide-scrollbars")
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
@@ -110,28 +107,29 @@ def inject_tv_cookies(driver):
     except: return False
 
 def navigate_to_date(driver, date_str):
-    """Triggers Alt+G, inputs the date, and presses Enter."""
     try:
         if not date_str or str(date_str).strip() == "":
             return False
             
         print(f"   ∟ 📅 Navigating to date: {date_str}")
         
-        # Ensure the chart area is focused before typing
         body = driver.find_element(By.TAG_NAME, "body")
         body.click()
         time.sleep(1)
 
-        # Trigger Alt + G
         actions = ActionChains(driver)
         actions.key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
-        time.sleep(1.5) # Wait for dialog to open
+        time.sleep(1.5) 
 
-        # Type the date and press Enter
         actions.send_keys(str(date_str)).send_keys(Keys.ENTER).perform()
         
-        # Wait for chart to load the new date context
-        time.sleep(5)
+        # INCREASED WAIT: Give the chart 8 seconds to "paint" the colorful indicators
+        time.sleep(8)
+        
+        # REDRAW TRIGGER: Slightly move the mouse to force canvas update
+        actions.move_by_offset(10, 10).perform()
+        time.sleep(1)
+        
         return True
     except Exception as e:
         print(f"   ∟ ⚠️ Date Navigation Error: {e}")
@@ -147,9 +145,6 @@ def main():
         client = gspread.service_account_from_dict(json.loads(creds_json))
         sheet = client.open_by_url(STOCK_LIST_URL).sheet1
         data = sheet.get_all_values()
-        
-        # Structure: [Symbol, Name, Week_Link, Day_Link, ..., Dates(G)]
-        # We use data[0] for columns to ensure alignment
         df = pd.DataFrame(data[1:], columns=data[0])
     except Exception as e:
         print(f"❌ Google Sheet Error: {e}")
@@ -166,7 +161,6 @@ def main():
         week_url = str(row.iloc[2]).strip()
         day_url = str(row.iloc[3]).strip()
         
-        # Column G is index 6
         try:
             target_date = str(row.iloc[6]).strip()
         except IndexError:
@@ -187,8 +181,9 @@ def main():
             if target_date:
                 navigate_to_date(driver, target_date)
             else:
-                time.sleep(5) # Default wait if no date provided
+                time.sleep(8) # Wait for indicators to load
                 
+            # Final check before screenshot
             save_to_mysql(symbol, "day", chart.screenshot_as_png)
         except Exception as e:
             print(f"    ⚠️ Day Error: {e}")
@@ -203,7 +198,7 @@ def main():
             if target_date:
                 navigate_to_date(driver, target_date)
             else:
-                time.sleep(5)
+                time.sleep(8)
                 
             save_to_mysql(symbol, "week", chart.screenshot_as_png)
         except Exception as e:

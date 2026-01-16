@@ -1,6 +1,7 @@
 import os, time, json, gspread
 import pandas as pd
 import mysql.connector
+from datetime import datetime, timedelta
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -8,6 +9,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- CONFIG ---------------- #
@@ -22,112 +24,48 @@ DB_CONFIG = {
 
 # ---------------- HELPERS ---------------- #
 
-def setup_database():
-    """Creates the table if it doesn't exist and clears old data."""
+def calculate_target_date(days_back):
+    """Calculates date string (YYYY-MM-DD) based on integer input."""
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
-        
-        # 1. Create table if missing
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS another_screenshot (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                symbol VARCHAR(50) NOT NULL,
-                timeframe VARCHAR(20) NOT NULL,
-                screenshot LONGBLOB NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                UNIQUE KEY symbol_tf (symbol, timeframe)
-            ) ENGINE=InnoDB;
-        """)
-        
-        # 2. Clear old data
-        print("🧹 Clearing old entries from another_screenshot...", flush=True)
-        cursor.execute("TRUNCATE TABLE another_screenshot")
-        
-        conn.commit()
-        print("✅ Database setup and cleaned.", flush=True)
-    except Exception as e:
-        print(f"❌ Database Setup Error: {e}", flush=True)
-    finally:
-        if 'conn' in locals() and conn.is_connected():
-            cursor.close()
-            conn.close()
+        # Extract only numbers from the sheet cell (e.g., '4 before' -> 4)
+        days = int(''.join(filter(str.isdigit, str(days_back))))
+        target_dt = datetime.now() - timedelta(days=days)
+        return target_dt.strftime('%Y-%m-%d')
+    except:
+        return None
 
-def save_to_mysql(symbol, timeframe, image_data):
+def navigate_to_date(driver, date_str):
+    if not date_str: return False
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
-        query = """
-            INSERT INTO another_screenshot (symbol, timeframe, screenshot) 
-            VALUES (%s, %s, %s)
-            ON DUPLICATE KEY UPDATE 
-                screenshot = VALUES(screenshot),
-                created_at = CURRENT_TIMESTAMP
-        """
-        cursor.execute(query, (symbol, timeframe, image_data))
-        conn.commit()
-        print(f"   ∟ ✅ Saved {symbol} ({timeframe})", flush=True)
-    except Exception as e:
-        print(f"   ∟ ❌ Save Error: {e}", flush=True)
-    finally:
-        if 'conn' in locals() and conn.is_connected():
-            cursor.close()
-            conn.close()
-
-def get_driver():
-    opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1920,1080")
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-    opts.add_experimental_option("useAutomationExtension", False)
-    opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
-    service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=opts)
-
-def inject_tv_cookies(driver):
-    try:
-        cookie_data = os.getenv("TRADINGVIEW_COOKIES")
-        if not cookie_data: return False
-        cookies = json.loads(cookie_data)
-        driver.get("https://www.tradingview.com/")
-        time.sleep(3)
-        for c in cookies:
-            try:
-                driver.add_cookie({
-                    "name": c.get("name"), 
-                    "value": c.get("value"), 
-                    "domain": ".tradingview.com", 
-                    "path": "/"
-                })
-            except: pass
-        driver.refresh()
-        time.sleep(5)
+        actions = ActionChains(driver)
+        # Trigger Alt+G
+        actions.key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
+        time.sleep(1.5)
+        # Type calculated date and Enter
+        actions.send_keys(date_str).send_keys(Keys.ENTER).perform()
+        time.sleep(4) 
         return True
-    except: return False
+    except Exception as e:
+        print(f"   ⚠️ Navigation Error: {e}")
+        return False
 
-# ---------------- MAIN ---------------- #
+# ... [setup_database, save_to_mysql, get_driver, inject_tv_cookies stay the same] ...
 
 def main():
-    setup_database()
-
+    # setup_database() code here...
+    
     try:
         creds_json = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds_json))
         sheet = client.open_by_url(STOCK_LIST_URL).sheet1
         data = sheet.get_all_values()
-        
-        # Structure: [Symbol, Name, Week_Link, Day_Link]
         df = pd.DataFrame(data[1:], columns=data[0])
     except Exception as e:
-        print(f"❌ Google Sheet Error: {e}")
+        print(f"❌ GSht Error: {e}")
         return
 
     driver = get_driver()
     if not inject_tv_cookies(driver):
-        print("❌ TradingView Authentication Failed")
         driver.quit()
         return
 
@@ -135,36 +73,41 @@ def main():
         symbol = str(row.iloc[0]).strip()
         week_url = str(row.iloc[2]).strip()
         day_url = str(row.iloc[3]).strip()
+        
+        # New: Get the "relative" numbers from columns 5 and 6
+        day_days_back = row.iloc[4]   # e.g., "1" or "1 day before"
+        month_days_back = row.iloc[5] # e.g., "30" or "1 month before"
 
         if not symbol or "tradingview.com" not in day_url:
             continue
 
         print(f"📸 Processing {symbol}...")
 
-        # --- Capture DAY ---
+        # --- DAY CHART ---
         try:
             driver.get(day_url)
-            chart = WebDriverWait(driver, 25).until(
-                EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]"))
-            )
-            time.sleep(5) # Allow indicators to load
+            target_day = calculate_target_date(day_days_back)
+            if target_day:
+                print(f"   ∟ Jumping to {target_day} ({day_days_back})")
+                navigate_to_date(driver, target_day)
+            
+            chart = WebDriverWait(driver, 20).until(EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]")))
             save_to_mysql(symbol, "day", chart.screenshot_as_png)
-        except Exception as e:
-            print(f"   ⚠️ Day Error: {e}")
+        except Exception as e: print(f"⚠️ Day Error: {e}")
 
-        # --- Capture WEEK ---
+        # --- WEEK CHART ---
         try:
             driver.get(week_url)
-            chart = WebDriverWait(driver, 25).until(
-                EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]"))
-            )
-            time.sleep(5)
+            target_month = calculate_target_date(month_days_back)
+            if target_month:
+                print(f"   ∟ Jumping to {target_month} ({month_days_back})")
+                navigate_to_date(driver, target_month)
+            
+            chart = WebDriverWait(driver, 20).until(EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]")))
             save_to_mysql(symbol, "week", chart.screenshot_as_png)
-        except Exception as e:
-            print(f"   ⚠️ Week Error: {e}")
+        except Exception as e: print(f"⚠️ Week Error: {e}")
 
     driver.quit()
-    print("🏁 PROCESS COMPLETE!")
 
 if __name__ == "__main__":
     main()

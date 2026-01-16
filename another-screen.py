@@ -8,6 +8,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- CONFIG ---------------- #
@@ -41,7 +42,7 @@ def setup_database():
         """)
         
         # 2. Clear old data
-        print("🧹 Clearing old entries from another_screenshot...", flush=True)
+        print("清理 Clearing old entries from another_screenshot...", flush=True)
         cursor.execute("TRUNCATE TABLE another_screenshot")
         
         conn.commit()
@@ -108,6 +109,34 @@ def inject_tv_cookies(driver):
         return True
     except: return False
 
+def navigate_to_date(driver, date_str):
+    """Triggers Alt+G, inputs the date, and presses Enter."""
+    try:
+        if not date_str or str(date_str).strip() == "":
+            return False
+            
+        print(f"   ∟ 📅 Navigating to date: {date_str}")
+        
+        # Ensure the chart area is focused before typing
+        body = driver.find_element(By.TAG_NAME, "body")
+        body.click()
+        time.sleep(1)
+
+        # Trigger Alt + G
+        actions = ActionChains(driver)
+        actions.key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
+        time.sleep(1.5) # Wait for dialog to open
+
+        # Type the date and press Enter
+        actions.send_keys(str(date_str)).send_keys(Keys.ENTER).perform()
+        
+        # Wait for chart to load the new date context
+        time.sleep(5)
+        return True
+    except Exception as e:
+        print(f"   ∟ ⚠️ Date Navigation Error: {e}")
+        return False
+
 # ---------------- MAIN ---------------- #
 
 def main():
@@ -119,7 +148,8 @@ def main():
         sheet = client.open_by_url(STOCK_LIST_URL).sheet1
         data = sheet.get_all_values()
         
-        # Structure: [Symbol, Name, Week_Link, Day_Link]
+        # Structure: [Symbol, Name, Week_Link, Day_Link, ..., Dates(G)]
+        # We use data[0] for columns to ensure alignment
         df = pd.DataFrame(data[1:], columns=data[0])
     except Exception as e:
         print(f"❌ Google Sheet Error: {e}")
@@ -135,6 +165,12 @@ def main():
         symbol = str(row.iloc[0]).strip()
         week_url = str(row.iloc[2]).strip()
         day_url = str(row.iloc[3]).strip()
+        
+        # Column G is index 6
+        try:
+            target_date = str(row.iloc[6]).strip()
+        except IndexError:
+            target_date = None
 
         if not symbol or "tradingview.com" not in day_url:
             continue
@@ -147,10 +183,15 @@ def main():
             chart = WebDriverWait(driver, 25).until(
                 EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]"))
             )
-            time.sleep(5) # Allow indicators to load
+            
+            if target_date:
+                navigate_to_date(driver, target_date)
+            else:
+                time.sleep(5) # Default wait if no date provided
+                
             save_to_mysql(symbol, "day", chart.screenshot_as_png)
         except Exception as e:
-            print(f"   ⚠️ Day Error: {e}")
+            print(f"    ⚠️ Day Error: {e}")
 
         # --- Capture WEEK ---
         try:
@@ -158,10 +199,15 @@ def main():
             chart = WebDriverWait(driver, 25).until(
                 EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]"))
             )
-            time.sleep(5)
+            
+            if target_date:
+                navigate_to_date(driver, target_date)
+            else:
+                time.sleep(5)
+                
             save_to_mysql(symbol, "week", chart.screenshot_as_png)
         except Exception as e:
-            print(f"   ⚠️ Week Error: {e}")
+            print(f"    ⚠️ Week Error: {e}")
 
     driver.quit()
     print("🏁 PROCESS COMPLETE!")

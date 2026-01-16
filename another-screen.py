@@ -24,9 +24,11 @@ DB_CONFIG = {
 # ---------------- HELPERS ---------------- #
 
 def setup_database():
+    """Creates the table if it doesn't exist and clears old data."""
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
+        
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS another_screenshot (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -37,10 +39,12 @@ def setup_database():
                 UNIQUE KEY symbol_tf (symbol, timeframe)
             ) ENGINE=InnoDB;
         """)
-        print("🧹 Clearing old entries...", flush=True)
+        
+        print("🧹 Clearing old entries from another_screenshot...", flush=True)
         cursor.execute("TRUNCATE TABLE another_screenshot")
+        
         conn.commit()
-        print("✅ Database cleaned.", flush=True)
+        print("✅ Database setup and cleaned.", flush=True)
     except Exception as e:
         print(f"❌ Database Setup Error: {e}", flush=True)
     finally:
@@ -75,7 +79,7 @@ def get_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-    # CRITICAL: These flags help render "colorful" indicators in headless mode
+    # Forces high-quality rendering for canvas-based indicators
     opts.add_argument("--force-device-scale-factor=1")
     opts.add_argument("--hide-scrollbars")
     opts.add_argument("--disable-blink-features=AutomationControlled")
@@ -107,6 +111,7 @@ def inject_tv_cookies(driver):
     except: return False
 
 def navigate_to_date(driver, date_str):
+    """Triggers Alt+G, inputs the date, and presses Enter."""
     try:
         if not date_str or str(date_str).strip() == "":
             return False
@@ -119,17 +124,12 @@ def navigate_to_date(driver, date_str):
 
         actions = ActionChains(driver)
         actions.key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
-        time.sleep(1.5) 
+        time.sleep(2) # Wait for dialog
 
         actions.send_keys(str(date_str)).send_keys(Keys.ENTER).perform()
         
-        # INCREASED WAIT: Give the chart 8 seconds to "paint" the colorful indicators
-        time.sleep(8)
-        
-        # REDRAW TRIGGER: Slightly move the mouse to force canvas update
-        actions.move_by_offset(10, 10).perform()
-        time.sleep(1)
-        
+        # Initial wait for the jump
+        time.sleep(5)
         return True
     except Exception as e:
         print(f"   ∟ ⚠️ Date Navigation Error: {e}")
@@ -171,19 +171,27 @@ def main():
 
         print(f"📸 Processing {symbol}...")
 
-        # --- Capture DAY ---
+        # --- Capture DAY (Enhanced Rendering) ---
         try:
             driver.get(day_url)
-            chart = WebDriverWait(driver, 25).until(
+            chart = WebDriverWait(driver, 30).until(
                 EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]"))
             )
             
             if target_date:
                 navigate_to_date(driver, target_date)
-            else:
-                time.sleep(8) # Wait for indicators to load
-                
-            # Final check before screenshot
+            
+            # THE FIX: Force indicators to paint
+            print(f"    ⏳ Waiting for Day indicators to calculate...")
+            time.sleep(12) 
+            
+            # Force layout recalculation to wake up invisible indicators
+            driver.execute_script("window.dispatchEvent(new Event('resize'));")
+            time.sleep(2)
+            
+            # Final mouse wiggle to ensure interactive layers are active
+            ActionChains(driver).move_by_offset(10, 10).perform()
+            
             save_to_mysql(symbol, "day", chart.screenshot_as_png)
         except Exception as e:
             print(f"    ⚠️ Day Error: {e}")
@@ -197,8 +205,12 @@ def main():
             
             if target_date:
                 navigate_to_date(driver, target_date)
-            else:
-                time.sleep(8)
+            
+            print(f"    ⏳ Waiting for Week indicators...")
+            time.sleep(8)
+            
+            driver.execute_script("window.dispatchEvent(new Event('resize'));")
+            time.sleep(1)
                 
             save_to_mysql(symbol, "week", chart.screenshot_as_png)
         except Exception as e:

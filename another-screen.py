@@ -14,6 +14,12 @@ from webdriver_manager.chrome import ChromeDriverManager
 # ---------------- CONFIG ---------------- #
 STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
 
+# Change these strings to match your EXACT Google Sheet column header names
+COL_SYMBOL = "Symbol"
+COL_WEEK_URL = "Week URL"
+COL_DAY_URL = "Day URL"
+COL_TARGET_DATE = "Target Date" 
+
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "user": os.getenv("DB_USER"),
@@ -40,13 +46,12 @@ def setup_database():
         print("🧹 Clearing old entries...", flush=True)
         cursor.execute("TRUNCATE TABLE another_screenshot")
         conn.commit()
-        print("✅ Database ready.", flush=True)
+        print("✅ Database cleaned.", flush=True)
     except Exception as e:
-        print(f"❌ Database Error: {e}")
+        print(f"❌ Database Setup Error: {e}")
     finally:
         if 'conn' in locals() and conn.is_connected():
-            cursor.close()
-            conn.close()
+            cursor.close(); conn.close()
 
 def save_to_mysql(symbol, timeframe, image_data):
     try:
@@ -59,13 +64,12 @@ def save_to_mysql(symbol, timeframe, image_data):
         """
         cursor.execute(query, (symbol, timeframe, image_data))
         conn.commit()
-        print(f"   ∟ ✅ Saved {symbol} ({timeframe})", flush=True)
+        print(f"   ∟ ✅ Saved {symbol} ({timeframe})")
     except Exception as e:
         print(f"   ∟ ❌ Save Error: {e}")
     finally:
         if 'conn' in locals() and conn.is_connected():
-            cursor.close()
-            conn.close()
+            cursor.close(); conn.close()
 
 def get_driver():
     opts = Options()
@@ -73,8 +77,10 @@ def get_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-    opts.add_argument("--force-device-scale-factor=1.5") # Higher scale helps indicator visibility
-    opts.add_argument("--hide-scrollbars")
+    # Force ignore cache to ensure fresh URL loading
+    opts.add_argument("--disable-cache")
+    opts.add_argument("--disk-cache-size=0")
+    opts.add_argument("--force-device-scale-factor=1")
     opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=opts)
@@ -85,48 +91,29 @@ def inject_tv_cookies(driver):
         if not cookie_data: return False
         cookies = json.loads(cookie_data)
         driver.get("https://www.tradingview.com/")
-        time.sleep(2)
+        time.sleep(3)
         for c in cookies:
-            driver.add_cookie({"name": c["name"], "value": c["value"], "domain": ".tradingview.com", "path": "/"})
+            driver.add_cookie({"name": c.get("name"), "value": c.get("value"), "domain": ".tradingview.com", "path": "/"})
         driver.refresh()
-        time.sleep(4)
+        time.sleep(5)
         return True
     except: return False
 
 def navigate_to_date(driver, date_str):
-    """Navigates and waits for the chart to settle."""
     try:
-        if not date_str: return False
+        if not date_str or str(date_str).strip() == "": return False
+        print(f"   ∟ 📅 Navigating to date: {date_str}")
+        body = driver.find_element(By.TAG_NAME, "body")
+        body.click()
+        time.sleep(1)
         actions = ActionChains(driver)
-        # Ensure focus
-        driver.find_element(By.TAG_NAME, "body").click()
-        # Trigger Alt+G
         actions.key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
-        time.sleep(1.5)
+        time.sleep(2)
         actions.send_keys(str(date_str)).send_keys(Keys.ENTER).perform()
-        # Wait for the dialog to vanish
-        time.sleep(3)
+        time.sleep(6) # Increased wait for data loading
         return True
     except Exception as e:
-        print(f"   ∟ ⚠️ Nav Error: {e}")
-        return False
-
-def wait_for_indicators(driver, timeout=20):
-    """Forces the chart to render indicators by waiting for legend labels."""
-    try:
-        # Wait for indicator legend values to appear in the DOM
-        WebDriverWait(driver, timeout).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "pane-legend-item-value-container"))
-        )
-        # Mouse wiggle to trigger hover/render states
-        actions = ActionChains(driver)
-        actions.move_by_offset(100, 100).pause(0.5).move_by_offset(-50, -50).perform()
-        # Small delay for the canvas to paint
-        time.sleep(2)
-        return True
-    except:
-        print("   ∟ ⚠️ Indicators might not have loaded fully.")
-        return False
+        print(f"   ∟ ⚠️ Date Error: {e}"); return False
 
 # ---------------- MAIN ---------------- #
 
@@ -137,46 +124,63 @@ def main():
         creds_json = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds_json))
         sheet = client.open_by_url(STOCK_LIST_URL).sheet1
-        data = sheet.get_all_values()
-        df = pd.DataFrame(data[1:], columns=data[0])
+        
+        # Fetch data and convert to DataFrame using the first row as headers
+        data = sheet.get_all_records() 
+        df = pd.DataFrame(data)
+        print(f"📋 Loaded {len(df)} symbols from Google Sheets.")
     except Exception as e:
-        print(f"❌ Sheet Error: {e}"); return
+        print(f"❌ Google Sheet Error: {e}"); return
 
     driver = get_driver()
     if not inject_tv_cookies(driver):
-        print("❌ Auth Failed"); driver.quit(); return
+        print("❌ TV Auth Failed"); driver.quit(); return
 
-    for _, row in df.iterrows():
-        symbol = str(row.iloc[0]).strip()
-        week_url = str(row.iloc[2]).strip()
-        day_url = str(row.iloc[3]).strip()
-        target_date = str(row.iloc[6]).strip() if len(row) > 6 else None
+    for index, row in df.iterrows():
+        # DYNAMIC COLUMN MAPPING: This finds the data by name, not number
+        symbol = str(row.get(COL_SYMBOL, "")).strip()
+        week_url = str(row.get(COL_WEEK_URL, "")).strip()
+        day_url = str(row.get(COL_DAY_URL, "")).strip()
+        target_date = str(row.get(COL_TARGET_DATE, "")).strip()
 
-        if not symbol or "tradingview.com" not in day_url: continue
+        if not symbol or "tradingview.com" not in day_url:
+            print(f"⏩ Skipping Row {index+1}: Missing URL or Symbol")
+            continue
 
-        print(f"📸 Processing {symbol}...")
+        print(f"📸 [{index+1}/{len(df)}] Processing {symbol}...")
 
-        # Process Day and Week
-        for url, label in [(day_url, "day"), (week_url, "week")]:
-            try:
-                driver.get(url)
-                chart = WebDriverWait(driver, 30).until(
-                    EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]"))
-                )
-                
-                if target_date:
-                    navigate_to_date(driver, target_date)
-                
-                # Critical: Wait for indicators to actually paint
-                wait_for_indicators(driver)
-                
-                # Final refresh of layout
-                driver.execute_script("window.dispatchEvent(new Event('resize'));")
-                time.sleep(1)
-                
-                save_to_mysql(symbol, label, chart.screenshot_as_png)
-            except Exception as e:
-                print(f"    ⚠️ {label} Error: {e}")
+        # Process Day URL
+        try:
+            print(f"   ∟ Opening Day URL: {day_url}")
+            driver.get(day_url)
+            chart = WebDriverWait(driver, 30).until(
+                EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]"))
+            )
+            if target_date: navigate_to_date(driver, target_date)
+            
+            # Recalculate and Wiggle
+            driver.execute_script("window.dispatchEvent(new Event('resize'));")
+            time.sleep(5) 
+            ActionChains(driver).move_by_offset(10, 10).perform()
+            
+            save_to_mysql(symbol, "day", chart.screenshot_as_png)
+        except Exception as e:
+            print(f"   ⚠️ Day Error for {symbol}: {e}")
+
+        # Process Week URL
+        try:
+            print(f"   ∟ Opening Week URL: {week_url}")
+            driver.get(week_url)
+            chart = WebDriverWait(driver, 25).until(
+                EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]"))
+            )
+            if target_date: navigate_to_date(driver, target_date)
+            
+            driver.execute_script("window.dispatchEvent(new Event('resize'));")
+            time.sleep(3)
+            save_to_mysql(symbol, "week", chart.screenshot_as_png)
+        except Exception as e:
+            print(f"   ⚠️ Week Error for {symbol}: {e}")
 
     driver.quit()
     print("🏁 PROCESS COMPLETE!")

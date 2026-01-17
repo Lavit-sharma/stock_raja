@@ -13,7 +13,9 @@ from selenium.webdriver.common.action_chains import ActionChains
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- CONFIG ---------------- #
-STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
+# The Spreadsheet name and Tab name you requested
+SPREADSHEET_NAME = "Stock List"
+TAB_NAME = "Weekday"
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -26,10 +28,11 @@ DB_CONFIG = {
 # ---------------- HELPERS ---------------- #
 
 def calculate_target_date(input_val):
-    """Calculates YYYY-MM-DD from '104 before' style strings."""
+    """Calculates YYYY-MM-DD from '104 before' or numeric strings."""
     try:
         if not input_val or str(input_val).strip() == "":
             return None
+        # Extract only the numbers from the string
         digits = ''.join(filter(str.isdigit, str(input_val)))
         if not digits: return None
         
@@ -37,11 +40,11 @@ def calculate_target_date(input_val):
         target_dt = datetime.now() - timedelta(days=days)
         return target_dt.strftime('%Y-%m-%d')
     except Exception as e:
-        print(f"   ⚠️ Date Calc Error: {e}")
+        print(f"    ⚠️ Date Calc Error: {e}")
         return None
 
 def save_to_mysql(symbol, timeframe, image_data, chart_date):
-    """Saves to DB with explicit commit to prevent empty tables."""
+    """Saves to DB with explicit commit."""
     conn = None
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
@@ -57,33 +60,34 @@ def save_to_mysql(symbol, timeframe, image_data, chart_date):
         """
         
         cursor.execute(query, (symbol, timeframe, image_data, chart_date))
-        conn.commit() # Save the data
-        print(f"   ∟ ✅ DB Updated: {symbol} ({timeframe}) on {chart_date if chart_date else 'Current'}")
+        conn.commit()
+        print(f"    ∟ ✅ DB Updated: {symbol} ({timeframe}) on {chart_date if chart_date else 'Current'}")
         
     except mysql.connector.Error as err:
-        print(f"   ❌ DB Error: {err}")
+        print(f"    ❌ DB Error: {err}")
     finally:
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
 
 def navigate_to_date(driver, date_str):
-    """Triggers Alt+G and enters the calculated date."""
+    """Triggers Alt+G and enters the date."""
     if not date_str: return
     try:
         actions = ActionChains(driver)
-        # Send Alt+G
+        # 1. Trigger the 'Go to' dialog
         actions.key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
         time.sleep(2)
-        # Type date and Enter
+        # 2. Type the date and press Enter
         actions.send_keys(date_str).send_keys(Keys.ENTER).perform()
-        time.sleep(5) # Wait for chart to travel
+        time.sleep(5) # Wait for chart to render at that date
     except Exception as e:
-        print(f"   ⚠️ Alt+G Failed: {e}")
+        print(f"    ⚠️ Alt+G Failed: {e}")
 
 def get_driver():
     opts = Options()
-    opts.add_argument("--headless=new")
+    # If you want to see the browser, comment out the headless line
+    opts.add_argument("--headless=new") 
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
@@ -91,6 +95,7 @@ def get_driver():
     return webdriver.Chrome(service=service, options=opts)
 
 def inject_tv_cookies(driver):
+    """Loads cookies from environment to bypass login screens."""
     try:
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
         if not cookie_data: return False
@@ -112,16 +117,27 @@ def inject_tv_cookies(driver):
 # ---------------- MAIN ---------------- #
 
 def main():
-    # 1. Load and Clean Google Sheet Data
+    # 1. Load Data from Specific Spreadsheet and Tab
     try:
-        creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
+        creds_json = os.getenv("GSPREAD_CREDENTIALS")
+        if not creds_json:
+            print("❌ GSPREAD_CREDENTIALS not found in environment.")
+            return
+            
+        creds = json.loads(creds_json)
         gc = gspread.service_account_from_dict(creds)
-        sheet = gc.open_by_url(STOCK_LIST_URL).sheet1
         
-        # Avoid get_all_records() to prevent 'duplicate header' error
-        raw_data = sheet.get_all_values()
-        if not raw_data: return
+        # Open by Name instead of ID
+        spreadsheet = gc.open(SPREADSHEET_NAME)
+        # Open specific Tab
+        worksheet = spreadsheet.worksheet(TAB_NAME)
         
+        raw_data = worksheet.get_all_values()
+        if not raw_data: 
+            print("❌ Sheet is empty.")
+            return
+        
+        # Create DataFrame
         headers = [h.strip() if h.strip() else f"Col_{i}" for i, h in enumerate(raw_data[0])]
         df = pd.DataFrame(raw_data[1:], columns=headers)
     except Exception as e:
@@ -135,10 +151,11 @@ def main():
         return
 
     for _, row in df.iterrows():
-        # Match your exact structure
         symbol = str(row.get('Symbol', '')).strip()
         day_url = str(row.get('Day', '')).strip()
         week_url = str(row.get('Week', '')).strip()
+        
+        # Ensure column names match your Excel headers exactly
         day_before_val = row.get('Days before')
         week_before_val = row.get('Months before')
 
@@ -147,22 +164,25 @@ def main():
 
         print(f"🚀 Processing {symbol}...")
 
-        # --- DAY VIEW ---
+        # --- PROCESS DAY VIEW ---
         try:
             driver.get(day_url)
+            time.sleep(3)
             target_date = calculate_target_date(day_before_val)
             if target_date:
                 navigate_to_date(driver, target_date)
             
+            # Locate chart and take screenshot
             WebDriverWait(driver, 20).until(EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]")))
             img = driver.find_element(By.XPATH, "//div[contains(@class, 'chart-container')]").screenshot_as_png
             save_to_mysql(symbol, "day", img, target_date)
         except Exception as e:
-            print(f"   ⚠️ Day View Error: {e}")
+            print(f"    ⚠️ Day View Error: {e}")
 
-        # --- WEEK VIEW ---
+        # --- PROCESS WEEK VIEW ---
         try:
             driver.get(week_url)
+            time.sleep(3)
             target_date = calculate_target_date(week_before_val)
             if target_date:
                 navigate_to_date(driver, target_date)
@@ -171,7 +191,7 @@ def main():
             img = driver.find_element(By.XPATH, "//div[contains(@class, 'chart-container')]").screenshot_as_png
             save_to_mysql(symbol, "week", img, target_date)
         except Exception as e:
-            print(f"   ⚠️ Week View Error: {e}")
+            print(f"    ⚠️ Week View Error: {e}")
 
     driver.quit()
     print("🏁 PROCESS COMPLETE!")

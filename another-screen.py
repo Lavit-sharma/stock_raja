@@ -26,11 +26,15 @@ DB_CONFIG = {
 # ---------------- HELPERS ---------------- #
 
 def save_to_mysql(symbol, timeframe, image_data, chart_date):
-    """Saves the screenshot to MySQL with the provided date string."""
+    """Saves screenshot. Ensures date is NULL if empty to avoid 0000-00-00."""
     conn = None
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
+        
+        # If date is invalid, set to None so DB stores it as NULL or current date
+        final_date = chart_date if chart_date and chart_date != "" else None
+        
         query = """
             INSERT INTO another_screenshot (symbol, timeframe, screenshot, chart_date) 
             VALUES (%s, %s, %s, %s)
@@ -39,9 +43,9 @@ def save_to_mysql(symbol, timeframe, image_data, chart_date):
                 chart_date = VALUES(chart_date),
                 created_at = CURRENT_TIMESTAMP
         """
-        cursor.execute(query, (symbol, timeframe, image_data, chart_date))
+        cursor.execute(query, (symbol, timeframe, image_data, final_date))
         conn.commit()
-        print(f"    ∟ ✅ DB Updated: {symbol} ({timeframe}) on {chart_date}")
+        print(f"    ∟ ✅ DB Updated: {symbol} ({timeframe}) at {final_date}")
     except mysql.connector.Error as err:
         print(f"    ❌ DB Error: {err}")
     finally:
@@ -50,47 +54,52 @@ def save_to_mysql(symbol, timeframe, image_data, chart_date):
             conn.close()
 
 def navigate_to_date(driver, date_str):
-    """Focuses the chart, triggers Alt+G, and enters the exact date string."""
+    """Opens Alt+G, types date, and WAITS for chart movement."""
     try:
-        # Focus chart area
+        # 1. Force Focus on Chart
         chart = WebDriverWait(driver, 20).until(
             EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'chart-container')]"))
         )
         ActionChains(driver).move_to_element(chart).click().perform()
         time.sleep(1)
 
-        # Open Go-to dialog
+        # 2. Trigger Alt+G
         ActionChains(driver).key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
         
-        # Enter the date
+        # 3. Locate Input and Clear it thoroughly
         input_xpath = "//input[contains(@class, 'query') or @data-role='search' or contains(@class, 'input')]"
-        goto_input = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.XPATH, input_xpath)))
+        goto_input = WebDriverWait(driver, 10).until(EC.visibility_of_element_located((By.XPATH, input_xpath)))
         
         goto_input.send_keys(Keys.CONTROL + "a")
         goto_input.send_keys(Keys.BACKSPACE)
-        goto_input.send_keys(str(date_str))
         time.sleep(0.5)
+        
+        # 4. Type date and hit Enter
+        goto_input.send_keys(str(date_str))
+        time.sleep(1)
         goto_input.send_keys(Keys.ENTER)
         
-        time.sleep(7) # Wait for chart jump
+        # 5. CRITICAL: Wait for chart to 'jump'
+        # We wait 8 seconds because historical data takes time to load
+        print(f"    ∟ ⏳ Traveling to {date_str}...")
+        time.sleep(8) 
         return True
     except Exception as e:
-        print(f"    ⚠️ Navigation failed for {date_str}: {e}")
+        print(f"    ⚠️ Navigation Error: {e}")
         return False
 
+# ... [get_driver and inject_tv_cookies functions remain unchanged] ...
+
 def get_driver():
-    """Initializes the Chrome WebDriver."""
     opts = Options()
     opts.add_argument("--headless=new") 
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-    opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=opts)
 
 def inject_tv_cookies(driver):
-    """Bypasses login using TradingView cookies."""
     try:
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
         if not cookie_data: return False
@@ -104,24 +113,18 @@ def inject_tv_cookies(driver):
         return True
     except: return False
 
-# ---------------- MAIN ---------------- #
-
 def main():
     try:
         creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
         gc = gspread.service_account_from_dict(creds)
-        spreadsheet = gc.open(SPREADSHEET_NAME) # Open Stock List
-        worksheet = spreadsheet.worksheet(TAB_NAME) # Open Weekday tab
-        
+        spreadsheet = gc.open(SPREADSHEET_NAME)
+        worksheet = spreadsheet.worksheet(TAB_NAME)
         all_values = worksheet.get_all_values()
-        if not all_values: return
-
-        # Clean headers and ensure 'dates' column is found
-        headers = [h.strip() for h in all_values[0] if h.strip()]
-        df = pd.DataFrame([row[:len(headers)] for row in all_values[1:]], columns=headers)
         
+        headers = [h.strip() for h in all_values[0]]
+        df = pd.DataFrame(all_values[1:], columns=headers)
     except Exception as e:
-        print(f"❌ Sheet Error: {e}")
+        print(f"❌ Spreadsheet Error: {e}")
         return
 
     driver = get_driver()
@@ -133,35 +136,29 @@ def main():
         symbol = str(row.get('Symbol', '')).strip()
         week_url = str(row.get('Week', '')).strip()
         day_url = str(row.get('Day', '')).strip()
-        
-        # Pick the direct date from the "dates" column (Column G)
         target_date = str(row.get('dates', '')).strip()
 
-        # Skip logic: If symbol or date is missing, move to next
-        if not symbol or symbol.lower() in ['nan', ''] or not target_date or target_date.lower() in ['nan', '']:
-            if symbol or day_url:
-                print(f"⏩ Skipping Row {index+2} ({symbol}): Missing 'dates' or symbol.")
+        if not symbol or not target_date or target_date.lower() in ['nan', '']:
             continue
 
-        print(f"🚀 Processing {symbol} using date: {target_date}...")
+        print(f"🚀 {symbol} | Target: {target_date}")
 
-        # Process Day View and Week View using the SAME date from Column G
         for timeframe, url in [("day", day_url), ("week", week_url)]:
-            if "tradingview.com" not in str(url):
-                continue
+            if "tradingview.com" not in str(url): continue
             try:
                 driver.get(url)
-                WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]")))
+                # Ensure chart is loaded
+                WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]")))
                 
                 if navigate_to_date(driver, target_date):
+                    # Take screenshot after the 8-second wait in navigate_to_date
                     chart_elem = driver.find_element(By.XPATH, "//div[contains(@class, 'chart-container')]")
                     img = chart_elem.screenshot_as_png
                     save_to_mysql(symbol, timeframe, img, target_date)
             except Exception as e:
-                print(f"    ⚠️ Error on {timeframe} for {symbol}: {e}")
+                print(f"    ⚠️ Failed {timeframe} for {symbol}: {e}")
 
     driver.quit()
-    print("🏁 PROCESS COMPLETE!")
 
 if __name__ == "__main__":
     main()

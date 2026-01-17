@@ -61,7 +61,7 @@ def save_to_mysql(symbol, timeframe, image_data, target_date):
         """
         cursor.execute(query, (symbol, timeframe, image_data, target_date))
         conn.commit()
-        print(f"    ∟ ✅ Saved {symbol} ({timeframe}) to Database", flush=True)
+        print(f"    ∟ ✅ Saved {symbol} ({timeframe})", flush=True)
     except Exception as e:
         print(f"    ∟ ❌ Save Error: {e}")
     finally:
@@ -75,30 +75,8 @@ def get_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-    opts.add_argument("--force-device-scale-factor=1")
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=opts)
-
-def inject_tv_cookies(driver):
-    try:
-        cookie_data = os.getenv("TRADINGVIEW_COOKIES")
-        if not cookie_data: return False
-        cookies = json.loads(cookie_data)
-        driver.get("https://www.tradingview.com/")
-        time.sleep(3)
-        for c in cookies:
-            try:
-                driver.add_cookie({
-                    "name": c.get("name"), 
-                    "value": c.get("value"), 
-                    "domain": ".tradingview.com", 
-                    "path": "/"
-                })
-            except: pass
-        driver.refresh()
-        time.sleep(5)
-        return True
-    except: return False
 
 def navigate_to_date(driver, date_str):
     try:
@@ -126,67 +104,67 @@ def main():
         client = gspread.service_account_from_dict(json.loads(creds_json))
         spreadsheet = client.open_by_url(STOCK_LIST_URL)
         
-        # Open exactly the "Weekday" tab
+        # 1. Open the "Weekday" tab
         sheet = spreadsheet.worksheet("Weekday") 
-        
         data = sheet.get_all_values()
-        df = pd.DataFrame(data[1:], columns=data[0])
         
-        # Clean column names
-        df.columns = [c.strip().lower() for c in df.columns]
-        print(f"✅ Connected to 'Weekday' tab. Ready to process {len(df)} symbols.")
+        # 2. Extract headers and clean them
+        headers = [h.strip().lower() for h in data[0]]
+        df = pd.DataFrame(data[1:], columns=headers)
+        
+        # --- DEBUGGER: See what column names Python actually sees ---
+        print(f"DEBUG: Found headers in sheet: {headers}")
         
     except Exception as e:
-        print(f"❌ Google Sheet Error: {e}. Ensure tab 'Weekday' exists!")
+        print(f"❌ Google Sheet Error: {e}")
         return
 
     driver = get_driver()
-    if not inject_tv_cookies(driver):
-        print("❌ TradingView Authentication Failed")
-        driver.quit()
-        return
+    # Note: Ensure cookies are injected here if needed
 
-    for _, row in df.iterrows():
-        # Match your exact header names (mapping to lowercase clean versions)
-        symbol = str(row.get('symbol', '')).strip()
-        week_url = str(row.get('week', '')).strip()
-        day_url = str(row.get('day', '')).strip()
-        target_date = str(row.get('dates here', '')).strip()
+    for index, row in df.iterrows():
+        # Using index 0 for Symbol and index 6 for Date as a fallback
+        symbol = str(row.iloc[0]).strip()
+        week_url = str(row.iloc[2]).strip()
+        day_url = str(row.iloc[3]).strip()
+        
+        # FALLBACK LOGIC: Try to find 'dates here' column, otherwise take column 7 (index 6)
+        target_date = row.get('dates here')
+        if target_date is None or str(target_date).strip() == "":
+            target_date = row.iloc[6] if len(row) > 6 else None
 
-        # SKIP LOGIC: Skip if no date or if the cell is empty/NaN
-        if not symbol or target_date.lower() in ['nan', 'null', '', 'none']:
-            print(f"⏭️ Skipping {symbol}: No valid date in 'dates here'.")
+        # STRICT CLEANING
+        target_date = str(target_date).strip()
+
+        if target_date.lower() in ['nan', 'null', '', 'none', 'n/a']:
+            print(f"⏭️ Skipping {symbol}: Read '{target_date}' from the dates column.")
             continue
 
-        print(f"📸 Processing {symbol}...")
+        print(f"📸 Processing {symbol} for date: {target_date}...")
 
-        # --- Capture DAY ---
+        # Process DAY
         try:
             if "tradingview.com" in day_url:
                 driver.get(day_url)
-                chart_element = WebDriverWait(driver, 30).until(
-                    EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]"))
-                )
+                chart = WebDriverWait(driver, 20).until(EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]")))
                 navigate_to_date(driver, target_date)
                 driver.execute_script("window.dispatchEvent(new Event('resize'));")
                 time.sleep(2)
-                save_to_mysql(symbol, "day", chart_element.screenshot_as_png, target_date)
+                save_to_mysql(symbol, "day", chart.screenshot_as_png, target_date)
         except Exception as e:
-            print(f"    ⚠️ Day Error for {symbol}: {e}")
+            print(f"    ⚠️ Day Error: {e}")
 
-        # --- Capture WEEK ---
+        # Process WEEK
         try:
             if "tradingview.com" in week_url:
                 driver.get(week_url)
-                chart_element = WebDriverWait(driver, 30).until(
-                    EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]"))
-                )
+                chart = WebDriverWait(driver, 20).until(EC.visibility_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]")))
                 navigate_to_date(driver, target_date)
                 driver.execute_script("window.dispatchEvent(new Event('resize'));")
                 time.sleep(2)
-                save_to_mysql(symbol, "week", chart_element.screenshot_as_png, target_date)
+                save_to_mysql(symbol, "week", chart.screenshot_as_png, target_date)
         except Exception as e:
-            print(f"    ⚠️ Week Error for {symbol}: {e}")
+            print(f"    ⚠️ Week Error: {e}")
 
     driver.quit()
     print("🏁 PROCESS COMPLETE!")

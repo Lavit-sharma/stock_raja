@@ -16,7 +16,7 @@ from datetime import datetime
 # ---------------- CONFIG ---------------- #
 SPREADSHEET_NAME = "Stock List"
 TAB_NAME = "Weekday"
-MAX_THREADS = 4 
+MAX_THREADS = 4  # Adjust based on your server RAM
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -25,6 +25,7 @@ DB_CONFIG = {
     "database": os.getenv("DB_NAME"),
 }
 
+# Connection Pool for high-speed DB inserts
 db_pool = mysql.connector.pooling.MySQLConnectionPool(
     pool_name="screenshot_pool",
     pool_size=MAX_THREADS + 2,
@@ -34,15 +35,13 @@ db_pool = mysql.connector.pooling.MySQLConnectionPool(
 # ---------------- HELPERS ---------------- #
 
 def get_month_name(date_str):
-    """Extracts month name from date string. Skips if date is invalid."""
+    """Parses date and returns Month name."""
     try:
-        # Tries to parse common formats like 2024-05-15 or 15/05/2024
-        # If your date format is different, we can adjust this.
         clean_date = re.sub(r'[*]', '', str(date_str)).strip()
         for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d", "%d/%m/%Y"):
             try:
                 dt = datetime.strptime(clean_date, fmt)
-                return dt.strftime('%B') # Returns 'January', 'February', etc.
+                return dt.strftime('%B') 
             except ValueError:
                 continue
         return "Unknown"
@@ -50,11 +49,9 @@ def get_month_name(date_str):
         return "Unknown"
 
 def save_to_mysql(symbol, timeframe, image_data, chart_date, month_val):
-    """Saves screenshot including the new month column."""
     try:
         conn = db_pool.get_connection()
         cursor = conn.cursor()
-        
         query = """
             INSERT INTO another_screenshot (symbol, timeframe, screenshot, chart_date, month_before) 
             VALUES (%s, %s, %s, %s, %s)
@@ -96,7 +93,7 @@ def inject_tv_cookies(driver):
 def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
     try:
         driver.get(url)
-        wait = WebDriverWait(driver, 20)
+        wait = WebDriverWait(driver, 25)
         chart = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'chart-container')]")))
         
         ActionChains(driver).move_to_element(chart).click().perform()
@@ -108,27 +105,29 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
         goto_input.send_keys(Keys.CONTROL + "a" + Keys.BACKSPACE)
         goto_input.send_keys(str(target_date) + Keys.ENTER)
         
-        time.sleep(4) 
+        # Reduced wait for optimization
+        time.sleep(5) 
         
         img = chart.screenshot_as_png
         save_to_mysql(symbol, timeframe, img, target_date, month_val)
-        print(f"✅ Captured {symbol} ({timeframe}) for {month_val}")
+        print(f"✅ Captured {symbol} ({timeframe}) | {month_val}")
     except Exception as e:
         print(f"⚠️ Failed {symbol} ({timeframe}): {str(e)[:50]}")
 
 def process_row(row):
+    """The worker function that each thread runs."""
     symbol = str(row.get('Symbol', '')).strip()
     week_url = str(row.get('Week', '')).strip()
     day_url = str(row.get('Day', '')).strip()
     target_date = str(row.get('dates', '')).strip()
 
-    # SKIP LOGIC: Skip if Symbol is empty or if date has no numbers (Pending, etc)
+    # SKIP: If Symbol empty OR Date has no numbers (handles "Pending", "N/A", etc.)
     if not symbol or not re.search(r'\d', target_date):
         return
 
     month_val = get_month_name(target_date)
-
     driver = get_driver()
+    
     try:
         if inject_tv_cookies(driver):
             if "tradingview.com" in day_url:
@@ -141,26 +140,41 @@ def process_row(row):
 # ---------------- MAIN ---------------- #
 
 def main():
-    try:
-        creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
-        gc = gspread.service_account_from_dict(creds)
-        spreadsheet = gc.open(SPREADSHEET_NAME)
-        worksheet = spreadsheet.worksheet(TAB_NAME)
-        all_values = worksheet.get_all_values()
-        
-        headers = [h.strip() for h in all_values[0]]
-        df = pd.DataFrame(all_values[1:], columns=headers)
-        rows = df.to_dict('records')
-    except Exception as e:
-        print(f"❌ Initialization Error: {e}")
-        return
+    rows = []
+    max_retries = 5
+    retry_delay = 10
 
-    print(f"🚀 Starting Optimized Bot | Threads: {MAX_THREADS} | Symbols: {len(rows)}")
+    # FIX: Retry logic for Google Sheets 500 Error
+    for attempt in range(max_retries):
+        try:
+            print(f"🔄 Fetching Data (Attempt {attempt + 1}/{max_retries})...")
+            creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
+            gc = gspread.service_account_from_dict(creds)
+            spreadsheet = gc.open(SPREADSHEET_NAME)
+            worksheet = spreadsheet.worksheet(TAB_NAME)
+            all_values = worksheet.get_all_values()
+            
+            if all_values:
+                headers = [h.strip() for h in all_values[0]]
+                df = pd.DataFrame(all_values[1:], columns=headers)
+                rows = df.to_dict('records')
+                print(f"✅ Loaded {len(rows)} symbols.")
+                break
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"⚠️ Google API Error: {e}. Retrying...")
+                time.sleep(retry_delay)
+            else:
+                print(f"❌ Final Error: {e}")
+                return
 
+    if not rows: return
+
+    # Process symbols in parallel to save time
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         executor.map(process_row, rows)
 
-    print("🏁 All tasks completed.")
+    print("🏁 Processing Finished.")
 
 if __name__ == "__main__":
     main()

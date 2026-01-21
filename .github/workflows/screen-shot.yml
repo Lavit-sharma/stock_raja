@@ -3,7 +3,7 @@ name: TradingView to MySQL Bot
 on:
   schedule:
     # 7:00 PM UTC every day
-    - cron: '0 19 * * *' 
+    - cron: '30 13 * * *' 
   workflow_dispatch:      # Allows manual trigger
 
 jobs:

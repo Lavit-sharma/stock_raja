@@ -41,7 +41,7 @@ def get_month_name(date_str):
         for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d", "%d/%m/%Y"):
             try:
                 dt = datetime.strptime(clean_date, fmt)
-                return dt.strftime('%B') 
+                return dt.strftime('%B')
             except ValueError:
                 continue
         return "Unknown"
@@ -70,7 +70,7 @@ def save_to_mysql(symbol, timeframe, image_data, chart_date, month_val):
 
 def get_driver():
     opts = Options()
-    opts.add_argument("--headless=new") 
+    opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
@@ -81,33 +81,40 @@ def get_driver():
 def inject_tv_cookies(driver):
     try:
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
-        if not cookie_data: return False
+        if not cookie_data:
+            return False
         cookies = json.loads(cookie_data)
         driver.get("https://www.tradingview.com/")
         for c in cookies:
-            driver.add_cookie({"name": c.get("name"), "value": c.get("value"), "domain": ".tradingview.com", "path": "/"})
+            driver.add_cookie({
+                "name": c.get("name"),
+                "value": c.get("value"),
+                "domain": ".tradingview.com",
+                "path": "/"
+            })
         driver.refresh()
         return True
-    except: return False
+    except:
+        return False
 
 def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
     try:
         driver.get(url)
         wait = WebDriverWait(driver, 25)
         chart = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'chart-container')]")))
-        
+
         ActionChains(driver).move_to_element(chart).click().perform()
         ActionChains(driver).key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
-        
+
         input_xpath = "//input[contains(@class, 'query') or @data-role='search' or contains(@class, 'input')]"
         goto_input = wait.until(EC.visibility_of_element_located((By.XPATH, input_xpath)))
-        
+
         goto_input.send_keys(Keys.CONTROL + "a" + Keys.BACKSPACE)
         goto_input.send_keys(str(target_date) + Keys.ENTER)
-        
+
         # Reduced wait for optimization
-        time.sleep(5) 
-        
+        time.sleep(5)
+
         img = chart.screenshot_as_png
         save_to_mysql(symbol, timeframe, img, target_date, month_val)
         print(f"✅ Captured {symbol} ({timeframe}) | {month_val}")
@@ -115,9 +122,8 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
         print(f"⚠️ Failed {symbol} ({timeframe}): {str(e)[:50]}")
 
 def process_row(row):
-    """The worker function that each thread runs."""
+    """The worker function that each thread runs (DAY link only)."""
     symbol = str(row.get('Symbol', '')).strip()
-    week_url = str(row.get('Week', '')).strip()
     day_url = str(row.get('Day', '')).strip()
     target_date = str(row.get('dates', '')).strip()
 
@@ -125,15 +131,16 @@ def process_row(row):
     if not symbol or not re.search(r'\d', target_date):
         return
 
+    # Only read/process Day link column
+    if not day_url or "tradingview.com" not in day_url:
+        return
+
     month_val = get_month_name(target_date)
     driver = get_driver()
-    
+
     try:
         if inject_tv_cookies(driver):
-            if "tradingview.com" in day_url:
-                navigate_and_snap(driver, symbol, "day", day_url, target_date, month_val)
-            if "tradingview.com" in week_url:
-                navigate_and_snap(driver, symbol, "week", week_url, target_date, month_val)
+            navigate_and_snap(driver, symbol, "day", day_url, target_date, month_val)
     finally:
         driver.quit()
 
@@ -153,7 +160,7 @@ def main():
             spreadsheet = gc.open(SPREADSHEET_NAME)
             worksheet = spreadsheet.worksheet(TAB_NAME)
             all_values = worksheet.get_all_values()
-            
+
             if all_values:
                 headers = [h.strip() for h in all_values[0]]
                 df = pd.DataFrame(all_values[1:], columns=headers)
@@ -168,7 +175,8 @@ def main():
                 print(f"❌ Final Error: {e}")
                 return
 
-    if not rows: return
+    if not rows:
+        return
 
     # Process symbols in parallel to save time
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:

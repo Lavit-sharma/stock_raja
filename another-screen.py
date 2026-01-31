@@ -12,41 +12,47 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 from webdriver_manager.chrome import ChromeDriverManager
 from datetime import datetime
+import threading
 
 # ---------------- CONFIG ---------------- #
 SPREADSHEET_NAME = "Stock List"
 TAB_NAME = "Weekday"
 MAX_THREADS = 4 
 
+# Thread-safe counter for progress tracking
+progress_lock = threading.Lock()
+processed_count = 0
+total_rows = 0
+
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
     "database": os.getenv("DB_NAME"),
+    "connect_timeout": 30
 }
 
-db_pool = mysql.connector.pooling.MySQLConnectionPool(
-    pool_name="screenshot_pool",
-    pool_size=MAX_THREADS + 2,
-    **DB_CONFIG
-)
+db_pool = None
+
+def init_db_pool():
+    global db_pool
+    try:
+        print("📡 Attempting to connect to Database...")
+        db_pool = mysql.connector.pooling.MySQLConnectionPool(
+            pool_name="screenshot_pool",
+            pool_size=MAX_THREADS + 2,
+            **DB_CONFIG
+        )
+        print("✅ DATABASE CONNECTION SUCCESSFUL")
+        return True
+    except Exception as e:
+        print(f"❌ DATABASE CONNECTION FAILED: {e}")
+        return False
 
 # ---------------- HELPERS ---------------- #
 
-def get_month_name(date_str):
-    try:
-        clean_date = re.sub(r'[*]', '', str(date_str)).strip()
-        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d", "%d/%m/%Y"):
-            try:
-                dt = datetime.strptime(clean_date, fmt)
-                return dt.strftime('%B')
-            except ValueError:
-                continue
-        return "Unknown"
-    except:
-        return "Unknown"
-
 def save_to_mysql(symbol, timeframe, image_data, chart_date, month_val):
+    if db_pool is None: return False
     try:
         conn = db_pool.get_connection()
         cursor = conn.cursor()
@@ -63,8 +69,10 @@ def save_to_mysql(symbol, timeframe, image_data, chart_date, month_val):
         conn.commit()
         cursor.close()
         conn.close()
-    except mysql.connector.Error as err:
-        print(f"    ❌ DB Error for {symbol}: {err}")
+        return True
+    except Exception as err:
+        print(f"    ❌ DB SAVE ERROR [{symbol}]: {err}")
+        return False
 
 def get_driver():
     opts = Options()
@@ -72,124 +80,111 @@ def get_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-    opts.add_argument("--disable-gpu")
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=opts)
 
-def inject_tv_cookies(driver):
+def process_row(row):
+    global processed_count
+    row_clean = {str(k).lower().strip(): v for k, v in row.items()}
+    symbol = str(row_clean.get('symbol', '')).strip()
+    day_url = str(row_clean.get('day', '')).strip()
+    target_date = str(row_clean.get('dates', '')).strip()
+
+    with progress_lock:
+        processed_count += 1
+        current_idx = processed_count
+
+    if not symbol or "tradingview.com" not in day_url:
+        print(f"⏩ [{current_idx}/{total_rows}] Skipping {symbol or 'Unknown'}: Missing URL/Data")
+        return
+
+    print(f"🚀 [{current_idx}/{total_rows}] Starting: {symbol} at {target_date}")
+    
+    driver = get_driver()
     try:
+        # 1. Login/Cookies
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
-        if not cookie_data: return False
-        cookies = json.loads(cookie_data)
         driver.get("https://www.tradingview.com/")
-        for c in cookies:
-            driver.add_cookie({
-                "name": c.get("name"),
-                "value": c.get("value"),
-                "domain": ".tradingview.com",
-                "path": "/"
-            })
-        driver.refresh()
-        return True
-    except:
-        return False
+        if cookie_data:
+            for c in json.loads(cookie_data):
+                driver.add_cookie({"name": c["name"], "value": c["value"], "domain": ".tradingview.com", "path": "/"})
+            driver.refresh()
 
-def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
-    try:
-        driver.get(url)
-        wait = WebDriverWait(driver, 25)
+        # 2. Navigate and Capture
+        driver.get(day_url)
+        wait = WebDriverWait(driver, 20)
         chart = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'chart-container')]")))
-
-        ActionChains(driver).move_to_element(chart).click().perform()
-        time.sleep(2) # Increased for stability
         
+        ActionChains(driver).move_to_element(chart).click().perform()
+        time.sleep(1)
         ActionChains(driver).key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
-
+        
         input_xpath = "//input[contains(@class, 'query') or @data-role='search' or contains(@class, 'input')]"
         goto_input = wait.until(EC.visibility_of_element_located((By.XPATH, input_xpath)))
-
         goto_input.send_keys(Keys.CONTROL + "a" + Keys.BACKSPACE)
-        goto_input.send_keys(str(target_date) + Keys.ENTER)
-
-        time.sleep(7) # Give chart time to load the specific date
-
+        goto_input.send_keys(target_date + Keys.ENTER)
+        
+        time.sleep(6) # Wait for chart to move
+        
         img = chart.screenshot_as_png
-        save_to_mysql(symbol, timeframe, img, target_date, month_val)
-        print(f"✅ Captured {symbol} ({timeframe}) | {month_val}")
+        
+        # 3. Database Save
+        month_val = "Unknown"
+        try:
+            month_val = datetime.strptime(re.sub(r'[*]', '', target_date).strip(), "%Y-%m-%d").strftime('%B')
+        except: pass
+
+        if save_to_mysql(symbol, "day", img, target_date, month_val):
+            print(f"✅ [{current_idx}/{total_rows}] SUCCESS: {symbol} Screenshot Saved to DB")
+        else:
+            print(f"❌ [{current_idx}/{total_rows}] FAILED: {symbol} Database Error")
+
     except Exception as e:
-        print(f"⚠️ Failed {symbol} ({timeframe}): {str(e)[:100]}")
-
-def process_row(row):
-    # Use lowercase keys to be safe with column naming
-    row_lower = {str(k).lower().strip(): v for k, v in row.items()}
-    
-    symbol = str(row_lower.get('symbol', '')).strip()
-    day_url = str(row_lower.get('day', '')).strip()
-    target_date = str(row_lower.get('dates', '')).strip()
-
-    # DEBUG: Help you see why it might be skipping
-    if not symbol or not day_url or not target_date:
-        # print(f"DEBUG: Skipping row - Missing data: Sym:{symbol}, URL:{day_url}, Date:{target_date}")
-        return
-
-    if "tradingview.com" not in day_url:
-        return
-
-    month_val = get_month_name(target_date)
-    driver = get_driver()
-
-    try:
-        if inject_tv_cookies(driver):
-            navigate_and_snap(driver, symbol, "day", day_url, target_date, month_val)
-    except Exception as e:
-        print(f"Driver Error for {symbol}: {e}")
+        print(f"⚠️ [{current_idx}/{total_rows}] ERROR {symbol}: {str(e)[:50]}")
     finally:
         driver.quit()
 
 # ---------------- MAIN ---------------- #
 
 def main():
-    rows = []
-    max_retries = 5
+    global total_rows
+    
+    # Flag 1: Database Check
+    if not init_db_pool():
+        print("🛑 FATAL: Could not connect to your Database. Script stopping.")
+        return 
 
-    for attempt in range(max_retries):
-        try:
-            print(f"🔄 Fetching Data (Attempt {attempt + 1})...")
-            creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
-            gc = gspread.service_account_from_dict(creds)
-            spreadsheet = gc.open(SPREADSHEET_NAME)
-            worksheet = spreadsheet.worksheet(TAB_NAME)
-            all_values = worksheet.get_all_values()
+    # Flag 2: Google Sheets Check
+    try:
+        print("📑 Connecting to Google Sheets...")
+        creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
+        gc = gspread.service_account_from_dict(creds)
+        spreadsheet = gc.open(SPREADSHEET_NAME)
+        worksheet = spreadsheet.worksheet(TAB_NAME)
+        all_values = worksheet.get_all_values()
+        
+        if not all_values:
+            print("❌ Sheet is empty!")
+            return
 
-            if all_values:
-                headers = [h.strip() for h in all_values[0]]
-                df = pd.DataFrame(all_values[1:], columns=headers)
-                
-                # Remove duplicate columns (keeps the first occurrence)
-                df = df.loc[:, ~df.columns.duplicated()].copy()
-                
-                rows = df.to_dict('records')
-                print(f"✅ Loaded {len(rows)} symbols.")
-                break
-        except Exception as e:
-            print(f"⚠️ Error: {e}")
-            time.sleep(5)
-
-    if not rows:
-        print("❌ No data found to process.")
+        headers = [h.strip() for h in all_values[0]]
+        df = pd.DataFrame(all_values[1:], columns=headers)
+        df = df.loc[:, ~df.columns.duplicated()].copy()
+        rows = df.to_dict('records')
+        total_rows = len(rows)
+        print(f"✅ GOOGLE SHEETS CONNECTED: {total_rows} symbols loaded.")
+        
+    except Exception as e:
+        print(f"❌ GOOGLE SHEETS ERROR: {e}")
         return
 
-    # Use list() to force the executor to actually complete the work
+    # Flag 3: Process Starting
+    print(f"⚙️ Starting Process with {MAX_THREADS} parallel workers...")
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        futures = [executor.submit(process_row, row) for row in rows]
-        # This waits for each thread to finish and reports errors
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                future.result()
-            except Exception as e:
-                print(f"Thread Error: {e}")
+        list(executor.map(process_row, rows))
 
-    print("🏁 Processing Finished.")
+    print("\n🏁 ALL TASKS COMPLETED.")
 
 if __name__ == "__main__":
     main()

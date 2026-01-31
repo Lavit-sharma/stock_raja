@@ -1,9 +1,7 @@
 name: TradingView Another Screenshot Bot
 
 on:
-  schedule:
-    - cron: '0 19 * * *' # Runs daily at 7 PM UTC
-  workflow_dispatch: 
+  workflow_dispatch: # This enables the manual "Run workflow" button
 
 jobs:
   run-bot:
@@ -18,8 +16,10 @@ jobs:
           python-version: '3.10'
           cache: 'pip'
 
-      - name: Install Dependencies
+      - name: Install Chrome and Dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
           pip install pandas selenium webdriver-manager gspread mysql-connector-python
 
       - name: Run Script

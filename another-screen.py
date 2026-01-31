@@ -74,13 +74,10 @@ def save_to_mysql(symbol, timeframe, image_data, chart_date, month_val):
 
 def get_driver():
     opts = Options()
-    opts.add_argument("--headless=new") # The modern headless mode
+    opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-    
-    # We removed ChromeDriverManager() to fix the "BadZipFile" error.
-    # Selenium 4.11+ finds the driver automatically.
     return webdriver.Chrome(options=opts)
 
 def process_row(row):
@@ -95,7 +92,7 @@ def process_row(row):
         current_idx = processed_count
 
     if not symbol or "tradingview.com" not in day_url:
-        print(f"⏩ [{current_idx}/{total_rows}] Flag: Skipping {symbol or 'Unknown'} - Invalid Data")
+        print(f"⏩ [{current_idx}/{total_rows}] Flag: Skipping {symbol or 'Unknown'}")
         return
 
     print(f"🚀 [{current_idx}/{total_rows}] Flag: Starting {symbol}...")
@@ -110,11 +107,30 @@ def process_row(row):
                 driver.add_cookie({"name": c["name"], "value": c["value"], "domain": ".tradingview.com", "path": "/"})
             driver.refresh()
 
-        # 2. Capture Screenshot
+        # 2. Open Chart
         driver.get(day_url)
-        wait = WebDriverWait(driver, 20)
+        wait = WebDriverWait(driver, 25)
         chart = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'chart-container')]")))
         
+        # --- FIX: HIDE ADS/POPUPS ---
+        try:
+            # This JavaScript finds common TradingView overlay containers and hides them
+            driver.execute_script("""
+                var selectors = [
+                    "div[class*='overlap-manager']", 
+                    "div[class*='dialog-']", 
+                    "button[aria-label='Close']",
+                    "div[class*='toast-container']",
+                    "div[class*='notification-']"
+                ];
+                selectors.forEach(function(s) {
+                    var els = document.querySelectorAll(s);
+                    els.forEach(function(e) { e.style.display = 'none'; });
+                });
+            """)
+        except: pass
+        # ----------------------------
+
         ActionChains(driver).move_to_element(chart).click().perform()
         time.sleep(1)
         ActionChains(driver).key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
@@ -125,6 +141,10 @@ def process_row(row):
         goto_input.send_keys(target_date + Keys.ENTER)
         
         time.sleep(6)
+
+        # FINAL CHECK: Hide ad again right before snap if it reappeared
+        driver.execute_script("document.querySelectorAll(\"div[class*='overlap-manager']\").forEach(e => e.style.display = 'none');")
+        
         img = chart.screenshot_as_png
         
         # 3. Save
@@ -134,9 +154,9 @@ def process_row(row):
         except: pass
 
         if save_to_mysql(symbol, "day", img, target_date, month_val):
-            print(f"✅ [{current_idx}/{total_rows}] FLAG: SUCCESS - {symbol} Saved to DB")
+            print(f"✅ [{current_idx}/{total_rows}] FLAG: SUCCESS - {symbol}")
         else:
-            print(f"❌ [{current_idx}/{total_rows}] FLAG: FAILED - {symbol} DB Error")
+            print(f"❌ [{current_idx}/{total_rows}] FLAG: FAILED - {symbol}")
 
     except Exception as e:
         print(f"⚠️ [{current_idx}/{total_rows}] FLAG: ERROR {symbol}: {str(e)[:50]}")
@@ -147,9 +167,7 @@ def process_row(row):
 
 def main():
     global total_rows
-    
-    if not init_db_pool():
-        return 
+    if not init_db_pool(): return 
 
     try:
         print("📑 Flag: Connecting to Google Sheets...")
@@ -165,7 +183,6 @@ def main():
         rows = df.to_dict('records')
         total_rows = len(rows)
         print(f"✅ FLAG: GOOGLE SHEETS CONNECTED. Found {total_rows} rows.")
-        
     except Exception as e:
         print(f"❌ FLAG: GOOGLE SHEETS ERROR: {e}")
         return

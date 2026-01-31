@@ -101,7 +101,8 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
         chart = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'chart-container')]")))
 
         ActionChains(driver).move_to_element(chart).click().perform()
-        time.sleep(1)
+        time.sleep(2) # Increased for stability
+        
         ActionChains(driver).key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
 
         input_xpath = "//input[contains(@class, 'query') or @data-role='search' or contains(@class, 'input')]"
@@ -110,23 +111,28 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
         goto_input.send_keys(Keys.CONTROL + "a" + Keys.BACKSPACE)
         goto_input.send_keys(str(target_date) + Keys.ENTER)
 
-        time.sleep(5)
+        time.sleep(7) # Give chart time to load the specific date
 
         img = chart.screenshot_as_png
         save_to_mysql(symbol, timeframe, img, target_date, month_val)
         print(f"✅ Captured {symbol} ({timeframe}) | {month_val}")
     except Exception as e:
-        print(f"⚠️ Failed {symbol} ({timeframe}): {str(e)[:50]}")
+        print(f"⚠️ Failed {symbol} ({timeframe}): {str(e)[:100]}")
 
 def process_row(row):
-    symbol = str(row.get('Symbol', '')).strip()
-    day_url = str(row.get('Day', '')).strip()
-    target_date = str(row.get('dates', '')).strip()
+    # Use lowercase keys to be safe with column naming
+    row_lower = {str(k).lower().strip(): v for k, v in row.items()}
+    
+    symbol = str(row_lower.get('symbol', '')).strip()
+    day_url = str(row_lower.get('day', '')).strip()
+    target_date = str(row_lower.get('dates', '')).strip()
 
-    if not symbol or not re.search(r'\d', target_date):
+    # DEBUG: Help you see why it might be skipping
+    if not symbol or not day_url or not target_date:
+        # print(f"DEBUG: Skipping row - Missing data: Sym:{symbol}, URL:{day_url}, Date:{target_date}")
         return
 
-    if not day_url or "tradingview.com" not in day_url:
+    if "tradingview.com" not in day_url:
         return
 
     month_val = get_month_name(target_date)
@@ -135,6 +141,8 @@ def process_row(row):
     try:
         if inject_tv_cookies(driver):
             navigate_and_snap(driver, symbol, "day", day_url, target_date, month_val)
+    except Exception as e:
+        print(f"Driver Error for {symbol}: {e}")
     finally:
         driver.quit()
 
@@ -143,7 +151,6 @@ def process_row(row):
 def main():
     rows = []
     max_retries = 5
-    retry_delay = 10
 
     for attempt in range(max_retries):
         try:
@@ -158,25 +165,29 @@ def main():
                 headers = [h.strip() for h in all_values[0]]
                 df = pd.DataFrame(all_values[1:], columns=headers)
                 
-                # FIX: Remove duplicate columns (keep the first occurrence)
+                # Remove duplicate columns (keeps the first occurrence)
                 df = df.loc[:, ~df.columns.duplicated()].copy()
                 
                 rows = df.to_dict('records')
-                print(f"✅ Loaded {len(rows)} symbols (Duplicate columns removed).")
+                print(f"✅ Loaded {len(rows)} symbols.")
                 break
         except Exception as e:
-            if attempt < max_retries - 1:
-                print(f"⚠️ Error: {e}. Retrying...")
-                time.sleep(retry_delay)
-            else:
-                print(f"❌ Final Error: {e}")
-                return
+            print(f"⚠️ Error: {e}")
+            time.sleep(5)
 
     if not rows:
+        print("❌ No data found to process.")
         return
 
+    # Use list() to force the executor to actually complete the work
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        executor.map(process_row, rows)
+        futures = [executor.submit(process_row, row) for row in rows]
+        # This waits for each thread to finish and reports errors
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                print(f"Thread Error: {e}")
 
     print("🏁 Processing Finished.")
 

@@ -16,7 +16,7 @@ from datetime import datetime
 # ---------------- CONFIG ---------------- #
 SPREADSHEET_NAME = "Stock List"
 TAB_NAME = "Weekday"
-MAX_THREADS = 4  # Adjust based on your server RAM
+MAX_THREADS = 4 
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -25,7 +25,6 @@ DB_CONFIG = {
     "database": os.getenv("DB_NAME"),
 }
 
-# Connection Pool for high-speed DB inserts
 db_pool = mysql.connector.pooling.MySQLConnectionPool(
     pool_name="screenshot_pool",
     pool_size=MAX_THREADS + 2,
@@ -35,7 +34,6 @@ db_pool = mysql.connector.pooling.MySQLConnectionPool(
 # ---------------- HELPERS ---------------- #
 
 def get_month_name(date_str):
-    """Parses date and returns Month name."""
     try:
         clean_date = re.sub(r'[*]', '', str(date_str)).strip()
         for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d", "%d/%m/%Y"):
@@ -81,8 +79,7 @@ def get_driver():
 def inject_tv_cookies(driver):
     try:
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
-        if not cookie_data:
-            return False
+        if not cookie_data: return False
         cookies = json.loads(cookie_data)
         driver.get("https://www.tradingview.com/")
         for c in cookies:
@@ -104,6 +101,7 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
         chart = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'chart-container')]")))
 
         ActionChains(driver).move_to_element(chart).click().perform()
+        time.sleep(1)
         ActionChains(driver).key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
 
         input_xpath = "//input[contains(@class, 'query') or @data-role='search' or contains(@class, 'input')]"
@@ -112,7 +110,6 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
         goto_input.send_keys(Keys.CONTROL + "a" + Keys.BACKSPACE)
         goto_input.send_keys(str(target_date) + Keys.ENTER)
 
-        # Reduced wait for optimization
         time.sleep(5)
 
         img = chart.screenshot_as_png
@@ -122,16 +119,13 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
         print(f"⚠️ Failed {symbol} ({timeframe}): {str(e)[:50]}")
 
 def process_row(row):
-    """The worker function that each thread runs (DAY link only)."""
     symbol = str(row.get('Symbol', '')).strip()
     day_url = str(row.get('Day', '')).strip()
     target_date = str(row.get('dates', '')).strip()
 
-    # SKIP: If Symbol empty OR Date has no numbers (handles "Pending", "N/A", etc.)
     if not symbol or not re.search(r'\d', target_date):
         return
 
-    # Only read/process Day link column
     if not day_url or "tradingview.com" not in day_url:
         return
 
@@ -151,10 +145,9 @@ def main():
     max_retries = 5
     retry_delay = 10
 
-    # FIX: Retry logic for Google Sheets 500 Error
     for attempt in range(max_retries):
         try:
-            print(f"🔄 Fetching Data (Attempt {attempt + 1}/{max_retries})...")
+            print(f"🔄 Fetching Data (Attempt {attempt + 1})...")
             creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
             gc = gspread.service_account_from_dict(creds)
             spreadsheet = gc.open(SPREADSHEET_NAME)
@@ -164,12 +157,16 @@ def main():
             if all_values:
                 headers = [h.strip() for h in all_values[0]]
                 df = pd.DataFrame(all_values[1:], columns=headers)
+                
+                # FIX: Remove duplicate columns (keep the first occurrence)
+                df = df.loc[:, ~df.columns.duplicated()].copy()
+                
                 rows = df.to_dict('records')
-                print(f"✅ Loaded {len(rows)} symbols.")
+                print(f"✅ Loaded {len(rows)} symbols (Duplicate columns removed).")
                 break
         except Exception as e:
             if attempt < max_retries - 1:
-                print(f"⚠️ Google API Error: {e}. Retrying...")
+                print(f"⚠️ Error: {e}. Retrying...")
                 time.sleep(retry_delay)
             else:
                 print(f"❌ Final Error: {e}")
@@ -178,7 +175,6 @@ def main():
     if not rows:
         return
 
-    # Process symbols in parallel to save time
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         executor.map(process_row, rows)
 

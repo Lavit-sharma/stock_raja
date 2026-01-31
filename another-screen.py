@@ -78,7 +78,31 @@ def get_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
+    # Mask headless mode to prevent TradingView from blocking you
+    opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     return webdriver.Chrome(options=opts)
+
+def force_clear_ads(driver):
+    """Deep search and destroy for all known TradingView popups/ads"""
+    try:
+        # This script deletes elements instead of just hiding them
+        driver.execute_script("""
+            const ads = [
+                "div[class*='overlap-manager']", 
+                "div[class*='dialog-']", 
+                "div[class*='popup-']",
+                "div[class*='drawer-']",
+                "div[id*='overlap-manager']",
+                "[data-role='toast-container']",
+                "button[aria-label='Close']",
+                "div[class*='notification-']"
+            ];
+            ads.forEach(selector => {
+                document.querySelectorAll(selector).forEach(el => el.remove());
+            });
+        """)
+    except:
+        pass
 
 def process_row(row):
     global processed_count
@@ -92,45 +116,29 @@ def process_row(row):
         current_idx = processed_count
 
     if not symbol or "tradingview.com" not in day_url:
-        print(f"⏩ [{current_idx}/{total_rows}] Flag: Skipping {symbol or 'Unknown'}")
         return
 
-    print(f"🚀 [{current_idx}/{total_rows}] Flag: Starting {symbol}...")
+    print(f"🚀 [{current_idx}/{total_rows}] Flag: Capturing {symbol}...")
     
     driver = get_driver()
     try:
-        # 1. Inject Cookies
-        cookie_data = os.getenv("TRADINGVIEW_COOKIES")
+        # 1. Login
         driver.get("https://www.tradingview.com/")
+        cookie_data = os.getenv("TRADINGVIEW_COOKIES")
         if cookie_data:
             for c in json.loads(cookie_data):
                 driver.add_cookie({"name": c["name"], "value": c["value"], "domain": ".tradingview.com", "path": "/"})
             driver.refresh()
 
-        # 2. Open Chart
+        # 2. Go to Chart
         driver.get(day_url)
-        wait = WebDriverWait(driver, 25)
-        chart = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'chart-container')]")))
+        wait = WebDriverWait(driver, 30)
+        chart = wait.until(EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container')]")))
         
-        # --- FIX: HIDE ADS/POPUPS ---
-        try:
-            # This JavaScript finds common TradingView overlay containers and hides them
-            driver.execute_script("""
-                var selectors = [
-                    "div[class*='overlap-manager']", 
-                    "div[class*='dialog-']", 
-                    "button[aria-label='Close']",
-                    "div[class*='toast-container']",
-                    "div[class*='notification-']"
-                ];
-                selectors.forEach(function(s) {
-                    var els = document.querySelectorAll(s);
-                    els.forEach(function(e) { e.style.display = 'none'; });
-                });
-            """)
-        except: pass
-        # ----------------------------
+        # Kill initial ads
+        force_clear_ads(driver)
 
+        # 3. Handle Date Navigation
         ActionChains(driver).move_to_element(chart).click().perform()
         time.sleep(1)
         ActionChains(driver).key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
@@ -140,14 +148,17 @@ def process_row(row):
         goto_input.send_keys(Keys.CONTROL + "a" + Keys.BACKSPACE)
         goto_input.send_keys(target_date + Keys.ENTER)
         
-        time.sleep(6)
-
-        # FINAL CHECK: Hide ad again right before snap if it reappeared
-        driver.execute_script("document.querySelectorAll(\"div[class*='overlap-manager']\").forEach(e => e.style.display = 'none');")
+        # Wait for loading - kill any ad that appears during this time
+        for _ in range(3):
+            time.sleep(2)
+            force_clear_ads(driver)
+        
+        # FINAL CLEAN: Ensure the chart is 100% visible
+        driver.execute_script("document.querySelectorAll(\"div[class*='overlap-manager']\").forEach(e => e.remove());")
         
         img = chart.screenshot_as_png
         
-        # 3. Save
+        # 4. Save to DB
         month_val = "Unknown"
         try:
             month_val = datetime.strptime(re.sub(r'[*]', '', target_date).strip(), "%Y-%m-%d").strftime('%B')
@@ -156,7 +167,7 @@ def process_row(row):
         if save_to_mysql(symbol, "day", img, target_date, month_val):
             print(f"✅ [{current_idx}/{total_rows}] FLAG: SUCCESS - {symbol}")
         else:
-            print(f"❌ [{current_idx}/{total_rows}] FLAG: FAILED - {symbol}")
+            print(f"❌ [{current_idx}/{total_rows}] FLAG: DB ERROR - {symbol}")
 
     except Exception as e:
         print(f"⚠️ [{current_idx}/{total_rows}] FLAG: ERROR {symbol}: {str(e)[:50]}")
@@ -170,7 +181,6 @@ def main():
     if not init_db_pool(): return 
 
     try:
-        print("📑 Flag: Connecting to Google Sheets...")
         creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
         gc = gspread.service_account_from_dict(creds)
         spreadsheet = gc.open(SPREADSHEET_NAME)
@@ -182,16 +192,15 @@ def main():
         df = df.loc[:, ~df.columns.duplicated()].copy()
         rows = df.to_dict('records')
         total_rows = len(rows)
-        print(f"✅ FLAG: GOOGLE SHEETS CONNECTED. Found {total_rows} rows.")
+        print(f"✅ FLAG: LOADED {total_rows} SYMBOLS")
     except Exception as e:
         print(f"❌ FLAG: GOOGLE SHEETS ERROR: {e}")
         return
 
-    print(f"⚙️ Flag: Processing started with {MAX_THREADS} threads...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         list(executor.map(process_row, rows))
 
-    print("\n🏁 FLAG: ALL TASKS FINISHED.")
+    print("\n🏁 FLAG: COMPLETED.")
 
 if __name__ == "__main__":
     main()

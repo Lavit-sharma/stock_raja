@@ -1,11 +1,14 @@
 name: TradingView Another Screenshot Bot
 
 on:
-  workflow_dispatch: # This enables the manual "Run workflow" button
+  workflow_dispatch: # Manual run button
+  schedule:
+    - cron: '30 13 * * *'   # 7:00 PM IST (13:30 UTC)
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -25,6 +28,7 @@ jobs:
       - name: Run Script
         env:
           DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: 3306
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}

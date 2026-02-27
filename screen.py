@@ -18,7 +18,10 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 
 # ---------------- CONFIG ---------------- #
+# ✅ Stock list file stays same, but we will open worksheet by GID=1400370843
 STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
+STOCK_LIST_GID = 1400370843
+
 MV2_SQL_URL    = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skcBi1OFtaK8h1905oZOc/edit"
 
 DB_CONFIG = {
@@ -246,15 +249,26 @@ def main():
         mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
         df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
 
-        stock_raw = client.open_by_url(STOCK_LIST_URL).sheet1.get_all_values()
+        # ✅ OPEN STOCK LIST USING SPECIFIC WORKSHEET GID
+        stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
+        stock_raw = stock_ws.get_all_values()
         df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
 
-        link_map = dict(zip(
-            df_stocks.iloc[:, 0].astype(str).str.strip(),  # col A symbol
-            df_stocks.iloc[:, 2].astype(str).str.strip()   # col C url
+        # ✅ Column A = Symbol
+        # ✅ Column C = WEEK URL
+        # ✅ Column D = DAY URL
+        week_url_map = dict(zip(
+            df_stocks.iloc[:, 0].astype(str).str.strip(),  # A
+            df_stocks.iloc[:, 2].astype(str).str.strip()   # C (week)
+        ))
+        day_url_map = dict(zip(
+            df_stocks.iloc[:, 0].astype(str).str.strip(),  # A
+            df_stocks.iloc[:, 3].astype(str).str.strip()   # D (day)
         ))
 
         log(f"✅ Loaded MV2 rows: {len(df_mv2)}")
+        log(f"✅ Loaded StockList rows (gid={STOCK_LIST_GID}): {len(df_stocks)}")
+
     except Exception as e:
         log(f"❌ Sheet Error: {e}")
         return
@@ -269,10 +283,11 @@ def main():
         saved = 0
 
         for _, row in df_mv2.iterrows():
+            symbol = ""
             try:
                 # Symbol and Sector (keep as you had: A & B)
-                symbol = str(row.iloc[0]).strip()      # col A
-                sector = str(row.iloc[1]).strip().upper()  # col B
+                symbol = str(row.iloc[0]).strip()              # col A
+                sector = str(row.iloc[1]).strip().upper()      # col B
 
                 if not symbol:
                     continue
@@ -290,31 +305,40 @@ def main():
 
                 qualified += 1
 
-                url = link_map.get(symbol)
-                if not url or "tradingview.com" not in url:
-                    continue
+                # ✅ URLs from StockList:
+                # - Day URL in column D
+                # - Week URL in column C
+                day_url = day_url_map.get(symbol)
+                week_url = week_url_map.get(symbol)
 
-                if not open_with_retry(driver, url, retries=PAGE_RETRY):
-                    continue
-
-                chart = wait_chart(driver)
-                time.sleep(POST_LOAD_SLEEP)
-
+                # --- DAILY screenshot using DAY URL (Column D) ---
                 if daily >= DAILY_THRESHOLD:
-                    set_tf(driver, "1D")
-                    if save_to_mysql(db, symbol, "daily", chart.screenshot_as_png):
-                        saved += 1
+                    if day_url and "tradingview.com" in day_url:
+                        if open_with_retry(driver, day_url, retries=PAGE_RETRY):
+                            chart = wait_chart(driver)
+                            time.sleep(POST_LOAD_SLEEP)
+                            if save_to_mysql(db, symbol, "daily", chart.screenshot_as_png):
+                                saved += 1
+                    else:
+                        log(f"⚠️ Missing/invalid DAY URL for {symbol}")
 
+                # --- WEEK screenshot using WEEK URL (Column C) ---
+                # (You said "week url" so we store it as weekly)
                 if monthly >= MONTHLY_THRESHOLD:
-                    set_tf(driver, "1M")
-                    if save_to_mysql(db, symbol, "monthly", chart.screenshot_as_png):
-                        saved += 1
+                    if week_url and "tradingview.com" in week_url:
+                        if open_with_retry(driver, week_url, retries=PAGE_RETRY):
+                            chart = wait_chart(driver)
+                            time.sleep(POST_LOAD_SLEEP)
+                            if save_to_mysql(db, symbol, "weekly", chart.screenshot_as_png):
+                                saved += 1
+                    else:
+                        log(f"⚠️ Missing/invalid WEEK URL for {symbol}")
 
             except Exception as e:
-                log(f"⚠️ Screenshot error {symbol if 'symbol' in locals() else ''}: {e}")
+                log(f"⚠️ Screenshot error {symbol}: {e}")
 
         log(f"✅ QUALIFIED SYMBOLS: {qualified}")
-        log(f"✅ SAVED ROWS (daily+monthly): {saved}")
+        log(f"✅ SAVED ROWS (daily+weekly): {saved}")
         log("🏁 DONE!")
 
     finally:

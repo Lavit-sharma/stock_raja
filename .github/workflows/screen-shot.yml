@@ -2,9 +2,9 @@ name: TradingView Gainer Screenshot
 
 on:
   schedule:
-    # 7:00 PM UTC every day
-    - cron: '30 13 * * *' 
-  workflow_dispatch:      # Allows manual trigger
+    # 7:00 PM IST = 13:30 UTC (your current cron is correct)
+    - cron: '30 13 * * *'
+  workflow_dispatch:
 
 jobs:
   run-bot:
@@ -15,23 +15,30 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5 # Updated to v5
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip' # Speeds up subsequent runs
+          cache: 'pip'
 
       - name: Install Dependencies
         run: |
+          pip install --upgrade pip
           pip install pandas selenium webdriver-manager gspread mysql-connector-python
 
       - name: Run Script
         env:
-          # Database Secrets
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
-          # TradingView & Google Secrets
           TRADINGVIEW_COOKIES: ${{ secrets.TRADINGVIEW_COOKIES }}
           GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
         run: python screen.py
+
+      # ✅ NEW: Upload saved screenshots from ./screenshots
+      - name: Upload screenshots artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots/
+          if-no-files-found: warn

@@ -34,6 +34,9 @@ MONTHLY_THRESHOLD = 0.25
 CHART_WAIT_SEC = 30
 POST_LOAD_SLEEP = 6
 
+DB_RETRY = 3
+PAGE_RETRY = 2
+
 CHROME_DRIVER_PATH = ChromeDriverManager().install()
 
 
@@ -50,23 +53,68 @@ def safe_float(v):
         return 0.0
 
 
-def open_db():
-    conn = mysql.connector.connect(**DB_CONFIG)
-    conn.autocommit = True
-    return conn
+# ✅ DB CONNECT + AUTO-RECONNECT WRAPPER
+class DB:
+    def __init__(self, config):
+        self.config = config
+        self.conn = None
+        self.connect()
+
+    def connect(self):
+        # reconnect cleanly
+        try:
+            if self.conn:
+                try:
+                    self.conn.close()
+                except:
+                    pass
+        except:
+            pass
+
+        self.conn = mysql.connector.connect(**self.config)
+        self.conn.autocommit = True
+        return self.conn
+
+    def ensure(self):
+        try:
+            if self.conn is None:
+                return self.connect()
+            if not self.conn.is_connected():
+                return self.connect()
+            return self.conn
+        except:
+            return self.connect()
+
+    def close(self):
+        try:
+            if self.conn:
+                self.conn.close()
+        except:
+            pass
 
 
-def clear_db_before_run(conn):
-    cur = conn.cursor()
-    log("🧹 Clearing old database entries...")
-    cur.execute("TRUNCATE TABLE stock_screenshots")
-    log("✅ Database is clean.")
-    cur.close()
+def clear_db_before_run(db: DB):
+    cur = None
+    try:
+        conn = db.ensure()
+        cur = conn.cursor()
+        log("🧹 Clearing old database entries...")
+        cur.execute("TRUNCATE TABLE stock_screenshots")
+        log("✅ Database is clean.")
+    except Exception as e:
+        log(f"❌ Error clearing database: {e}")
+    finally:
+        try:
+            if cur:
+                cur.close()
+        except:
+            pass
 
 
-def save_to_mysql(conn, symbol, timeframe, image):
-    cur = conn.cursor()
-
+def save_to_mysql(db: DB, symbol, timeframe, image):
+    """
+    Robust insert with auto-reconnect and retries.
+    """
     query = """
         INSERT INTO stock_screenshots (symbol, timeframe, screenshot)
         VALUES (%s,%s,%s)
@@ -75,10 +123,33 @@ def save_to_mysql(conn, symbol, timeframe, image):
             created_at = CURRENT_TIMESTAMP
     """
 
-    cur.execute(query, (symbol, timeframe, image))
-    log(f"✅ [DB] Updated/Saved {symbol} ({timeframe})")
+    last_err = None
+    for attempt in range(1, DB_RETRY + 1):
+        cur = None
+        try:
+            conn = db.ensure()
+            cur = conn.cursor()
+            cur.execute(query, (symbol, timeframe, image))
+            log(f"✅ [DB] Updated/Saved {symbol} ({timeframe})")
+            return True
+        except Exception as e:
+            last_err = e
+            log(f"⚠️ DB save failed {symbol}({timeframe}) attempt {attempt}/{DB_RETRY}: {e}")
+            # reconnect and retry
+            try:
+                db.connect()
+            except:
+                pass
+            time.sleep(1.5)
+        finally:
+            try:
+                if cur:
+                    cur.close()
+            except:
+                pass
 
-    cur.close()
+    log(f"❌ DB save failed permanently for {symbol}({timeframe}): {last_err}")
+    return False
 
 
 # ---------------- SELENIUM ---------------- #
@@ -96,23 +167,28 @@ def get_driver():
     driver.execute_script(
         "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
     )
-
+    driver.set_page_load_timeout(60)
     return driver
 
 
 def inject_tv_cookies(driver):
     try:
-        cookies = json.loads(os.getenv("TRADINGVIEW_COOKIES"))
+        cookie_data = os.getenv("TRADINGVIEW_COOKIES")
+        if not cookie_data:
+            log("❌ TRADINGVIEW_COOKIES missing.")
+            return False
+
+        cookies = json.loads(cookie_data)
         driver.get("https://www.tradingview.com/")
         time.sleep(3)
 
         for c in cookies:
             try:
                 driver.add_cookie({
-                    "name": c["name"],
-                    "value": c["value"],
-                    "domain": ".tradingview.com",
-                    "path": "/"
+                    "name": c.get("name"),
+                    "value": c.get("value"),
+                    "domain": c.get("domain", ".tradingview.com"),
+                    "path": c.get("path", "/")
                 })
             except:
                 pass
@@ -122,7 +198,7 @@ def inject_tv_cookies(driver):
         log("✅ Cookies injected")
         return True
     except Exception as e:
-        log(f"❌ Cookie error {e}")
+        log(f"❌ Cookie error: {e}")
         return False
 
 
@@ -139,89 +215,114 @@ def set_tf(driver, tf):
     time.sleep(3)
 
 
+def open_with_retry(driver, url, retries=2):
+    for i in range(1, retries + 1):
+        try:
+            driver.get(url)
+            return True
+        except Exception as e:
+            log(f"⚠️ Page load failed attempt {i}/{retries}: {e}")
+            time.sleep(2)
+    return False
+
+
 # ---------------- MAIN ---------------- #
 
 def main():
-
     log(f"🔎 DB TARGET {DB_CONFIG['host']} / {DB_CONFIG['database']}")
 
-    conn = open_db()
-    clear_db_before_run(conn)
+    db = DB(DB_CONFIG)
+    clear_db_before_run(db)
 
     # ---- Sheets ----
-    client = gspread.service_account_from_dict(
-        json.loads(os.getenv("GSPREAD_CREDENTIALS"))
-    )
+    try:
+        creds = os.getenv("GSPREAD_CREDENTIALS")
+        if not creds:
+            log("❌ GSPREAD_CREDENTIALS missing.")
+            return
 
-    mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
-    df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
+        client = gspread.service_account_from_dict(json.loads(creds))
 
-    stock_raw = client.open_by_url(STOCK_LIST_URL).sheet1.get_all_values()
-    df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
+        mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
+        df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
 
-    link_map = dict(zip(
-        df_stocks.iloc[:,0].astype(str).str.strip(),
-        df_stocks.iloc[:,2].astype(str).str.strip()
-    ))
+        stock_raw = client.open_by_url(STOCK_LIST_URL).sheet1.get_all_values()
+        df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
 
-    log(f"✅ Loaded MV2 rows: {len(df_mv2)}")
+        link_map = dict(zip(
+            df_stocks.iloc[:, 0].astype(str).str.strip(),  # col A symbol
+            df_stocks.iloc[:, 2].astype(str).str.strip()   # col C url
+        ))
+
+        log(f"✅ Loaded MV2 rows: {len(df_mv2)}")
+    except Exception as e:
+        log(f"❌ Sheet Error: {e}")
+        return
 
     # ---- Browser ----
     driver = get_driver()
+    try:
+        if not inject_tv_cookies(driver):
+            return
 
-    if not inject_tv_cookies(driver):
-        return
+        qualified = 0
+        saved = 0
 
-    qualified = 0
-    saved = 0
+        for _, row in df_mv2.iterrows():
+            try:
+                # Symbol and Sector (keep as you had: A & B)
+                symbol = str(row.iloc[0]).strip()      # col A
+                sector = str(row.iloc[1]).strip().upper()  # col B
 
-    for _, row in df_mv2.iterrows():
+                if not symbol:
+                    continue
 
-        symbol = str(row.iloc[0]).strip()   # Column A = Symbol
-        sector = str(row.iloc[1]).upper()   # Column B = Sector
+                # skip unwanted sectors
+                if sector in ("INDICES", "MUTUAL FUND SCHEME"):
+                    continue
 
-        # ❌ skip unwanted sectors
-        if sector in ("INDICES", "MUTUAL FUND SCHEME"):
-            continue
+                # ✅ direct columns: O and P
+                daily = safe_float(row.iloc[14])    # O
+                monthly = safe_float(row.iloc[15])  # P
 
-        # ✅ DIRECT COLUMN ACCESS
-        daily   = safe_float(row.iloc[14])  # Column O
-        monthly = safe_float(row.iloc[15])  # Column P
+                if not (daily >= DAILY_THRESHOLD or monthly >= MONTHLY_THRESHOLD):
+                    continue
 
-        if not (daily >= DAILY_THRESHOLD or monthly >= MONTHLY_THRESHOLD):
-            continue
+                qualified += 1
 
-        qualified += 1
+                url = link_map.get(symbol)
+                if not url or "tradingview.com" not in url:
+                    continue
 
-        url = link_map.get(symbol)
-        if not url:
-            continue
+                if not open_with_retry(driver, url, retries=PAGE_RETRY):
+                    continue
 
-        driver.get(url)
+                chart = wait_chart(driver)
+                time.sleep(POST_LOAD_SLEEP)
 
+                if daily >= DAILY_THRESHOLD:
+                    set_tf(driver, "1D")
+                    if save_to_mysql(db, symbol, "daily", chart.screenshot_as_png):
+                        saved += 1
+
+                if monthly >= MONTHLY_THRESHOLD:
+                    set_tf(driver, "1M")
+                    if save_to_mysql(db, symbol, "monthly", chart.screenshot_as_png):
+                        saved += 1
+
+            except Exception as e:
+                log(f"⚠️ Screenshot error {symbol if 'symbol' in locals() else ''}: {e}")
+
+        log(f"✅ QUALIFIED SYMBOLS: {qualified}")
+        log(f"✅ SAVED ROWS (daily+monthly): {saved}")
+        log("🏁 DONE!")
+
+    finally:
         try:
-            chart = wait_chart(driver)
-            time.sleep(POST_LOAD_SLEEP)
-
-            if daily >= DAILY_THRESHOLD:
-                set_tf(driver, "1D")
-                save_to_mysql(conn, symbol, "daily", chart.screenshot_as_png)
-                saved += 1
-
-            if monthly >= MONTHLY_THRESHOLD:
-                set_tf(driver, "1M")
-                save_to_mysql(conn, symbol, "monthly", chart.screenshot_as_png)
-                saved += 1
-
-        except Exception as e:
-            log(f"⚠️ Screenshot error {symbol}: {e}")
-
-    driver.quit()
-    conn.close()
-
-    log(f"✅ QUALIFIED SYMBOLS: {qualified}")
-    log(f"✅ SAVED ROWS: {saved}")
-    log("🏁 DONE!")
+            driver.quit()
+        except:
+            pass
+        db.close()
 
 
 if __name__ == "__main__":

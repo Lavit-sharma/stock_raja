@@ -9,8 +9,6 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
@@ -18,11 +16,10 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 
 # ---------------- CONFIG ---------------- #
-# ✅ Stock list file stays same, but we will open worksheet by GID=1400370843
 STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
 STOCK_LIST_GID = 1400370843
 
-MV2_SQL_URL    = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skcBi1OFtaK8h1905oZOc/edit"
+MV2_SQL_URL = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skcBi1OFtaK8h1905oZOc/edit"
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -31,7 +28,7 @@ DB_CONFIG = {
     "database": os.getenv("DB_NAME"),
 }
 
-DAILY_THRESHOLD   = 0.07
+DAILY_THRESHOLD = 0.07
 MONTHLY_THRESHOLD = 0.25
 
 CHART_WAIT_SEC = 30
@@ -44,7 +41,6 @@ CHROME_DRIVER_PATH = ChromeDriverManager().install()
 
 
 # ---------------- HELPERS ---------------- #
-
 def log(msg):
     print(msg, flush=True)
 
@@ -56,6 +52,13 @@ def safe_float(v):
         return 0.0
 
 
+def safe_str(v):
+    try:
+        return str(v).strip()
+    except:
+        return ""
+
+
 # ✅ DB CONNECT + AUTO-RECONNECT WRAPPER
 class DB:
     def __init__(self, config):
@@ -64,7 +67,6 @@ class DB:
         self.connect()
 
     def connect(self):
-        # reconnect cleanly
         try:
             if self.conn:
                 try:
@@ -114,15 +116,18 @@ def clear_db_before_run(db: DB):
             pass
 
 
-def save_to_mysql(db: DB, symbol, timeframe, image):
+def save_to_mysql(db: DB, symbol, timeframe, image, mv2_n_al_json):
     """
-    Robust insert with auto-reconnect and retries.
+    Save screenshot + MV2 columns N..AL (as JSON) in the same row.
     """
     query = """
-        INSERT INTO stock_screenshots (symbol, timeframe, screenshot)
-        VALUES (%s,%s,%s)
+        INSERT INTO stock_screenshots
+            (symbol, timeframe, screenshot, mv2_n_al)
+        VALUES
+            (%s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
             screenshot = VALUES(screenshot),
+            mv2_n_al = VALUES(mv2_n_al),
             created_at = CURRENT_TIMESTAMP
     """
 
@@ -132,13 +137,12 @@ def save_to_mysql(db: DB, symbol, timeframe, image):
         try:
             conn = db.ensure()
             cur = conn.cursor()
-            cur.execute(query, (symbol, timeframe, image))
-            log(f"✅ [DB] Updated/Saved {symbol} ({timeframe})")
+            cur.execute(query, (symbol, timeframe, image, mv2_n_al_json))
+            log(f"✅ [DB] Updated/Saved {symbol} ({timeframe}) + N..AL")
             return True
         except Exception as e:
             last_err = e
             log(f"⚠️ DB save failed {symbol}({timeframe}) attempt {attempt}/{DB_RETRY}: {e}")
-            # reconnect and retry
             try:
                 db.connect()
             except:
@@ -156,7 +160,6 @@ def save_to_mysql(db: DB, symbol, timeframe, image):
 
 
 # ---------------- SELENIUM ---------------- #
-
 def get_driver():
     opts = Options()
     opts.add_argument("--headless=new")
@@ -167,9 +170,7 @@ def get_driver():
     service = Service(CHROME_DRIVER_PATH)
     driver = webdriver.Chrome(service=service, options=opts)
 
-    driver.execute_script(
-        "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-    )
+    driver.execute_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
     driver.set_page_load_timeout(60)
     return driver
 
@@ -207,15 +208,8 @@ def inject_tv_cookies(driver):
 
 def wait_chart(driver):
     return WebDriverWait(driver, CHART_WAIT_SEC).until(
-        EC.visibility_of_element_located(
-            (By.XPATH, "//div[contains(@class,'chart-container')]")
-        )
+        EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
     )
-
-
-def set_tf(driver, tf):
-    ActionChains(driver).send_keys(tf).send_keys(Keys.ENTER).perform()
-    time.sleep(3)
 
 
 def open_with_retry(driver, url, retries=2):
@@ -230,7 +224,6 @@ def open_with_retry(driver, url, retries=2):
 
 
 # ---------------- MAIN ---------------- #
-
 def main():
     log(f"🔎 DB TARGET {DB_CONFIG['host']} / {DB_CONFIG['database']}")
 
@@ -249,21 +242,19 @@ def main():
         mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
         df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
 
-        # ✅ OPEN STOCK LIST USING SPECIFIC WORKSHEET GID
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
         stock_raw = stock_ws.get_all_values()
         df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
 
-        # ✅ Column A = Symbol
-        # ✅ Column C = WEEK URL
-        # ✅ Column D = DAY URL
+        # StockList mapping:
+        # A = symbol, C = week url, D = day url
         week_url_map = dict(zip(
-            df_stocks.iloc[:, 0].astype(str).str.strip(),  # A
-            df_stocks.iloc[:, 2].astype(str).str.strip()   # C (week)
+            df_stocks.iloc[:, 0].astype(str).str.strip(),
+            df_stocks.iloc[:, 2].astype(str).str.strip()
         ))
         day_url_map = dict(zip(
-            df_stocks.iloc[:, 0].astype(str).str.strip(),  # A
-            df_stocks.iloc[:, 3].astype(str).str.strip()   # D (day)
+            df_stocks.iloc[:, 0].astype(str).str.strip(),
+            df_stocks.iloc[:, 3].astype(str).str.strip()
         ))
 
         log(f"✅ Loaded MV2 rows: {len(df_mv2)}")
@@ -282,21 +273,24 @@ def main():
         qualified = 0
         saved = 0
 
+        # MV2 N..AL indices (0-based): N=13 ... AL=37
+        N_IDX = 13
+        AL_IDX = 37
+
+        mv2_headers = list(df_mv2.columns)
+
         for _, row in df_mv2.iterrows():
             symbol = ""
             try:
-                # Symbol and Sector (keep as you had: A & B)
-                symbol = str(row.iloc[0]).strip()              # col A
-                sector = str(row.iloc[1]).strip().upper()      # col B
-
+                symbol = safe_str(row.iloc[0])          # MV2 col A
+                sector = safe_str(row.iloc[1]).upper()  # MV2 col B
                 if not symbol:
                     continue
 
-                # skip unwanted sectors
                 if sector in ("INDICES", "MUTUAL FUND SCHEME"):
                     continue
 
-                # ✅ direct columns: O and P
+                # thresholds: MV2 O and P (same as your logic)
                 daily = safe_float(row.iloc[14])    # O
                 monthly = safe_float(row.iloc[15])  # P
 
@@ -305,31 +299,39 @@ def main():
 
                 qualified += 1
 
-                # ✅ URLs from StockList:
-                # - Day URL in column D
-                # - Week URL in column C
+                # ✅ Build JSON for MV2 columns N..AL
+                # store as { "ColNameN": "value", ... }
+                n_al_map = {}
+                max_i = min(AL_IDX, len(mv2_headers) - 1)
+
+                for i in range(N_IDX, max_i + 1):
+                    key = safe_str(mv2_headers[i]) or f"col_{i}"
+                    n_al_map[key] = safe_str(row.iloc[i])
+
+                mv2_n_al_json = json.dumps(n_al_map, ensure_ascii=False)
+
                 day_url = day_url_map.get(symbol)
                 week_url = week_url_map.get(symbol)
 
-                # --- DAILY screenshot using DAY URL (Column D) ---
+                # --- DAILY screenshot using DAY URL (StockList col D) ---
                 if daily >= DAILY_THRESHOLD:
                     if day_url and "tradingview.com" in day_url:
                         if open_with_retry(driver, day_url, retries=PAGE_RETRY):
                             chart = wait_chart(driver)
                             time.sleep(POST_LOAD_SLEEP)
-                            if save_to_mysql(db, symbol, "daily", chart.screenshot_as_png):
+                            if save_to_mysql(db, symbol, "daily", chart.screenshot_as_png, mv2_n_al_json):
                                 saved += 1
                     else:
                         log(f"⚠️ Missing/invalid DAY URL for {symbol}")
 
-                # --- WEEK screenshot using WEEK URL (Column C) ---
-                # (You said "week url" so we store it as weekly)
+                # --- WEEK screenshot using WEEK URL (StockList col C) ---
+                # Triggered by monthly threshold as you requested
                 if monthly >= MONTHLY_THRESHOLD:
                     if week_url and "tradingview.com" in week_url:
                         if open_with_retry(driver, week_url, retries=PAGE_RETRY):
                             chart = wait_chart(driver)
                             time.sleep(POST_LOAD_SLEEP)
-                            if save_to_mysql(db, symbol, "weekly", chart.screenshot_as_png):
+                            if save_to_mysql(db, symbol, "weekly", chart.screenshot_as_png, mv2_n_al_json):
                                 saved += 1
                     else:
                         log(f"⚠️ Missing/invalid WEEK URL for {symbol}")

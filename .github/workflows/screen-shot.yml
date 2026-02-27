@@ -1,4 +1,4 @@
-name: TradingView to MySQL Bot
+name: TradingView Gainer Screenshot
 
 on:
   schedule:

@@ -138,8 +138,8 @@ def main():
             continue
 
         try:
-            daily = float(str(row.get('dailychange', '0')).replace('%', '').strip() or 0)
-            monthly = float(str(row.get('monthlychange', '0')).replace('%', '').strip() or 0)
+            daily = float(str(row.get('change%', '0')).replace('%', '').strip() or 0)
+            monthly = float(str(row.get('mchange%', '0')).replace('%', '').strip() or 0)
         except:
             continue
 

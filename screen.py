@@ -1,14 +1,21 @@
-import os, time, json, gspread
+import os
+import time
+import json
+import gspread
 import pandas as pd
 import mysql.connector
+
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains  # ✅ FIX
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.keys import Keys
+
 from webdriver_manager.chrome import ChromeDriverManager
+
 
 # ---------------- CONFIG ---------------- #
 STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
@@ -21,43 +28,85 @@ DB_CONFIG = {
     "database": os.getenv("DB_NAME")
 }
 
+# thresholds (same as your code)
+DAILY_THRESHOLD   = 0.07
+MONTHLY_THRESHOLD = 0.25
+
+# waits
+CHART_WAIT_SEC = 30
+POST_LOAD_SLEEP = 6  # after chart visible (stable screenshot)
+RETRY_PER_SYMBOL = 2
+
+
+# ✅ Speed: resolve chromedriver path ONCE
+CHROME_DRIVER_PATH = ChromeDriverManager().install()
+
+
 # ---------------- HELPERS ---------------- #
 
-def clear_db_before_run():
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
-        print("🧹 Clearing old database entries...", flush=True)
-        cursor.execute("TRUNCATE TABLE stock_screenshots")
-        conn.commit()
-        print("✅ Database is clean.", flush=True)
-    except Exception as e:
-        print(f"❌ Error clearing database: {e}", flush=True)
-    finally:
-        if 'conn' in locals() and conn.is_connected():
-            cursor.close()
-            conn.close()
+def log(msg):
+    print(msg, flush=True)
 
-def save_to_mysql(symbol, timeframe, image_data):
+
+def safe_float(v, default=0.0):
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
+        if v is None:
+            return default
+        s = str(v).replace('%', '').strip()
+        if s == "" or s.lower() == "none":
+            return default
+        return float(s)
+    except:
+        return default
+
+
+def open_db():
+    conn = mysql.connector.connect(**DB_CONFIG)
+    conn.autocommit = True
+    return conn
+
+
+def clear_db_before_run(conn):
+    try:
+        cursor = conn.cursor()
+        log("🧹 Clearing old database entries...")
+        cursor.execute("TRUNCATE TABLE stock_screenshots")
+        log("✅ Database is clean.")
+    except Exception as e:
+        log(f"❌ Error clearing database: {e}")
+    finally:
+        try:
+            cursor.close()
+        except:
+            pass
+
+
+def save_to_mysql(conn, symbol, timeframe, image_data):
+    """
+    Uses your existing table stock_screenshots.
+    Assumes UNIQUE(symbol,timeframe) exists (you already have symbol_timeframe_idx).
+    """
+    try:
         cursor = conn.cursor()
         query = """
-            INSERT INTO stock_screenshots (symbol, timeframe, screenshot) 
+            INSERT INTO stock_screenshots (symbol, timeframe, screenshot)
             VALUES (%s, %s, %s)
-            ON DUPLICATE KEY UPDATE 
+            ON DUPLICATE KEY UPDATE
                 screenshot = VALUES(screenshot),
                 created_at = CURRENT_TIMESTAMP
         """
         cursor.execute(query, (symbol, timeframe, image_data))
-        conn.commit()
-        print(f"✅ [DB] Updated/Saved {symbol} ({timeframe})", flush=True)
+        log(f"✅ [DB] Updated/Saved {symbol} ({timeframe})")
+        return True
     except Exception as e:
-        print(f"❌ Database Error: {e}", flush=True)
+        log(f"❌ Database Error ({symbol} {timeframe}): {e}")
+        return False
     finally:
-        if 'conn' in locals() and conn.is_connected():
+        try:
             cursor.close()
-            conn.close()
+        except:
+            pass
+
 
 def get_driver():
     opts = Options()
@@ -72,19 +121,29 @@ def get_driver():
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
     )
-    service = Service(ChromeDriverManager().install())
+
+    service = Service(CHROME_DRIVER_PATH)
     driver = webdriver.Chrome(service=service, options=opts)
+    driver.set_page_load_timeout(60)
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     return driver
 
+
 def inject_tv_cookies(driver):
+    """
+    Injects TradingView cookies so charts open properly in headless.
+    """
     try:
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
         if not cookie_data:
+            log("❌ TRADINGVIEW_COOKIES missing.")
             return False
+
         cookies = json.loads(cookie_data)
         driver.get("https://www.tradingview.com/")
         time.sleep(3)
+
+        ok = 0
         for c in cookies:
             try:
                 driver.add_cookie({
@@ -93,85 +152,189 @@ def inject_tv_cookies(driver):
                     "domain": c.get("domain", ".tradingview.com"),
                     "path": c.get("path", "/")
                 })
+                ok += 1
             except:
                 pass
+
         driver.refresh()
-        time.sleep(5)
-        return True
-    except:
+        time.sleep(4)
+        log(f"✅ Cookies injected: {ok}/{len(cookies)}")
+        return ok > 0
+    except Exception as e:
+        log(f"❌ Cookie inject error: {e}")
         return False
+
+
+def wait_chart(driver):
+    """
+    Wait for chart-container and return the element.
+    """
+    return WebDriverWait(driver, CHART_WAIT_SEC).until(
+        EC.visibility_of_element_located(
+            (By.XPATH, "//div[contains(@class, 'chart-container')]")
+        )
+    )
+
+
+def open_url_with_retry(driver, url, retries=2):
+    for attempt in range(1, retries + 1):
+        try:
+            driver.get(url)
+            return True
+        except Exception as e:
+            log(f"⚠️ Page load failed (attempt {attempt}/{retries}): {e}")
+            time.sleep(3)
+    return False
+
+
+def set_timeframe(driver, tf_key):
+    """
+    Send timeframe keys like '1D' or '1M' same as your logic.
+    """
+    try:
+        ActionChains(driver).send_keys(tf_key).send_keys(Keys.ENTER).perform()
+        time.sleep(3)
+        return True
+    except Exception as e:
+        log(f"⚠️ Timeframe set failed ({tf_key}): {e}")
+        return False
+
 
 # ---------------- MAIN ---------------- #
 
 def main():
-    clear_db_before_run()
+    # print DB target once (prevents checking wrong DB by mistake)
+    log(f"🔎 DB TARGET host={DB_CONFIG.get('host')} db={DB_CONFIG.get('database')} user={DB_CONFIG.get('user')}")
 
+    # open DB once
+    try:
+        conn = open_db()
+    except Exception as e:
+        log(f"❌ DB connection failed: {e}")
+        return
+
+    # keep your same behavior: clear table each run
+    clear_db_before_run(conn)
+
+    # Google Sheets read
     try:
         creds_json = os.getenv("GSPREAD_CREDENTIALS")
+        if not creds_json:
+            log("❌ GSPREAD_CREDENTIALS missing.")
+            return
+
         client = gspread.service_account_from_dict(json.loads(creds_json))
 
         mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
+        if not mv2_raw or len(mv2_raw) < 2:
+            log("❌ MV2 sheet empty or has no rows.")
+            return
+
         df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
 
         stock_raw = client.open_by_url(STOCK_LIST_URL).sheet1.get_all_values()
+        if not stock_raw or len(stock_raw) < 2:
+            log("❌ Stock List sheet empty or has no rows.")
+            return
+
         df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
+
+        # same mapping logic as your code: col0 = symbol, col2 = url
+        if df_stocks.shape[1] < 3:
+            log("❌ Stock List sheet must have at least 3 columns (Symbol in col A, URL in col C).")
+            return
 
         link_map = dict(zip(
             df_stocks.iloc[:, 0].astype(str).str.strip(),
             df_stocks.iloc[:, 2].astype(str).str.strip()
         ))
+
+        log(f"✅ Loaded MV2 rows: {len(df_mv2)} | Stock list links: {len(link_map)}")
     except Exception as e:
-        print(f"❌ Sheet Error: {e}")
+        log(f"❌ Sheet Error: {e}")
         return
 
+    # Selenium
     driver = get_driver()
-    if not inject_tv_cookies(driver):
-        driver.quit()
-        return
+    try:
+        if not inject_tv_cookies(driver):
+            log("❌ Cookie injection failed, stopping.")
+            return
 
-    for _, row in df_mv2.iterrows():
-        symbol = str(row.get('Symbol', '')).strip()
+        qualified_symbols = 0
+        saved_rows = 0
 
-        # ✅ SECTOR REJECTION (NEW)
-        sector = str(row.get('Sector', '')).strip().upper()
-        if sector in ("INDICES", "MUTUAL FUND SCHEME"):
-            continue
-
-        try:
-            daily = float(str(row.get('change%', '0')).replace('%', '').strip() or 0)
-            monthly = float(str(row.get('mchange%', '0')).replace('%', '').strip() or 0)
-        except:
-            continue
-
-        if daily >= 0.07 or monthly >= 0.25:
-            url = link_map.get(symbol)
-            if not url or "tradingview.com" not in url:
+        for _, row in df_mv2.iterrows():
+            symbol = str(row.get("Symbol", "")).strip()
+            if not symbol:
                 continue
 
-            driver.get(url)
-            try:
-                chart = WebDriverWait(driver, 30).until(
-                    EC.visibility_of_element_located(
-                        (By.XPATH, "//div[contains(@class, 'chart-container')]")
-                    )
-                )
-                time.sleep(8)
+            # sector rejection (same)
+            sector = str(row.get("Sector", "")).strip().upper()
+            if sector in ("INDICES", "MUTUAL FUND SCHEME"):
+                continue
 
-                if daily >= 0.07:
-                    webdriver.ActionChains(driver).send_keys("1D").send_keys(Keys.ENTER).perform()
-                    time.sleep(5)
-                    save_to_mysql(symbol, "daily", chart.screenshot_as_png)
+            daily = safe_float(row.get("dailychange", 0))
+            monthly = safe_float(row.get("monthlychange", 0))
 
-                if monthly >= 0.25:
-                    webdriver.ActionChains(driver).send_keys("1M").send_keys(Keys.ENTER).perform()
-                    time.sleep(5)
-                    save_to_mysql(symbol, "monthly", chart.screenshot_as_png)
+            # same threshold logic
+            if not (daily >= DAILY_THRESHOLD or monthly >= MONTHLY_THRESHOLD):
+                continue
 
-            except Exception as e:
-                print(f"⚠️ Screenshot Error ({symbol}): {e}")
+            qualified_symbols += 1
 
-    driver.quit()
-    print("🏁 DONE!")
+            url = link_map.get(symbol)
+            if (not url) or ("tradingview.com" not in url):
+                log(f"⚠️ Missing/invalid TV link for {symbol}.")
+                continue
+
+            # open url with retry
+            if not open_url_with_retry(driver, url, retries=RETRY_PER_SYMBOL):
+                log(f"⚠️ Could not open url for {symbol}.")
+                continue
+
+            # take screenshots with retry
+            ok_symbol = False
+            for attempt in range(1, RETRY_PER_SYMBOL + 1):
+                try:
+                    chart = wait_chart(driver)
+                    time.sleep(POST_LOAD_SLEEP)
+
+                    # daily screenshot
+                    if daily >= DAILY_THRESHOLD:
+                        set_timeframe(driver, "1D")
+                        if save_to_mysql(conn, symbol, "daily", chart.screenshot_as_png):
+                            saved_rows += 1
+
+                    # monthly screenshot
+                    if monthly >= MONTHLY_THRESHOLD:
+                        set_timeframe(driver, "1M")
+                        if save_to_mysql(conn, symbol, "monthly", chart.screenshot_as_png):
+                            saved_rows += 1
+
+                    ok_symbol = True
+                    break
+                except Exception as e:
+                    log(f"⚠️ Screenshot Error ({symbol}) attempt {attempt}/{RETRY_PER_SYMBOL}: {e}")
+                    time.sleep(3)
+
+            if not ok_symbol:
+                log(f"❌ Failed completely for {symbol} after retries.")
+
+        log(f"✅ QUALIFIED SYMBOLS: {qualified_symbols}")
+        log(f"✅ SAVED ROWS (daily+monthly): {saved_rows}")
+        log("🏁 DONE!")
+
+    finally:
+        try:
+            driver.quit()
+        except:
+            pass
+        try:
+            conn.close()
+        except:
+            pass
+
 
 if __name__ == "__main__":
     main()

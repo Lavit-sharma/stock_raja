@@ -151,7 +151,7 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
 
         # ✅ Added required waiting time before screenshot
         log(f"⏳ Waiting 7s for data to load...", symbol, timeframe)
-        time.sleep(7)
+        time.sleep(4)
 
         img = chart.screenshot_as_png
         if save_to_mysql(symbol, timeframe, img, target_date, month_val):

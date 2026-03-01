@@ -149,17 +149,9 @@ def inject_tv_cookies(driver, symbol="-"):
         return False
 
 def _wait_chart_ready(driver, timeout=30, symbol="-", tf="-"):
-    """
-    Chart is ready when:
-    - chart container present
-    - canvas present inside chart
-    - common loaders/spinners not visible
-    """
     wait = WebDriverWait(driver, timeout)
-
     chart_xpath = "//div[contains(@class,'chart-container') or contains(@class,'chart')]"
     canvas_xpath = f"{chart_xpath}//canvas"
-
     loader_xpaths = [
         "//*[contains(@class,'loader') and not(contains(@style,'display: none'))]",
         "//*[contains(@class,'spinner') and not(contains(@style,'display: none'))]",
@@ -175,7 +167,6 @@ def _wait_chart_ready(driver, timeout=30, symbol="-", tf="-"):
         try:
             canvases = driver.find_elements(By.XPATH, canvas_xpath)
             has_canvas = len(canvases) > 0
-
             loader_visible = False
             for lx in loader_xpaths:
                 for el in driver.find_elements(By.XPATH, lx):
@@ -206,7 +197,6 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
         if not _wait_chart_ready(driver, timeout=35, symbol=symbol, tf=timeframe):
             raise Exception("Chart not ready after page load")
 
-        # focus chart
         wait = WebDriverWait(driver, 25)
         chart = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class,'chart-container') or contains(@class,'chart')]")))
         ActionChains(driver).move_to_element(chart).click().perform()
@@ -223,7 +213,7 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
         goto_input.send_keys(str(target_date))
         goto_input.send_keys(Keys.ENTER)
 
-        # wait input closes/refresh
+        # wait input closes
         try:
             wait.until(EC.staleness_of(goto_input))
         except:
@@ -234,6 +224,10 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
 
         if not _wait_chart_ready(driver, timeout=40, symbol=symbol, tf=timeframe):
             raise Exception("Chart not ready after goto-date")
+
+        # ✅ NEW: Added extra waiting time to allow values/bars to fully render before screenshot
+        log(f"⏳ Waiting 5s for values to load...", symbol, timeframe)
+        time.sleep(5)
 
         img = chart.screenshot_as_png
         ok = save_to_mysql(symbol, timeframe, img, target_date, month_val)
@@ -274,15 +268,9 @@ def process_row(row, idx):
 
         if day_url and "tradingview.com" in day_url:
             navigate_and_snap(driver, symbol, "day", day_url, target_date, month_val)
-        else:
-            if day_url:
-                log("⏭️ Day URL not TradingView (skipped)", symbol, "day")
-
+        
         if week_url and "tradingview.com" in week_url:
             navigate_and_snap(driver, symbol, "week", week_url, target_date, month_val)
-        else:
-            if week_url:
-                log("⏭️ Week URL not TradingView (skipped)", symbol, "week")
 
     finally:
         try:
@@ -293,6 +281,19 @@ def process_row(row, idx):
 # ---------------- MAIN ---------------- #
 
 def main():
+    # ✅ NEW: Truncate table before starting the crawl
+    try:
+        log("🧹 Truncating table 'another_screenshot' before processing...", "-", "-")
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("TRUNCATE TABLE another_screenshot")
+        conn.commit()
+        cursor.close()
+        conn.close()
+        log("✅ Table truncated successfully.", "-", "-")
+    except Exception as e:
+        log(f"⚠️ Failed to truncate table: {short_exc(e)}", "-", "-")
+
     rows = []
     max_retries = 5
     retry_delay = 10
@@ -311,12 +312,7 @@ def main():
                 return
 
             raw_headers = all_values[0]
-            log(f"🧾 RAW HEADERS: {raw_headers}", "-", "-")  # ✅ shows REAL headers (debug)
-
             headers = make_unique_headers([str(h) for h in raw_headers])
-            if headers != [str(h).strip() if str(h).strip() else "col" for h in raw_headers]:
-                log(f"🧾 FIXED HEADERS: {headers}", "-", "-")  # ✅ shows cleaned + unique headers
-
             df = pd.DataFrame(all_values[1:], columns=headers)
             rows = df.to_dict("records")
 
@@ -336,20 +332,15 @@ def main():
         return
 
     log(f"🚀 Starting workers: {MAX_THREADS}", "-", "-")
-
-    # index rows for better logs
     indexed_rows = list(enumerate(rows, start=1))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         futures = [executor.submit(process_row, row, idx) for idx, row in indexed_rows]
         for f in concurrent.futures.as_completed(futures):
-            # ensures exceptions inside thread are visible in logs
             try:
                 f.result()
             except Exception as e:
                 log(f"❌ Thread crashed: {short_exc(e)}", "-", "-")
-                # uncomment to print full traceback:
-                # traceback.print_exc()
 
     log("🏁 Processing Finished.", "-", "-")
 

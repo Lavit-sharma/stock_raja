@@ -117,9 +117,6 @@ def clear_db_before_run(db: DB):
 
 
 def save_to_mysql(db: DB, symbol, timeframe, image, mv2_n_al_json):
-    """
-    Save screenshot + MV2 columns N..AL (as JSON) in the same row.
-    """
     query = """
         INSERT INTO stock_screenshots
             (symbol, timeframe, screenshot, mv2_n_al)
@@ -138,7 +135,7 @@ def save_to_mysql(db: DB, symbol, timeframe, image, mv2_n_al_json):
             conn = db.ensure()
             cur = conn.cursor()
             cur.execute(query, (symbol, timeframe, image, mv2_n_al_json))
-            log(f"✅ [DB] Updated/Saved {symbol} ({timeframe}) + N..AL")
+            log(f"✅ [DB] Saved {symbol} ({timeframe})")
             return True
         except Exception as e:
             last_err = e
@@ -246,8 +243,6 @@ def main():
         stock_raw = stock_ws.get_all_values()
         df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
 
-        # StockList mapping:
-        # A = symbol, C = week url, D = day url
         week_url_map = dict(zip(
             df_stocks.iloc[:, 0].astype(str).str.strip(),
             df_stocks.iloc[:, 2].astype(str).str.strip()
@@ -273,48 +268,39 @@ def main():
         qualified = 0
         saved = 0
 
-        # MV2 N..AL indices (0-based): N=13 ... AL=37
         N_IDX = 13
         AL_IDX = 37
-
         mv2_headers = list(df_mv2.columns)
 
         for _, row in df_mv2.iterrows():
             symbol = ""
             try:
-                symbol = safe_str(row.iloc[0])          # MV2 col A
-                sector = safe_str(row.iloc[1]).upper()  # MV2 col B
+                symbol = safe_str(row.iloc[0])
+                sector = safe_str(row.iloc[1]).upper()
                 if not symbol:
                     continue
 
                 if sector in ("INDICES", "MUTUAL FUND SCHEME"):
                     continue
 
-                # thresholds: MV2 O and P (same as your logic)
-                daily = safe_float(row.iloc[14])    # O
-                monthly = safe_float(row.iloc[15])  # P
+                daily_val = safe_float(row.iloc[14])
+                monthly_val = safe_float(row.iloc[15])
 
-                if not (daily >= DAILY_THRESHOLD or monthly >= MONTHLY_THRESHOLD):
-                    continue
+                # ✅ If EITHER condition is met, we process BOTH URLs
+                if (daily_val >= DAILY_THRESHOLD or monthly_val >= MONTHLY_THRESHOLD):
+                    qualified += 1
 
-                qualified += 1
+                    n_al_map = {}
+                    max_i = min(AL_IDX, len(mv2_headers) - 1)
+                    for i in range(N_IDX, max_i + 1):
+                        key = safe_str(mv2_headers[i]) or f"col_{i}"
+                        n_al_map[key] = safe_str(row.iloc[i])
+                    mv2_n_al_json = json.dumps(n_al_map, ensure_ascii=False)
 
-                # ✅ Build JSON for MV2 columns N..AL
-                # store as { "ColNameN": "value", ... }
-                n_al_map = {}
-                max_i = min(AL_IDX, len(mv2_headers) - 1)
+                    day_url = day_url_map.get(symbol)
+                    week_url = week_url_map.get(symbol)
 
-                for i in range(N_IDX, max_i + 1):
-                    key = safe_str(mv2_headers[i]) or f"col_{i}"
-                    n_al_map[key] = safe_str(row.iloc[i])
-
-                mv2_n_al_json = json.dumps(n_al_map, ensure_ascii=False)
-
-                day_url = day_url_map.get(symbol)
-                week_url = week_url_map.get(symbol)
-
-                # --- DAILY screenshot using DAY URL (StockList col D) ---
-                if daily >= DAILY_THRESHOLD:
+                    # --- Step 1: Capture Daily URL (StockList Column D) ---
                     if day_url and "tradingview.com" in day_url:
                         if open_with_retry(driver, day_url, retries=PAGE_RETRY):
                             chart = wait_chart(driver)
@@ -322,11 +308,9 @@ def main():
                             if save_to_mysql(db, symbol, "daily", chart.screenshot_as_png, mv2_n_al_json):
                                 saved += 1
                     else:
-                        log(f"⚠️ Missing/invalid DAY URL for {symbol}")
+                        log(f"⚠️ Missing Day URL for {symbol}")
 
-                # --- WEEK screenshot using WEEK URL (StockList col C) ---
-                # Triggered by monthly threshold as you requested
-                if monthly >= MONTHLY_THRESHOLD:
+                    # --- Step 2: Capture Weekly URL (StockList Column C) ---
                     if week_url and "tradingview.com" in week_url:
                         if open_with_retry(driver, week_url, retries=PAGE_RETRY):
                             chart = wait_chart(driver)
@@ -334,14 +318,13 @@ def main():
                             if save_to_mysql(db, symbol, "weekly", chart.screenshot_as_png, mv2_n_al_json):
                                 saved += 1
                     else:
-                        log(f"⚠️ Missing/invalid WEEK URL for {symbol}")
+                        log(f"⚠️ Missing Week URL for {symbol}")
 
             except Exception as e:
                 log(f"⚠️ Screenshot error {symbol}: {e}")
 
         log(f"✅ QUALIFIED SYMBOLS: {qualified}")
-        log(f"✅ SAVED ROWS (daily+weekly): {saved}")
-        log("🏁 DONE!")
+        log(f"✅ TOTAL SCREENSHOTS SAVED: {saved}")
 
     finally:
         try:

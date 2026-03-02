@@ -1,4 +1,4 @@
-name: TradingView Another Screenshot Bot
+name: Another Screenshot Bot
 
 on:
   workflow_dispatch: # Manual run button

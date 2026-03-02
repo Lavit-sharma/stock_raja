@@ -1,4 +1,4 @@
-name: screen-shot gallery
+name: Screen gallery runner
 
 on:
   schedule:

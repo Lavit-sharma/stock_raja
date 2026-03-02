@@ -24,7 +24,7 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD"),
     "database": os.getenv("DB_NAME"),
     "port": int(os.getenv("DB_PORT", "3306")),
-    "connect_timeout": 10 # Short timeout to prevent hanging
+    "connect_timeout": 10 
 }
 
 # --- DB POOL INITIALIZATION ---
@@ -37,9 +37,7 @@ try:
     )
 except Exception as e:
     print(f"[FATAL] Could not initialize DB Pool: {e}")
-    # We don't exit here so the logs can show exactly what's happening
 
-# ✅ Resolve chromedriver once
 CHROME_DRIVER_PATH = ChromeDriverManager().install()
 
 # ---------------- LOGGING ---------------- #
@@ -48,7 +46,6 @@ RUN_ID = datetime.now().strftime("%Y%m%d-%H%M%S")
 def log(msg, symbol="-", tf="-"):
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] [{RUN_ID}] [{symbol}] [{tf}] {msg}", flush=True)
-    sys.stdout.flush()
 
 def short_exc(e: Exception, max_len=160):
     s = f"{type(e).__name__}: {e}"
@@ -134,45 +131,64 @@ def inject_tv_cookies(driver, symbol="-"):
 
 def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
     try:
-        log(f"🌐 Loading: {url}", symbol, timeframe)
+        log(f"🌐 Loading {timeframe}: {url}", symbol, timeframe)
         driver.get(url)
-        time.sleep(5) # Initial wait
+        
+        # Wait for the main page shell to load
+        time.sleep(8) 
 
-        wait = WebDriverWait(driver, 25)
+        wait = WebDriverWait(driver, 30)
+        # Ensure chart is clickable
         chart = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class,'chart-container') or contains(@class,'chart')]")))
         
+        # Click to focus
         ActionChains(driver).move_to_element(chart).click().perform()
+        time.sleep(1)
+        
+        # Open "Go To" Dialog
         ActionChains(driver).key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
         
+        # Locate input and enter date
         input_xpath = "//input[contains(@class,'query') or @data-role='search' or contains(@class,'input')]"
         goto_input = wait.until(EC.visibility_of_element_located((By.XPATH, input_xpath)))
         goto_input.send_keys(Keys.CONTROL + "a" + Keys.BACKSPACE)
         goto_input.send_keys(str(target_date) + Keys.ENTER)
 
-        # ✅ Added required waiting time before screenshot
-        log(f"⏳ Waiting 7s for data to load...", symbol, timeframe)
-        time.sleep(4)
+        # CRITICAL: Wait for candles and indicators to draw after jumping to date
+        log(f"⏳ Waiting 10s for candles/indicators to render...", symbol, timeframe)
+        time.sleep(10)
 
         img = chart.screenshot_as_png
         if save_to_mysql(symbol, timeframe, img, target_date, month_val):
-            log(f"✅ Saved to DB", symbol, timeframe)
+            log(f"✅ Saved {timeframe} to DB", symbol, timeframe)
         else:
-            log(f"⚠️ Captured but not saved (DB issue)", symbol, timeframe)
+            log(f"⚠️ {timeframe} captured but not saved", symbol, timeframe)
 
     except Exception as e:
-        log(f"❌ Error: {short_exc(e)}", symbol, timeframe)
+        log(f"❌ {timeframe} Error: {short_exc(e)}", symbol, timeframe)
 
 def process_row(row, idx):
     symbol = str(row.get("Symbol", "")).strip()
     target_date = str(row.get("dates", "")).strip()
     day_url = str(row.get("Day", "")).strip()
+    week_url = str(row.get("Week", "")).strip() 
+    
     if not symbol or not target_date: return
 
     driver = get_driver()
     try:
         if inject_tv_cookies(driver, symbol):
+            month_name = get_month_name(target_date)
+            
+            # 1. Daily Chart
             if day_url and "tradingview.com" in day_url:
-                navigate_and_snap(driver, symbol, "day", day_url, target_date, get_month_name(target_date))
+                navigate_and_snap(driver, symbol, "day", day_url, target_date, month_name)
+                time.sleep(3) # Short buffer between navigations
+            
+            # 2. Weekly Chart
+            if week_url and "tradingview.com" in week_url:
+                navigate_and_snap(driver, symbol, "week", week_url, target_date, month_name)
+                
     finally:
         driver.quit()
 
@@ -180,10 +196,8 @@ def process_row(row, idx):
 
 def main():
     if not db_pool:
-        log("❌ Connection Pool failed. Check your DB Host/Firewall.", "-", "-")
-        # Do not exit; let it try to log other issues
+        log("❌ Connection Pool failed. Check DB config.", "-", "-")
 
-    # ✅ Truncate Table
     try:
         if db_pool:
             conn = db_pool.get_connection()
@@ -196,7 +210,6 @@ def main():
     except Exception as e:
         log(f"⚠️ Truncate failed: {short_exc(e)}")
 
-    # Google Sheets Fetch
     try:
         creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
         gc = gspread.service_account_from_dict(creds)

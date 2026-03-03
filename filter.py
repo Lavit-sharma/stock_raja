@@ -20,6 +20,9 @@ MV2_SQL_URL = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skc
 
 TARGET_TABLE = "filter"
 
+# Define the columns in your Google Sheet that act as triggers
+TRIGGER_COLUMNS = ["D_Trigger", "W_Trigger", "RSI_Trigger"] 
+
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "user": os.getenv("DB_USER"),
@@ -30,8 +33,6 @@ DB_CONFIG = {
 CHART_WAIT_SEC = 30
 POST_LOAD_SLEEP = 6
 DB_RETRY = 3
-PAGE_RETRY = 2
-
 CHROME_DRIVER_PATH = ChromeDriverManager().install()
 
 # ---------------- HELPERS ---------------- #
@@ -72,10 +73,11 @@ class DB:
             if self.conn: self.conn.close()
         except: pass
 
-def save_screenshot(db: DB, symbol, timeframe, image):
+def save_screenshot(db: DB, symbol, timeframe, filter_type, image):
+    # Updated query to include filter_type in the unique constraint logic
     query = f"""
-        INSERT INTO `{TARGET_TABLE}` (symbol, timeframe, screenshot)
-        VALUES (%s, %s, %s)
+        INSERT INTO `{TARGET_TABLE}` (symbol, timeframe, filter_type, screenshot)
+        VALUES (%s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
             screenshot = VALUES(screenshot),
             created_at = CURRENT_TIMESTAMP
@@ -84,12 +86,12 @@ def save_screenshot(db: DB, symbol, timeframe, image):
         try:
             conn = db.ensure()
             cur = conn.cursor()
-            cur.execute(query, (symbol, timeframe, image))
+            cur.execute(query, (symbol, timeframe, filter_type, image))
             cur.close()
-            log(f"✅ Saved Screenshot: {symbol} [{timeframe}]")
+            log(f"✅ Saved: {symbol} | Type: {filter_type} | TF: {timeframe}")
             return
         except Exception as e:
-            log(f"⚠️ DB error attempt {attempt+1}: {e}")
+            log(f"⚠️ DB error: {e}")
             db.connect()
             time.sleep(1)
 
@@ -102,7 +104,6 @@ def get_driver():
     opts.add_argument("--window-size=1920,1080")
     service = Service(CHROME_DRIVER_PATH)
     driver = webdriver.Chrome(service=service, options=opts)
-    driver.execute_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
     return driver
 
 def inject_tv_cookies(driver):
@@ -113,10 +114,7 @@ def inject_tv_cookies(driver):
         driver.get("https://www.tradingview.com/")
         time.sleep(2)
         for c in cookies:
-            driver.add_cookie({
-                "name": c.get("name"), "value": c.get("value"),
-                "domain": ".tradingview.com", "path": "/"
-            })
+            driver.add_cookie({"name": c.get("name"), "value": c.get("value"), "domain": ".tradingview.com", "path": "/"})
         driver.refresh()
         return True
     except: return False
@@ -128,11 +126,10 @@ def main():
         creds = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds))
 
-        # 1. Fetch Triggers
+        # 1. Fetch Triggers & URL Maps
         mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
         df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
 
-        # 2. Fetch URL Maps
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
         stock_raw = stock_ws.get_all_values()
         df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
@@ -141,34 +138,38 @@ def main():
         day_urls = dict(zip(df_stocks.iloc[:, 0].str.strip(), df_stocks.iloc[:, 3].str.strip()))
 
         driver = get_driver()
-        if not inject_tv_cookies(driver):
-            log("❌ Cookie Injection Failed")
-            return
+        if not inject_tv_cookies(driver): return
 
-        # 3. Process filtered symbols
-        for _, row in df_mv2.iterrows():
-            symbol = safe_str(row.iloc[0])
-            if safe_int(row.get("D_Trigger", 0)) != 1:
+        # 2. Iterate through each Trigger Column defined in CONFIG
+        for filter_col in TRIGGER_COLUMNS:
+            if filter_col not in df_mv2.columns:
                 continue
 
-            log(f"🚀 Processing: {symbol}")
-
-            # Screenshots for both timeframes
-            tasks = [("day", day_urls.get(symbol)), ("week", week_urls.get(symbol))]
+            log(f"🔍 Checking Filter Strategy: {filter_col}")
             
-            for tf_name, url in tasks:
-                if url and "tradingview.com" in url:
-                    try:
-                        driver.get(url)
-                        chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
-                            EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
-                        )
-                        time.sleep(POST_LOAD_SLEEP)
-                        save_screenshot(db, symbol, tf_name, chart.screenshot_as_png)
-                    except Exception as e:
-                        log(f"❌ Error {symbol} {tf_name}: {e}")
+            # Process only rows where THIS specific trigger is 1
+            triggered_rows = df_mv2[df_mv2[filter_col].apply(safe_int) == 1]
 
-        log("🏁 All triggers processed.")
+            for _, row in triggered_rows.iterrows():
+                symbol = safe_str(row.iloc[0])
+                log(f"🚀 Processing {symbol} for {filter_col}")
+
+                tasks = [("day", day_urls.get(symbol)), ("week", week_urls.get(symbol))]
+                
+                for tf_name, url in tasks:
+                    if url and "tradingview.com" in url:
+                        try:
+                            driver.get(url)
+                            chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
+                                EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
+                            )
+                            time.sleep(POST_LOAD_SLEEP)
+                            # Passing filter_col as the filter_type
+                            save_screenshot(db, symbol, tf_name, filter_col, chart.screenshot_as_png)
+                        except Exception as e:
+                            log(f"❌ Error {symbol} {tf_name}: {e}")
+
+        log("🏁 All strategies processed.")
     finally:
         driver.quit()
         db.close()

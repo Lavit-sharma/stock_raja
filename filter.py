@@ -20,8 +20,8 @@ MV2_SQL_URL = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skc
 
 TARGET_TABLE = "filter"
 
-# Define the columns in your Google Sheet that act as triggers
-TRIGGER_COLUMNS = ["D_Trigger", "W_Trigger", "RSI_Trigger"] 
+# Updated to columns V and W headers
+TRIGGER_COLUMNS = ["D_Trigger", "W_Trigger"] 
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -43,10 +43,13 @@ def safe_str(v):
     return str(v).strip() if v else ""
 
 def safe_int(v):
+    """Converts strings/floats to int. Returns -1 for empty or non-numeric strings."""
     try:
-        return int(float(str(v).strip()))
-    except:
-        return 0
+        val = str(v).strip()
+        if not val: return -1
+        return int(float(val))
+    except (ValueError, TypeError):
+        return -1
 
 # ---------------- DB CLASS ---------------- #
 class DB:
@@ -74,7 +77,6 @@ class DB:
         except: pass
 
 def save_screenshot(db: DB, symbol, timeframe, filter_type, image):
-    # Updated query to include filter_type in the unique constraint logic
     query = f"""
         INSERT INTO `{TARGET_TABLE}` (symbol, timeframe, filter_type, screenshot)
         VALUES (%s, %s, %s, %s)
@@ -88,7 +90,7 @@ def save_screenshot(db: DB, symbol, timeframe, filter_type, image):
             cur = conn.cursor()
             cur.execute(query, (symbol, timeframe, filter_type, image))
             cur.close()
-            log(f"✅ Saved: {symbol} | Type: {filter_type} | TF: {timeframe}")
+            log(f"✅ Saved: {symbol} | {filter_type} | {timeframe}")
             return
         except Exception as e:
             log(f"⚠️ DB error: {e}")
@@ -103,8 +105,7 @@ def get_driver():
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
     service = Service(CHROME_DRIVER_PATH)
-    driver = webdriver.Chrome(service=service, options=opts)
-    return driver
+    return webdriver.Chrome(service=service, options=opts)
 
 def inject_tv_cookies(driver):
     try:
@@ -122,14 +123,16 @@ def inject_tv_cookies(driver):
 # ---------------- MAIN ---------------- #
 def main():
     db = DB(DB_CONFIG)
+    driver = None
     try:
         creds = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds))
 
-        # 1. Fetch Triggers & URL Maps
+        # 1. Fetch Triggers (MV2 Sheet)
         mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
         df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
 
+        # 2. Fetch URLs (Stock List Sheet)
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
         stock_raw = stock_ws.get_all_values()
         df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
@@ -138,21 +141,26 @@ def main():
         day_urls = dict(zip(df_stocks.iloc[:, 0].str.strip(), df_stocks.iloc[:, 3].str.strip()))
 
         driver = get_driver()
-        if not inject_tv_cookies(driver): return
+        if not inject_tv_cookies(driver): 
+            log("❌ Cookie injection failed.")
+            return
 
-        # 2. Iterate through each Trigger Column defined in CONFIG
+        # 3. Process D_Trigger and W_Trigger
         for filter_col in TRIGGER_COLUMNS:
             if filter_col not in df_mv2.columns:
+                log(f"⚠️ Header '{filter_col}' not found in Google Sheet.")
                 continue
 
-            log(f"🔍 Checking Filter Strategy: {filter_col}")
+            log(f"🔍 Scanning {filter_col} for value: 0")
             
-            # Process only rows where THIS specific trigger is 1
-            triggered_rows = df_mv2[df_mv2[filter_col].apply(safe_int) == 1]
+            # Logic: Filter rows where the value evaluates to 0
+            triggered_rows = df_mv2[df_mv2[filter_col].apply(safe_int) == 0]
 
             for _, row in triggered_rows.iterrows():
                 symbol = safe_str(row.iloc[0])
-                log(f"🚀 Processing {symbol} for {filter_col}")
+                if not symbol: continue
+
+                log(f"🚀 Triggered: {symbol} (Reason: 0 in {filter_col})")
 
                 tasks = [("day", day_urls.get(symbol)), ("week", week_urls.get(symbol))]
                 
@@ -164,14 +172,13 @@ def main():
                                 EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
                             )
                             time.sleep(POST_LOAD_SLEEP)
-                            # Passing filter_col as the filter_type
                             save_screenshot(db, symbol, tf_name, filter_col, chart.screenshot_as_png)
                         except Exception as e:
-                            log(f"❌ Error {symbol} {tf_name}: {e}")
+                            log(f"❌ Screenshot failed for {symbol} {tf_name}: {e}")
 
-        log("🏁 All strategies processed.")
+        log("🏁 All triggers processed.")
     finally:
-        driver.quit()
+        if driver: driver.quit()
         db.close()
 
 if __name__ == "__main__":

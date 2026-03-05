@@ -20,8 +20,8 @@ MV2_SQL_URL = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skc
 
 TARGET_TABLE = "filter"
 
-# Updated to columns V and W headers
-TRIGGER_COLUMNS = ["D_Trigger", "W_Trigger"] 
+# UPDATED: Only D_Trigger and D_Trigger_S as requested
+TRIGGER_COLUMNS = ["D_Trigger", "D_Trigger_S"] 
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -47,6 +47,7 @@ def safe_int(v):
     try:
         val = str(v).strip()
         if not val: return -1
+        # Handle cases like '0.0' or ' 0 '
         return int(float(val))
     except (ValueError, TypeError):
         return -1
@@ -137,6 +138,7 @@ def main():
         stock_raw = stock_ws.get_all_values()
         df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
 
+        # Column 0: Symbol, Column 2: Week URL, Column 3: Day URL
         week_urls = dict(zip(df_stocks.iloc[:, 0].str.strip(), df_stocks.iloc[:, 2].str.strip()))
         day_urls = dict(zip(df_stocks.iloc[:, 0].str.strip(), df_stocks.iloc[:, 3].str.strip()))
 
@@ -145,15 +147,15 @@ def main():
             log("❌ Cookie injection failed.")
             return
 
-        # 3. Process D_Trigger and W_Trigger
+        # 3. Process ONLY D_Trigger and D_Trigger_S
         for filter_col in TRIGGER_COLUMNS:
             if filter_col not in df_mv2.columns:
-                log(f"⚠️ Header '{filter_col}' not found in Google Sheet.")
+                log(f"⚠️ Header '{filter_col}' not found in Google Sheet. Check columns U and V.")
                 continue
 
             log(f"🔍 Scanning {filter_col} for value: 0")
             
-            # Logic: Filter rows where the value evaluates to 0
+            # Use safe_int to handle string/float/int and trigger on 0
             triggered_rows = df_mv2[df_mv2[filter_col].apply(safe_int) == 0]
 
             for _, row in triggered_rows.iterrows():
@@ -162,6 +164,7 @@ def main():
 
                 log(f"🚀 Triggered: {symbol} (Reason: 0 in {filter_col})")
 
+                # Process both Timeframes for each symbol
                 tasks = [("day", day_urls.get(symbol)), ("week", week_urls.get(symbol))]
                 
                 for tf_name, url in tasks:

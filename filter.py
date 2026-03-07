@@ -19,9 +19,9 @@ STOCK_LIST_GID = 1400370843
 MV2_SQL_URL = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skcBi1OFtaK8h1905oZOc/edit"
 
 TARGET_TABLE = "filter"
-
-# UPDATED: Only D_Trigger and D_Trigger_S as requested
 TRIGGER_COLUMNS = ["D_Trigger", "D_Trigger_S"] 
+# Values to check for: 0, 1, 2, 3, 4
+ALLOWED_TRIGGER_VALUES = [0, 1, 2, 3, 4]
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -43,11 +43,9 @@ def safe_str(v):
     return str(v).strip() if v else ""
 
 def safe_int(v):
-    """Converts strings/floats to int. Returns -1 for empty or non-numeric strings."""
     try:
         val = str(v).strip()
         if not val: return -1
-        # Handle cases like '0.0' or ' 0 '
         return int(float(val))
     except (ValueError, TypeError):
         return -1
@@ -77,21 +75,23 @@ class DB:
             if self.conn: self.conn.close()
         except: pass
 
-def save_screenshot(db: DB, symbol, timeframe, filter_type, image):
+def save_screenshot(db: DB, symbol, timeframe, filter_type, trigger_val, image):
+    # Added 'day' column to store the 0,1,2,3,4 value
     query = f"""
-        INSERT INTO `{TARGET_TABLE}` (symbol, timeframe, filter_type, screenshot)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO `{TARGET_TABLE}` (symbol, timeframe, filter_type, day, screenshot)
+        VALUES (%s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
             screenshot = VALUES(screenshot),
+            day = VALUES(day),
             created_at = CURRENT_TIMESTAMP
     """
     for attempt in range(DB_RETRY):
         try:
             conn = db.ensure()
             cur = conn.cursor()
-            cur.execute(query, (symbol, timeframe, filter_type, image))
+            cur.execute(query, (symbol, timeframe, filter_type, trigger_val, image))
             cur.close()
-            log(f"✅ Saved: {symbol} | {filter_type} | {timeframe}")
+            log(f"✅ Saved: {symbol} | {filter_type} | {timeframe} | Value: {trigger_val}")
             return
         except Exception as e:
             log(f"⚠️ DB error: {e}")
@@ -129,16 +129,15 @@ def main():
         creds = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds))
 
-        # 1. Fetch Triggers (MV2 Sheet)
+        # 1. Fetch Triggers
         mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
         df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
 
-        # 2. Fetch URLs (Stock List Sheet)
+        # 2. Fetch URLs
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
         stock_raw = stock_ws.get_all_values()
         df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
 
-        # Column 0: Symbol, Column 2: Week URL, Column 3: Day URL
         week_urls = dict(zip(df_stocks.iloc[:, 0].str.strip(), df_stocks.iloc[:, 2].str.strip()))
         day_urls = dict(zip(df_stocks.iloc[:, 0].str.strip(), df_stocks.iloc[:, 3].str.strip()))
 
@@ -147,24 +146,24 @@ def main():
             log("❌ Cookie injection failed.")
             return
 
-        # 3. Process ONLY D_Trigger and D_Trigger_S
+        # 3. Process Triggers for values 0, 1, 2, 3, 4
         for filter_col in TRIGGER_COLUMNS:
             if filter_col not in df_mv2.columns:
-                log(f"⚠️ Header '{filter_col}' not found in Google Sheet. Check columns U and V.")
+                log(f"⚠️ Header '{filter_col}' not found.")
                 continue
 
-            log(f"🔍 Scanning {filter_col} for value: 0")
+            log(f"🔍 Scanning {filter_col} for values: {ALLOWED_TRIGGER_VALUES}")
             
-            # Use safe_int to handle string/float/int and trigger on 0
-            triggered_rows = df_mv2[df_mv2[filter_col].apply(safe_int) == 0]
+            # UPDATED: Filter for any value in [0, 1, 2, 3, 4]
+            triggered_rows = df_mv2[df_mv2[filter_col].apply(safe_int).isin(ALLOWED_TRIGGER_VALUES)]
 
             for _, row in triggered_rows.iterrows():
                 symbol = safe_str(row.iloc[0])
+                trigger_val = safe_int(row[filter_col]) # Capture the actual value (0-4)
                 if not symbol: continue
 
-                log(f"🚀 Triggered: {symbol} (Reason: 0 in {filter_col})")
+                log(f"🚀 Triggered: {symbol} (Value: {trigger_val} in {filter_col})")
 
-                # Process both Timeframes for each symbol
                 tasks = [("day", day_urls.get(symbol)), ("week", week_urls.get(symbol))]
                 
                 for tf_name, url in tasks:
@@ -175,7 +174,8 @@ def main():
                                 EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
                             )
                             time.sleep(POST_LOAD_SLEEP)
-                            save_screenshot(db, symbol, tf_name, filter_col, chart.screenshot_as_png)
+                            # Pass trigger_val to save_screenshot
+                            save_screenshot(db, symbol, tf_name, filter_col, trigger_val, chart.screenshot_as_png)
                         except Exception as e:
                             log(f"❌ Screenshot failed for {symbol} {tf_name}: {e}")
 

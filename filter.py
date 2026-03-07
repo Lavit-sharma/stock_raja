@@ -19,9 +19,7 @@ STOCK_LIST_GID = 1400370843
 MV2_SQL_URL = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skcBi1OFtaK8h1905oZOc/edit"
 
 TARGET_TABLE = "filter"
-TRIGGER_COLUMNS = ["D_Trigger", "D_Trigger_S"] 
-# Values to check for: 0, 1, 2, 3, 4
-ALLOWED_TRIGGER_VALUES = [0, 1, 2, 3, 4]
+TRIGGER_COLUMNS = ["D_Trigger", "D_Trigger_S"]
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -35,6 +33,10 @@ POST_LOAD_SLEEP = 6
 DB_RETRY = 3
 CHROME_DRIVER_PATH = ChromeDriverManager().install()
 
+# Keep day 0 to day 4 = total 5 days
+MAX_DAY_TO_KEEP = 4
+
+
 # ---------------- HELPERS ---------------- #
 def log(msg):
     print(msg, flush=True)
@@ -45,10 +47,12 @@ def safe_str(v):
 def safe_int(v):
     try:
         val = str(v).strip()
-        if not val: return -1
+        if not val:
+            return -1
         return int(float(val))
     except (ValueError, TypeError):
         return -1
+
 
 # ---------------- DB CLASS ---------------- #
 class DB:
@@ -59,8 +63,10 @@ class DB:
 
     def connect(self):
         if self.conn:
-            try: self.conn.close()
-            except: pass
+            try:
+                self.conn.close()
+            except:
+                pass
         self.conn = mysql.connector.connect(**self.config)
         self.conn.autocommit = True
         return self.conn
@@ -72,31 +78,57 @@ class DB:
 
     def close(self):
         try:
-            if self.conn: self.conn.close()
-        except: pass
+            if self.conn:
+                self.conn.close()
+        except:
+            pass
 
-def save_screenshot(db: DB, symbol, timeframe, filter_type, trigger_val, image):
-    # Added 'day' column to store the 0,1,2,3,4 value
+
+# ---------------- DAILY ROLLOVER ---------------- #
+def roll_days_forward(db: DB):
+    """
+    Runs once per script execution.
+    Use this only when your workflow runs once per day.
+    """
+    update_query = f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 1"
+    delete_query = f"DELETE FROM `{TARGET_TABLE}` WHERE `day` > %s"
+
+    for attempt in range(DB_RETRY):
+        try:
+            conn = db.ensure()
+            cur = conn.cursor()
+
+            cur.execute(update_query)
+            cur.execute(delete_query, (MAX_DAY_TO_KEEP,))
+
+            cur.close()
+            log("✅ Day rollover completed.")
+            return
+        except Exception as e:
+            log(f"⚠️ Rollover error: {e}")
+            db.connect()
+            time.sleep(1)
+
+
+# ---------------- SAVE SCREENSHOT ---------------- #
+def save_screenshot(db: DB, symbol, timeframe, filter_type, image):
     query = f"""
-        INSERT INTO `{TARGET_TABLE}` (symbol, timeframe, filter_type, day, screenshot)
-        VALUES (%s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-            screenshot = VALUES(screenshot),
-            day = VALUES(day),
-            created_at = CURRENT_TIMESTAMP
+        INSERT INTO `{TARGET_TABLE}` (`symbol`, `timeframe`, `filter_type`, `day`, `screenshot`)
+        VALUES (%s, %s, %s, 0, %s)
     """
     for attempt in range(DB_RETRY):
         try:
             conn = db.ensure()
             cur = conn.cursor()
-            cur.execute(query, (symbol, timeframe, filter_type, trigger_val, image))
+            cur.execute(query, (symbol, timeframe, filter_type, image))
             cur.close()
-            log(f"✅ Saved: {symbol} | {filter_type} | {timeframe} | Value: {trigger_val}")
+            log(f"✅ Saved: {symbol} | {filter_type} | {timeframe} | day=0")
             return
         except Exception as e:
             log(f"⚠️ DB error: {e}")
             db.connect()
             time.sleep(1)
+
 
 # ---------------- SELENIUM ---------------- #
 def get_driver():
@@ -108,81 +140,111 @@ def get_driver():
     service = Service(CHROME_DRIVER_PATH)
     return webdriver.Chrome(service=service, options=opts)
 
+
 def inject_tv_cookies(driver):
     try:
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
-        if not cookie_data: return False
+        if not cookie_data:
+            return False
+
         cookies = json.loads(cookie_data)
         driver.get("https://www.tradingview.com/")
         time.sleep(2)
+
         for c in cookies:
-            driver.add_cookie({"name": c.get("name"), "value": c.get("value"), "domain": ".tradingview.com", "path": "/"})
+            driver.add_cookie({
+                "name": c.get("name"),
+                "value": c.get("value"),
+                "domain": ".tradingview.com",
+                "path": "/"
+            })
+
         driver.refresh()
         return True
-    except: return False
+    except Exception:
+        return False
+
 
 # ---------------- MAIN ---------------- #
 def main():
     db = DB(DB_CONFIG)
     driver = None
+
     try:
+        # Shift old records: 0->1, 1->2, 2->3 ...
+        # Then remove rows older than day 4
+        roll_days_forward(db)
+
         creds = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds))
 
-        # 1. Fetch Triggers
+        # 1. Fetch MV2 trigger sheet
         mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
         df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
 
-        # 2. Fetch URLs
+        # 2. Fetch stock list sheet
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
         stock_raw = stock_ws.get_all_values()
         df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
 
-        week_urls = dict(zip(df_stocks.iloc[:, 0].str.strip(), df_stocks.iloc[:, 2].str.strip()))
-        day_urls = dict(zip(df_stocks.iloc[:, 0].str.strip(), df_stocks.iloc[:, 3].str.strip()))
+        # Column 0 = Symbol, Column 2 = Week URL, Column 3 = Day URL
+        week_urls = dict(zip(
+            df_stocks.iloc[:, 0].astype(str).str.strip(),
+            df_stocks.iloc[:, 2].astype(str).str.strip()
+        ))
+        day_urls = dict(zip(
+            df_stocks.iloc[:, 0].astype(str).str.strip(),
+            df_stocks.iloc[:, 3].astype(str).str.strip()
+        ))
 
         driver = get_driver()
-        if not inject_tv_cookies(driver): 
+        if not inject_tv_cookies(driver):
             log("❌ Cookie injection failed.")
             return
 
-        # 3. Process Triggers for values 0, 1, 2, 3, 4
+        # 3. Scan trigger columns
         for filter_col in TRIGGER_COLUMNS:
             if filter_col not in df_mv2.columns:
-                log(f"⚠️ Header '{filter_col}' not found.")
+                log(f"⚠️ Header '{filter_col}' not found in Google Sheet.")
                 continue
 
-            log(f"🔍 Scanning {filter_col} for values: {ALLOWED_TRIGGER_VALUES}")
-            
-            # UPDATED: Filter for any value in [0, 1, 2, 3, 4]
-            triggered_rows = df_mv2[df_mv2[filter_col].apply(safe_int).isin(ALLOWED_TRIGGER_VALUES)]
+            log(f"🔍 Scanning {filter_col} for value 0")
+
+            triggered_rows = df_mv2[df_mv2[filter_col].apply(safe_int) == 0]
 
             for _, row in triggered_rows.iterrows():
                 symbol = safe_str(row.iloc[0])
-                trigger_val = safe_int(row[filter_col]) # Capture the actual value (0-4)
-                if not symbol: continue
+                if not symbol:
+                    continue
 
-                log(f"🚀 Triggered: {symbol} (Value: {trigger_val} in {filter_col})")
+                log(f"🚀 Triggered: {symbol} ({filter_col}=0)")
 
-                tasks = [("day", day_urls.get(symbol)), ("week", week_urls.get(symbol))]
-                
+                tasks = [
+                    ("day", day_urls.get(symbol)),
+                    ("week", week_urls.get(symbol))
+                ]
+
                 for tf_name, url in tasks:
                     if url and "tradingview.com" in url:
                         try:
                             driver.get(url)
                             chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
-                                EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
+                                EC.visibility_of_element_located(
+                                    (By.XPATH, "//div[contains(@class,'chart-container')]")
+                                )
                             )
                             time.sleep(POST_LOAD_SLEEP)
-                            # Pass trigger_val to save_screenshot
-                            save_screenshot(db, symbol, tf_name, filter_col, trigger_val, chart.screenshot_as_png)
+                            save_screenshot(db, symbol, tf_name, filter_col, chart.screenshot_as_png)
                         except Exception as e:
                             log(f"❌ Screenshot failed for {symbol} {tf_name}: {e}")
 
         log("🏁 All triggers processed.")
+
     finally:
-        if driver: driver.quit()
+        if driver:
+            driver.quit()
         db.close()
+
 
 if __name__ == "__main__":
     main()

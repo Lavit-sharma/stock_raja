@@ -2,9 +2,7 @@ name: Filter Screenshot Bot
 
 on:
   workflow_dispatch:   # Manual Run Button
-  schedule:
-    # 7:00 PM IST = 13:30 UTC
-    - cron: '30 13 * * 1-5'   # Monday-Friday
+     # Monday-Friday
 
 jobs:
   run-bot:

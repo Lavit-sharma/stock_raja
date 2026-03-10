@@ -2,6 +2,7 @@ import os
 import time
 import json
 import re
+import sys
 import gspread
 import pandas as pd
 import mysql.connector
@@ -27,6 +28,7 @@ DB_CONFIG = {
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
     "database": os.getenv("DB_NAME"),
+    "port": int(os.getenv("DB_PORT", "3306")),
 }
 
 DAILY_THRESHOLD = 0.07
@@ -36,9 +38,10 @@ CHART_WAIT_SEC = 30
 POST_LOAD_SLEEP = 6
 
 DB_RETRY = 3
-PAGE_RETRY = 2
+DB_CONNECT_RETRY = 3
+DB_CONNECT_WAIT = 5
 
-CHROME_DRIVER_PATH = ChromeDriverManager().install()
+PAGE_RETRY = 2
 
 
 # ---------------- HELPERS ---------------- #
@@ -53,17 +56,15 @@ def safe_float(v):
         if s == "":
             return 0.0
 
-        # remove common unwanted chars
         s = s.replace('%', '')
         s = s.replace(',', '')
-        s = s.replace('−', '-')   # unicode minus
-        s = s.replace('–', '-')   # en dash
-        s = s.replace('—', '-')   # em dash
+        s = s.replace('−', '-')
+        s = s.replace('–', '-')
+        s = s.replace('—', '-')
         s = s.replace('+', '')
         s = s.replace('₹', '')
         s = s.strip()
 
-        # keep only number-like content if extra text exists
         match = re.search(r'-?\d*\.?\d+', s)
         if match:
             return float(match.group())
@@ -80,7 +81,7 @@ def safe_str(v):
         return ""
 
 
-# ✅ DB CONNECT + AUTO-RECONNECT WRAPPER
+# ---------------- DB WRAPPER ---------------- #
 class DB:
     def __init__(self, config):
         self.config = config
@@ -88,6 +89,8 @@ class DB:
         self.connect()
 
     def connect(self):
+        last_err = None
+
         try:
             if self.conn:
                 try:
@@ -97,24 +100,52 @@ class DB:
         except:
             pass
 
-        self.conn = mysql.connector.connect(**self.config)
-        self.conn.autocommit = True
-        return self.conn
+        for attempt in range(1, DB_CONNECT_RETRY + 1):
+            try:
+                log(f"📡 Connecting to MySQL... attempt {attempt}/{DB_CONNECT_RETRY}")
+
+                self.conn = mysql.connector.connect(
+                    host=self.config["host"],
+                    user=self.config["user"],
+                    password=self.config["password"],
+                    database=self.config["database"],
+                    port=self.config["port"],
+                    connection_timeout=15,
+                    autocommit=True
+                )
+
+                self.conn.autocommit = True
+                log("✅ MySQL connected.")
+                return self.conn
+
+            except Exception as e:
+                last_err = e
+                log(f"⚠️ MySQL connection failed attempt {attempt}/{DB_CONNECT_RETRY}: {e}")
+
+                if attempt < DB_CONNECT_RETRY:
+                    log(f"⏳ Waiting {DB_CONNECT_WAIT}s before retry...")
+                    time.sleep(DB_CONNECT_WAIT)
+
+        raise RuntimeError(f"MySQL connection failed after {DB_CONNECT_RETRY} attempts: {last_err}")
 
     def ensure(self):
         try:
             if self.conn is None:
                 return self.connect()
+
             if not self.conn.is_connected():
                 return self.connect()
+
             return self.conn
-        except:
+        except Exception as e:
+            log(f"⚠️ DB ensure reconnect needed: {e}")
             return self.connect()
 
     def close(self):
         try:
             if self.conn:
                 self.conn.close()
+                log("🔌 DB closed.")
         except:
             pass
 
@@ -129,6 +160,7 @@ def clear_db_before_run(db: DB):
         log("✅ Database is clean.")
     except Exception as e:
         log(f"❌ Error clearing database: {e}")
+        raise
     finally:
         try:
             if cur:
@@ -160,12 +192,12 @@ def save_to_mysql(db: DB, symbol, timeframe, image, mv2_n_al_json):
             return True
         except Exception as e:
             last_err = e
-            log(f"⚠️ DB save failed {symbol}({timeframe}) attempt {attempt}/{DB_RETRY}: {e}")
+            log(f"⚠️ DB save failed {symbol} ({timeframe}) attempt {attempt}/{DB_RETRY}: {e}")
             try:
                 db.connect()
-            except:
-                pass
-            time.sleep(1.5)
+            except Exception as reconnect_err:
+                log(f"⚠️ DB reconnect failed during save: {reconnect_err}")
+            time.sleep(2)
         finally:
             try:
                 if cur:
@@ -173,22 +205,34 @@ def save_to_mysql(db: DB, symbol, timeframe, image, mv2_n_al_json):
             except:
                 pass
 
-    log(f"❌ DB save failed permanently for {symbol}({timeframe}): {last_err}")
+    log(f"❌ DB save failed permanently for {symbol} ({timeframe}): {last_err}")
     return False
 
 
 # ---------------- SELENIUM ---------------- #
 def get_driver():
+    log("🌐 Installing ChromeDriver...")
+    chrome_driver_path = ChromeDriverManager().install()
+    log("✅ ChromeDriver installed.")
+
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
 
-    service = Service(CHROME_DRIVER_PATH)
-    driver = webdriver.Chrome(service=service, options=opts)
+    service = Service(chrome_driver_path)
 
-    driver.execute_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+    log("🚀 Launching Chrome browser...")
+    driver = webdriver.Chrome(service=service, options=opts)
+    log("✅ Browser started.")
+
+    driver.execute_script("""
+    Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined
+    })
+    """)
+
     driver.set_page_load_timeout(60)
     return driver
 
@@ -201,6 +245,7 @@ def inject_tv_cookies(driver):
             return False
 
         cookies = json.loads(cookie_data)
+
         driver.get("https://www.tradingview.com/")
         time.sleep(3)
 
@@ -219,6 +264,7 @@ def inject_tv_cookies(driver):
         time.sleep(4)
         log("✅ Cookies injected")
         return True
+
     except Exception as e:
         log(f"❌ Cookie error: {e}")
         return False
@@ -233,6 +279,7 @@ def wait_chart(driver):
 def open_with_retry(driver, url, retries=2):
     for i in range(1, retries + 1):
         try:
+            log(f"🌍 Opening URL attempt {i}/{retries}: {url}")
             driver.get(url)
             return True
         except Exception as e:
@@ -243,13 +290,19 @@ def open_with_retry(driver, url, retries=2):
 
 # ---------------- MAIN ---------------- #
 def main():
-    log(f"🔎 DB TARGET {DB_CONFIG['host']} / {DB_CONFIG['database']}")
+    log(f"🔎 DB TARGET {DB_CONFIG['host']} / {DB_CONFIG['database']}:{DB_CONFIG['port']}")
 
-    db = DB(DB_CONFIG)
-    clear_db_before_run(db)
+    db = None
+    driver = None
 
-    # ---- Sheets ----
     try:
+        log("STEP 1: Creating DB object...")
+        db = DB(DB_CONFIG)
+
+        log("STEP 2: Clearing DB...")
+        clear_db_before_run(db)
+
+        log("STEP 3: Loading Google Sheets...")
         creds = os.getenv("GSPREAD_CREDENTIALS")
         if not creds:
             log("❌ GSPREAD_CREDENTIALS missing.")
@@ -257,37 +310,42 @@ def main():
 
         client = gspread.service_account_from_dict(json.loads(creds))
 
+        log("📄 Loading MV2 sheet...")
         mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
         df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
+        log(f"✅ MV2 rows loaded: {len(df_mv2)}")
 
+        log("📄 Loading Stock List sheet...")
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
         stock_raw = stock_ws.get_all_values()
         df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
+        log(f"✅ Stock list rows loaded: {len(df_stocks)}")
 
-        # StockList mapping
         week_url_map = dict(zip(
             df_stocks.iloc[:, 0].astype(str).str.strip(),
             df_stocks.iloc[:, 2].astype(str).str.strip()
         ))
+
         day_url_map = dict(zip(
             df_stocks.iloc[:, 0].astype(str).str.strip(),
             df_stocks.iloc[:, 3].astype(str).str.strip()
         ))
 
-    except Exception as e:
-        log(f"❌ Sheet Error: {e}")
-        return
+        log("STEP 4: Starting browser...")
+        driver = get_driver()
 
-    # ---- Browser ----
-    driver = get_driver()
-    try:
+        log("STEP 5: Injecting TradingView cookies...")
         if not inject_tv_cookies(driver):
             return
 
         mv2_headers = list(df_mv2.columns)
 
-        log(f"📌 Daily column used: {mv2_headers[14] if len(mv2_headers) > 14 else 'Index 14 missing'}")
-        log(f"📌 Monthly column used: {mv2_headers[15] if len(mv2_headers) > 15 else 'Index 15 missing'}")
+        if len(mv2_headers) > 14:
+            log(f"📌 Daily value column = index 14 = {mv2_headers[14]}")
+        if len(mv2_headers) > 15:
+            log(f"📌 Monthly value column = index 15 = {mv2_headers[15]}")
+
+        log("STEP 6: Processing rows...")
 
         for _, row in df_mv2.iterrows():
             symbol = ""
@@ -301,15 +359,14 @@ def main():
                 raw_daily = row.iloc[14] if len(row) > 14 else ""
                 raw_monthly = row.iloc[15] if len(row) > 15 else ""
 
-                daily_val = safe_float(raw_daily)     # Col O
-                monthly_val = safe_float(raw_monthly) # Col P
+                daily_val = safe_float(raw_daily)
+                monthly_val = safe_float(raw_monthly)
 
                 log(
                     f"🔍 {symbol} | daily_raw=[{raw_daily}] parsed={daily_val} "
                     f"| monthly_raw=[{raw_monthly}] parsed={monthly_val}"
                 )
 
-                # Build Metadata JSON
                 n_al_map = {
                     safe_str(mv2_headers[i]): safe_str(row.iloc[i])
                     for i in range(13, min(37, len(mv2_headers)))
@@ -319,7 +376,7 @@ def main():
                 day_url = day_url_map.get(symbol)
                 week_url = week_url_map.get(symbol)
 
-                # --- TRIGGER 1: HIT DAILY 7% ---
+                # DAILY trigger
                 if daily_val >= DAILY_THRESHOLD:
                     log(f"✅ DAILY TRIGGER: {symbol} ({daily_val} >= {DAILY_THRESHOLD})")
 
@@ -335,7 +392,7 @@ def main():
                             time.sleep(POST_LOAD_SLEEP)
                             save_to_mysql(db, symbol, "week-daily", chart.screenshot_as_png, mv2_n_al_json)
 
-                # --- TRIGGER 2: HIT MONTHLY 25% ---
+                # MONTHLY trigger
                 if monthly_val >= MONTHLY_THRESHOLD:
                     log(f"✅ MONTHLY TRIGGER: {symbol} ({monthly_val} >= {MONTHLY_THRESHOLD})")
 
@@ -356,12 +413,24 @@ def main():
 
         log("🏁 DONE!")
 
+    except Exception as e:
+        log(f"❌ FATAL ERROR: {e}")
+        log("🛑 Script stopped cleanly.")
+        sys.exit(1)
+
     finally:
         try:
-            driver.quit()
+            if driver:
+                driver.quit()
+                log("🛑 Browser closed.")
         except:
             pass
-        db.close()
+
+        try:
+            if db:
+                db.close()
+        except:
+            pass
 
 
 if __name__ == "__main__":

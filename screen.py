@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import re
 import gspread
 import pandas as pd
 import mysql.connector
@@ -47,7 +48,27 @@ def log(msg):
 
 def safe_float(v):
     try:
-        return float(str(v).replace('%', '').strip())
+        s = str(v).strip()
+
+        if s == "":
+            return 0.0
+
+        # remove common unwanted chars
+        s = s.replace('%', '')
+        s = s.replace(',', '')
+        s = s.replace('−', '-')   # unicode minus
+        s = s.replace('–', '-')   # en dash
+        s = s.replace('—', '-')   # em dash
+        s = s.replace('+', '')
+        s = s.replace('₹', '')
+        s = s.strip()
+
+        # keep only number-like content if extra text exists
+        match = re.search(r'-?\d*\.?\d+', s)
+        if match:
+            return float(match.group())
+
+        return 0.0
     except:
         return 0.0
 
@@ -117,9 +138,6 @@ def clear_db_before_run(db: DB):
 
 
 def save_to_mysql(db: DB, symbol, timeframe, image, mv2_n_al_json):
-    """
-    Saves with specific timeframe labels: daily-daily, daily-month, week-daily, week-month
-    """
     query = """
         INSERT INTO stock_screenshots
             (symbol, timeframe, screenshot, mv2_n_al)
@@ -268,19 +286,34 @@ def main():
 
         mv2_headers = list(df_mv2.columns)
 
+        log(f"📌 Daily column used: {mv2_headers[14] if len(mv2_headers) > 14 else 'Index 14 missing'}")
+        log(f"📌 Monthly column used: {mv2_headers[15] if len(mv2_headers) > 15 else 'Index 15 missing'}")
+
         for _, row in df_mv2.iterrows():
             symbol = ""
             try:
                 symbol = safe_str(row.iloc[0])
                 sector = safe_str(row.iloc[1]).upper()
+
                 if not symbol or sector in ("INDICES", "MUTUAL FUND SCHEME"):
                     continue
 
-                daily_val = safe_float(row.iloc[14])   # Col O
-                monthly_val = safe_float(row.iloc[15]) # Col P
+                raw_daily = row.iloc[14] if len(row) > 14 else ""
+                raw_monthly = row.iloc[15] if len(row) > 15 else ""
+
+                daily_val = safe_float(raw_daily)     # Col O
+                monthly_val = safe_float(raw_monthly) # Col P
+
+                log(
+                    f"🔍 {symbol} | daily_raw=[{raw_daily}] parsed={daily_val} "
+                    f"| monthly_raw=[{raw_monthly}] parsed={monthly_val}"
+                )
 
                 # Build Metadata JSON
-                n_al_map = {safe_str(mv2_headers[i]): safe_str(row.iloc[i]) for i in range(13, min(37, len(mv2_headers)))}
+                n_al_map = {
+                    safe_str(mv2_headers[i]): safe_str(row.iloc[i])
+                    for i in range(13, min(37, len(mv2_headers)))
+                }
                 mv2_n_al_json = json.dumps(n_al_map, ensure_ascii=False)
 
                 day_url = day_url_map.get(symbol)
@@ -288,14 +321,14 @@ def main():
 
                 # --- TRIGGER 1: HIT DAILY 7% ---
                 if daily_val >= DAILY_THRESHOLD:
-                    # Save Daily-Daily
+                    log(f"✅ DAILY TRIGGER: {symbol} ({daily_val} >= {DAILY_THRESHOLD})")
+
                     if day_url and "tradingview.com" in day_url:
                         if open_with_retry(driver, day_url, retries=PAGE_RETRY):
                             chart = wait_chart(driver)
                             time.sleep(POST_LOAD_SLEEP)
                             save_to_mysql(db, symbol, "daily-daily", chart.screenshot_as_png, mv2_n_al_json)
-                    
-                    # Save Week-Daily
+
                     if week_url and "tradingview.com" in week_url:
                         if open_with_retry(driver, week_url, retries=PAGE_RETRY):
                             chart = wait_chart(driver)
@@ -304,14 +337,14 @@ def main():
 
                 # --- TRIGGER 2: HIT MONTHLY 25% ---
                 if monthly_val >= MONTHLY_THRESHOLD:
-                    # Save Daily-Month
+                    log(f"✅ MONTHLY TRIGGER: {symbol} ({monthly_val} >= {MONTHLY_THRESHOLD})")
+
                     if day_url and "tradingview.com" in day_url:
                         if open_with_retry(driver, day_url, retries=PAGE_RETRY):
                             chart = wait_chart(driver)
                             time.sleep(POST_LOAD_SLEEP)
                             save_to_mysql(db, symbol, "daily-month", chart.screenshot_as_png, mv2_n_al_json)
-                    
-                    # Save Week-Month
+
                     if week_url and "tradingview.com" in week_url:
                         if open_with_retry(driver, week_url, retries=PAGE_RETRY):
                             chart = wait_chart(driver)

@@ -139,11 +139,9 @@ def inject_tv_cookies(driver):
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
         if not cookie_data:
             return False
-
         cookies = json.loads(cookie_data)
         driver.get("https://www.tradingview.com/")
         time.sleep(2)
-
         for c in cookies:
             driver.add_cookie({
                 "name": c.get("name"),
@@ -151,7 +149,6 @@ def inject_tv_cookies(driver):
                 "domain": ".tradingview.com",
                 "path": "/"
             })
-
         driver.refresh()
         return True
     except Exception:
@@ -169,11 +166,9 @@ def main():
         creds = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds))
 
-        # 1. Fetch MV2 trigger sheet
         mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
         df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
 
-        # 2. Fetch stock list sheet
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
         stock_raw = stock_ws.get_all_values()
         df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
@@ -192,44 +187,37 @@ def main():
             log("❌ Cookie injection failed.")
             return
 
-        # 3. Custom Logic for D_Trigger and D_Trigger_S
-        # We iterate rows once and apply the specific conditional logic
+        # --- UPDATED CONDITION LOGIC ---
         for _, row in df_mv2.iterrows():
             symbol = safe_str(row.iloc[0])
             if not symbol:
                 continue
 
-            val_d = safe_int(row.get("D_Trigger"))
-            val_s = safe_int(row.get("D_Trigger_S"))
+            d_val = safe_int(row.get("D_Trigger"))
+            s_val = safe_int(row.get("D_Trigger_S"))
 
-            triggered_type = None
+            active_trigger = None
 
-            # Logic: D_Trigger takes priority if it is 0
-            if val_d == 0:
-                triggered_type = "D_Trigger"
-            # Logic: D_Trigger_S only triggers if it is 0 AND D_Trigger is NOT 0
-            elif val_s == 0:
-                triggered_type = "D_Trigger_S"
+            # Condition 1: D_Trigger is 0
+            if d_val == 0:
+                active_trigger = "D_Trigger"
+            # Condition 2: D_Trigger_S is 0 AND D_Trigger is NOT 0
+            elif s_val == 0:
+                active_trigger = "D_Trigger_S"
 
-            if triggered_type:
-                log(f"🚀 Triggered: {symbol} via {triggered_type}")
-                
-                tasks = [
-                    ("day", day_urls.get(symbol)),
-                    ("week", week_urls.get(symbol))
-                ]
+            if active_trigger:
+                log(f"🚀 Triggered: {symbol} ({active_trigger}=0)")
+                tasks = [("day", day_urls.get(symbol)), ("week", week_urls.get(symbol))]
 
                 for tf_name, url in tasks:
                     if url and "tradingview.com" in url:
                         try:
                             driver.get(url)
                             chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
-                                EC.visibility_of_element_located(
-                                    (By.XPATH, "//div[contains(@class,'chart-container')]")
-                                )
+                                EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
                             )
                             time.sleep(POST_LOAD_SLEEP)
-                            save_screenshot(db, symbol, tf_name, triggered_type, chart.screenshot_as_png)
+                            save_screenshot(db, symbol, tf_name, active_trigger, chart.screenshot_as_png)
                         except Exception as e:
                             log(f"❌ Screenshot failed for {symbol} {tf_name}: {e}")
 

@@ -19,7 +19,6 @@ STOCK_LIST_GID = 1400370843
 MV2_SQL_URL = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skcBi1OFtaK8h1905oZOc/edit"
 
 TARGET_TABLE = "filter"
-TRIGGER_COLUMNS = ["D_Trigger", "D_Trigger_S"]
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -86,10 +85,6 @@ class DB:
 
 # ---------------- DAILY ROLLOVER ---------------- #
 def roll_days_forward(db: DB):
-    """
-    Runs once per script execution.
-    Use this only when your workflow runs once per day.
-    """
     update_query = f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 1"
     delete_query = f"DELETE FROM `{TARGET_TABLE}` WHERE `day` > %s"
 
@@ -97,10 +92,8 @@ def roll_days_forward(db: DB):
         try:
             conn = db.ensure()
             cur = conn.cursor()
-
             cur.execute(update_query)
             cur.execute(delete_query, (MAX_DAY_TO_KEEP,))
-
             cur.close()
             log("✅ Day rollover completed.")
             return
@@ -171,8 +164,6 @@ def main():
     driver = None
 
     try:
-        # Shift old records: 0->1, 1->2, 2->3 ...
-        # Then remove rows older than day 4
         roll_days_forward(db)
 
         creds = os.getenv("GSPREAD_CREDENTIALS")
@@ -187,7 +178,6 @@ def main():
         stock_raw = stock_ws.get_all_values()
         df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
 
-        # Column 0 = Symbol, Column 2 = Week URL, Column 3 = Day URL
         week_urls = dict(zip(
             df_stocks.iloc[:, 0].astype(str).str.strip(),
             df_stocks.iloc[:, 2].astype(str).str.strip()
@@ -202,23 +192,28 @@ def main():
             log("❌ Cookie injection failed.")
             return
 
-        # 3. Scan trigger columns
-        for filter_col in TRIGGER_COLUMNS:
-            if filter_col not in df_mv2.columns:
-                log(f"⚠️ Header '{filter_col}' not found in Google Sheet.")
+        # 3. Custom Logic for D_Trigger and D_Trigger_S
+        # We iterate rows once and apply the specific conditional logic
+        for _, row in df_mv2.iterrows():
+            symbol = safe_str(row.iloc[0])
+            if not symbol:
                 continue
 
-            log(f"🔍 Scanning {filter_col} for value 0")
+            val_d = safe_int(row.get("D_Trigger"))
+            val_s = safe_int(row.get("D_Trigger_S"))
 
-            triggered_rows = df_mv2[df_mv2[filter_col].apply(safe_int) == 0]
+            triggered_type = None
 
-            for _, row in triggered_rows.iterrows():
-                symbol = safe_str(row.iloc[0])
-                if not symbol:
-                    continue
+            # Logic: D_Trigger takes priority if it is 0
+            if val_d == 0:
+                triggered_type = "D_Trigger"
+            # Logic: D_Trigger_S only triggers if it is 0 AND D_Trigger is NOT 0
+            elif val_s == 0:
+                triggered_type = "D_Trigger_S"
 
-                log(f"🚀 Triggered: {symbol} ({filter_col}=0)")
-
+            if triggered_type:
+                log(f"🚀 Triggered: {symbol} via {triggered_type}")
+                
                 tasks = [
                     ("day", day_urls.get(symbol)),
                     ("week", week_urls.get(symbol))
@@ -234,7 +229,7 @@ def main():
                                 )
                             )
                             time.sleep(POST_LOAD_SLEEP)
-                            save_screenshot(db, symbol, tf_name, filter_col, chart.screenshot_as_png)
+                            save_screenshot(db, symbol, tf_name, triggered_type, chart.screenshot_as_png)
                         except Exception as e:
                             log(f"❌ Screenshot failed for {symbol} {tf_name}: {e}")
 

@@ -51,6 +51,30 @@ def safe_int(v):
     except (ValueError, TypeError):
         return -1
 
+def make_unique_headers(headers):
+    seen = {}
+    final_headers = []
+
+    for h in headers:
+        name = safe_str(h)
+        if name == "":
+            name = "blank_header"
+
+        if name in seen:
+            seen[name] += 1
+            final_headers.append(f"{name}_{seen[name]}")
+        else:
+            seen[name] = 0
+            final_headers.append(name)
+
+    return final_headers
+
+def get_first_matching_column(df, target_name):
+    for col in df.columns:
+        if safe_str(col) == target_name:
+            return col
+    return None
+
 # ---------------- DB CLASS ---------------- #
 class DB:
     def __init__(self, config):
@@ -64,6 +88,7 @@ class DB:
                 self.conn.close()
             except Exception:
                 pass
+
         self.conn = mysql.connector.connect(**self.config)
         self.conn.autocommit = True
         return self.conn
@@ -102,8 +127,8 @@ def save_screenshot(db: DB, symbol, timeframe, filter_type, trigger_val, image):
             log(f"⚠️ DB error on attempt {attempt + 1}: {e}")
             try:
                 db.connect()
-            except Exception as conn_err:
-                log(f"⚠️ Reconnect failed: {conn_err}")
+            except Exception as reconnect_error:
+                log(f"⚠️ Reconnect failed: {reconnect_error}")
             time.sleep(1)
 
     return False
@@ -122,6 +147,7 @@ def inject_tv_cookies(driver):
     try:
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
         if not cookie_data:
+            log("❌ TRADINGVIEW_COOKIES not found.")
             return False
 
         cookies = json.loads(cookie_data)
@@ -139,15 +165,13 @@ def inject_tv_cookies(driver):
         driver.refresh()
         time.sleep(2)
         return True
+
     except Exception as e:
         log(f"❌ Cookie injection error: {e}")
         return False
 
 def capture_and_save(driver, db, symbol, filter_type, trigger_val, day_url, week_url):
-    tasks = [
-        ("day", day_url),
-        ("week", week_url)
-    ]
+    tasks = [("day", day_url), ("week", week_url)]
 
     for tf_name, url in tasks:
         if not url or "tradingview.com" not in url:
@@ -191,40 +215,65 @@ def main():
 
         client = gspread.service_account_from_dict(json.loads(creds))
 
-        # 1. Fetch MV2 data
+        # ---------------- FETCH MV2 SHEET ---------------- #
         mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
         if not mv2_raw or len(mv2_raw) < 2:
             log("❌ MV2 sheet is empty.")
             return
 
-        df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
+        original_mv2_headers = mv2_raw[0]
+        unique_mv2_headers = make_unique_headers(original_mv2_headers)
+        df_mv2 = pd.DataFrame(mv2_raw[1:], columns=unique_mv2_headers)
 
-        # 2. Fetch stock URLs
+        if len(original_mv2_headers) != len(set([safe_str(h) for h in original_mv2_headers])):
+            log("⚠️ Duplicate headers found in MV2 sheet.")
+            log(f"Original headers: {original_mv2_headers}")
+            log(f"Using unique headers: {unique_mv2_headers}")
+
+        # ---------------- FETCH STOCK URL SHEET ---------------- #
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
         stock_raw = stock_ws.get_all_values()
         if not stock_raw or len(stock_raw) < 2:
             log("❌ Stock list sheet is empty.")
             return
 
-        df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
+        stock_headers = make_unique_headers(stock_raw[0])
+        df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_headers)
 
-        # Symbol in col 0, week URL in col 2, day URL in col 3
-        week_urls = dict(zip(df_stocks.iloc[:, 0].astype(str).str.strip(), df_stocks.iloc[:, 2].astype(str).str.strip()))
-        day_urls = dict(zip(df_stocks.iloc[:, 0].astype(str).str.strip(), df_stocks.iloc[:, 3].astype(str).str.strip()))
+        # Column 0 = symbol, col 2 = week URL, col 3 = day URL
+        week_urls = dict(zip(
+            df_stocks.iloc[:, 0].astype(str).str.strip(),
+            df_stocks.iloc[:, 2].astype(str).str.strip()
+        ))
+        day_urls = dict(zip(
+            df_stocks.iloc[:, 0].astype(str).str.strip(),
+            df_stocks.iloc[:, 3].astype(str).str.strip()
+        ))
 
-        # Required columns check
-        if "D_Trigger" not in df_mv2.columns:
+        # ---------------- FIND TRIGGER COLUMNS SAFELY ---------------- #
+        dtrigger_col = get_first_matching_column(df_mv2, "D_Trigger")
+        dtrigger_s_col = get_first_matching_column(df_mv2, "D_Trigger_S")
+
+        if not dtrigger_col:
             log("❌ Column 'D_Trigger' not found in MV2 sheet.")
             return
 
-        if "D_Trigger_S" not in df_mv2.columns:
+        if not dtrigger_s_col:
             log("❌ Column 'D_Trigger_S' not found in MV2 sheet.")
             return
 
-        # Add parsed numeric columns
-        df_mv2["D_Trigger_num"] = df_mv2["D_Trigger"].apply(safe_int)
-        df_mv2["D_Trigger_S_num"] = df_mv2["D_Trigger_S"].apply(safe_int)
+        log(f"✅ Using D_Trigger column: {dtrigger_col}")
+        log(f"✅ Using D_Trigger_S column: {dtrigger_s_col}")
 
+        # First column assumed as symbol column
+        symbol_col = df_mv2.columns[0]
+        log(f"✅ Using symbol column: {symbol_col}")
+
+        # ---------------- CLEAN NUMERIC VALUES ---------------- #
+        df_mv2["D_Trigger_num"] = df_mv2[dtrigger_col].apply(safe_int)
+        df_mv2["D_Trigger_S_num"] = df_mv2[dtrigger_s_col].apply(safe_int)
+
+        # ---------------- START SELENIUM ---------------- #
         driver = get_driver()
         if not inject_tv_cookies(driver):
             log("❌ Cookie injection failed.")
@@ -232,15 +281,15 @@ def main():
 
         # =====================================================
         # PART 1: D_Trigger
-        # Condition:
-        # D_Trigger in [0,1,2,3,4]
+        # Save if D_Trigger in [0,1,2,3,4]
         # =====================================================
         log(f"🔍 Scanning D_Trigger for values: {ALLOWED_TRIGGER_VALUES}")
 
         dtrigger_rows = df_mv2[df_mv2["D_Trigger_num"].isin(ALLOWED_TRIGGER_VALUES)]
+        log(f"✅ Total D_Trigger matched rows: {len(dtrigger_rows)}")
 
         for _, row in dtrigger_rows.iterrows():
-            symbol = safe_str(row.iloc[0])
+            symbol = safe_str(row[symbol_col])
             dtrigger_val = row["D_Trigger_num"]
 
             if not symbol:
@@ -263,8 +312,7 @@ def main():
 
         # =====================================================
         # PART 2: D_Trigger_S
-        # Condition:
-        # D_Trigger_S in [0,1,2,3,4]
+        # Save if D_Trigger_S in [0,1,2,3,4]
         # and D_Trigger_S != D_Trigger
         # =====================================================
         log(f"🔍 Scanning D_Trigger_S for values: {ALLOWED_TRIGGER_VALUES} with D_Trigger_S != D_Trigger")
@@ -273,9 +321,10 @@ def main():
             (df_mv2["D_Trigger_S_num"].isin(ALLOWED_TRIGGER_VALUES)) &
             (df_mv2["D_Trigger_S_num"] != df_mv2["D_Trigger_num"])
         ]
+        log(f"✅ Total D_Trigger_S matched rows: {len(dtrigger_s_rows)}")
 
         for _, row in dtrigger_s_rows.iterrows():
-            symbol = safe_str(row.iloc[0])
+            symbol = safe_str(row[symbol_col])
             dtrigger_s_val = row["D_Trigger_S_num"]
             dtrigger_val = row["D_Trigger_num"]
 

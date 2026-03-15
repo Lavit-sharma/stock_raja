@@ -20,6 +20,13 @@ MV2_SQL_URL = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skc
 
 TARGET_TABLE = "filter"
 
+# Trigger columns
+PRIMARY_TRIGGER_COL = "D_Trigger"
+SECONDARY_TRIGGER_COL = "D_Trigger_S"
+
+# Allowed values to store as day
+ALLOWED_TRIGGER_VALUES = [0, 1, 2, 3, 4]
+
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "user": os.getenv("DB_USER"),
@@ -31,10 +38,6 @@ CHART_WAIT_SEC = 30
 POST_LOAD_SLEEP = 6
 DB_RETRY = 3
 CHROME_DRIVER_PATH = ChromeDriverManager().install()
-
-# Keep day 0 to day 4 = total 5 days
-MAX_DAY_TO_KEEP = 4
-
 
 # ---------------- HELPERS ---------------- #
 def log(msg):
@@ -51,7 +54,6 @@ def safe_int(v):
         return int(float(val))
     except (ValueError, TypeError):
         return -1
-
 
 # ---------------- DB CLASS ---------------- #
 class DB:
@@ -82,46 +84,29 @@ class DB:
         except:
             pass
 
-
-# ---------------- DAILY ROLLOVER ---------------- #
-def roll_days_forward(db: DB):
-    update_query = f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 1"
-    delete_query = f"DELETE FROM `{TARGET_TABLE}` WHERE `day` > %s"
-
-    for attempt in range(DB_RETRY):
-        try:
-            conn = db.ensure()
-            cur = conn.cursor()
-            cur.execute(update_query)
-            cur.execute(delete_query, (MAX_DAY_TO_KEEP,))
-            cur.close()
-            log("✅ Day rollover completed.")
-            return
-        except Exception as e:
-            log(f"⚠️ Rollover error: {e}")
-            db.connect()
-            time.sleep(1)
-
-
 # ---------------- SAVE SCREENSHOT ---------------- #
-def save_screenshot(db: DB, symbol, timeframe, filter_type, image):
+def save_screenshot(db: DB, symbol, timeframe, filter_type, trigger_val, image):
     query = f"""
         INSERT INTO `{TARGET_TABLE}` (`symbol`, `timeframe`, `filter_type`, `day`, `screenshot`)
-        VALUES (%s, %s, %s, 0, %s)
+        VALUES (%s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            `screenshot` = VALUES(`screenshot`),
+            `day` = VALUES(`day`),
+            `created_at` = CURRENT_TIMESTAMP
     """
+
     for attempt in range(DB_RETRY):
         try:
             conn = db.ensure()
             cur = conn.cursor()
-            cur.execute(query, (symbol, timeframe, filter_type, image))
+            cur.execute(query, (symbol, timeframe, filter_type, trigger_val, image))
             cur.close()
-            log(f"✅ Saved: {symbol} | {filter_type} | {timeframe} | day=0")
+            log(f"✅ Saved: {symbol} | {filter_type} | {timeframe} | day={trigger_val}")
             return
         except Exception as e:
             log(f"⚠️ DB error: {e}")
             db.connect()
             time.sleep(1)
-
 
 # ---------------- SELENIUM ---------------- #
 def get_driver():
@@ -133,15 +118,17 @@ def get_driver():
     service = Service(CHROME_DRIVER_PATH)
     return webdriver.Chrome(service=service, options=opts)
 
-
 def inject_tv_cookies(driver):
     try:
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
         if not cookie_data:
             return False
+
         cookies = json.loads(cookie_data)
+
         driver.get("https://www.tradingview.com/")
         time.sleep(2)
+
         for c in cookies:
             driver.add_cookie({
                 "name": c.get("name"),
@@ -149,11 +136,11 @@ def inject_tv_cookies(driver):
                 "domain": ".tradingview.com",
                 "path": "/"
             })
+
         driver.refresh()
         return True
     except Exception:
         return False
-
 
 # ---------------- MAIN ---------------- #
 def main():
@@ -161,14 +148,14 @@ def main():
     driver = None
 
     try:
-        roll_days_forward(db)
-
         creds = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds))
 
+        # 1. Fetch trigger sheet
         mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
         df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
 
+        # 2. Fetch stock URL sheet
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
         stock_raw = stock_ws.get_all_values()
         df_stocks = pd.DataFrame(stock_raw[1:], columns=stock_raw[0])
@@ -177,49 +164,88 @@ def main():
             df_stocks.iloc[:, 0].astype(str).str.strip(),
             df_stocks.iloc[:, 2].astype(str).str.strip()
         ))
+
         day_urls = dict(zip(
             df_stocks.iloc[:, 0].astype(str).str.strip(),
             df_stocks.iloc[:, 3].astype(str).str.strip()
         ))
 
+        # Check headers
+        if PRIMARY_TRIGGER_COL not in df_mv2.columns:
+            log(f"❌ Header '{PRIMARY_TRIGGER_COL}' not found.")
+            return
+
+        if SECONDARY_TRIGGER_COL not in df_mv2.columns:
+            log(f"❌ Header '{SECONDARY_TRIGGER_COL}' not found.")
+            return
+
         driver = get_driver()
+
         if not inject_tv_cookies(driver):
             log("❌ Cookie injection failed.")
             return
 
-        # --- UPDATED CONDITION LOGIC ---
+        log(f"🚀 Scanning sheet using priority logic...")
+        log(f"✅ {PRIMARY_TRIGGER_COL} triggers for values: {ALLOWED_TRIGGER_VALUES}")
+        log(f"✅ {SECONDARY_TRIGGER_COL} triggers only when its value is in {ALLOWED_TRIGGER_VALUES} and {PRIMARY_TRIGGER_COL} is not in {ALLOWED_TRIGGER_VALUES}")
+
         for _, row in df_mv2.iterrows():
             symbol = safe_str(row.iloc[0])
             if not symbol:
                 continue
 
-            d_val = safe_int(row.get("D_Trigger"))
-            s_val = safe_int(row.get("D_Trigger_S"))
+            d_val = safe_int(row.get(PRIMARY_TRIGGER_COL))
+            s_val = safe_int(row.get(SECONDARY_TRIGGER_COL))
 
             active_trigger = None
+            trigger_val = None
 
-            # Condition 1: D_Trigger is 0
-            if d_val == 0:
-                active_trigger = "D_Trigger"
-            # Condition 2: D_Trigger_S is 0 AND D_Trigger is NOT 0
-            elif s_val == 0:
-                active_trigger = "D_Trigger_S"
+            # ---------------- TRIGGER LOGIC ---------------- #
+            # 1. D_Trigger gets priority for any allowed value
+            if d_val in ALLOWED_TRIGGER_VALUES:
+                active_trigger = PRIMARY_TRIGGER_COL
+                trigger_val = d_val
 
-            if active_trigger:
-                log(f"🚀 Triggered: {symbol} ({active_trigger}=0)")
-                tasks = [("day", day_urls.get(symbol)), ("week", week_urls.get(symbol))]
+            # 2. D_Trigger_S works only if D_Trigger is NOT active
+            elif s_val in ALLOWED_TRIGGER_VALUES:
+                active_trigger = SECONDARY_TRIGGER_COL
+                trigger_val = s_val
 
-                for tf_name, url in tasks:
-                    if url and "tradingview.com" in url:
-                        try:
-                            driver.get(url)
-                            chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
-                                EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
+            # ------------------------------------------------ #
+            if not active_trigger:
+                continue
+
+            log(f"🎯 Triggered: {symbol} | {active_trigger} | value={trigger_val}")
+
+            tasks = [
+                ("day", day_urls.get(symbol)),
+                ("week", week_urls.get(symbol))
+            ]
+
+            for tf_name, url in tasks:
+                if url and "tradingview.com" in url:
+                    try:
+                        driver.get(url)
+
+                        chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
+                            EC.visibility_of_element_located(
+                                (By.XPATH, "//div[contains(@class,'chart-container')]")
                             )
-                            time.sleep(POST_LOAD_SLEEP)
-                            save_screenshot(db, symbol, tf_name, active_trigger, chart.screenshot_as_png)
-                        except Exception as e:
-                            log(f"❌ Screenshot failed for {symbol} {tf_name}: {e}")
+                        )
+
+                        time.sleep(POST_LOAD_SLEEP)
+
+                        save_screenshot(
+                            db=db,
+                            symbol=symbol,
+                            timeframe=tf_name,
+                            filter_type=active_trigger,
+                            trigger_val=trigger_val,
+                            image=chart.screenshot_as_png
+                        )
+
+                    except Exception as e:
+                        log(f"❌ Screenshot failed for {symbol} | {tf_name} | {active_trigger}: {e}")
 
         log("🏁 All triggers processed.")
 
@@ -227,7 +253,6 @@ def main():
         if driver:
             driver.quit()
         db.close()
-
 
 if __name__ == "__main__":
     main()

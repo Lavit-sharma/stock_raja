@@ -1,8 +1,10 @@
 name: Filter Screenshot Bot
 
 on:
-  workflow_dispatch:   # Manual Run Button
-     # Monday-Friday
+  workflow_dispatch:
+  schedule:
+    # 7:00 PM IST = 1:30 PM UTC
+    - cron: "30 13 * * *"
 
 jobs:
   run-bot:
@@ -15,26 +17,78 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-          cache: 'pip'
+          python-version: "3.10"
+          cache: "pip"
 
       - name: Install Dependencies
         run: |
-          pip install pandas selenium webdriver-manager gspread mysql-connector-python
+          pip install pandas selenium webdriver-manager gspread mysql-connector-python requests
+
+      - name: Check if market is open
+        env:
+          TZ: Asia/Kolkata
+        run: |
+          python - <<'PY'
+          import sys
+          import re
+          import requests
+          from datetime import datetime
+
+          today = datetime.now().date()
+          weekday = today.weekday()   # Mon=0 ... Sun=6
+
+          # Skip Saturday and Sunday
+          if weekday >= 5:
+              print(f"⏭️ Market closed today ({today}) - weekend.")
+              sys.exit(0)
+
+          headers = {
+              "User-Agent": "Mozilla/5.0",
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              "Accept-Language": "en-US,en;q=0.9"
+          }
+
+          holiday_url = "https://www.nseindia.com/resources/exchange-communication-holidays"
+
+          try:
+              session = requests.Session()
+
+              # Warm up session for NSE
+              session.get("https://www.nseindia.com", headers=headers, timeout=30)
+
+              response = session.get(holiday_url, headers=headers, timeout=30)
+              response.raise_for_status()
+              html = response.text
+
+              # Extract dates like 26-Jan-2026
+              raw_dates = re.findall(r'\b\d{1,2}-[A-Za-z]{3}-\d{4}\b', html)
+
+              holiday_dates = set()
+              for date_str in raw_dates:
+                  try:
+                      holiday_dates.add(datetime.strptime(date_str, "%d-%b-%Y").date())
+                  except Exception:
+                      pass
+
+              if today in holiday_dates:
+                  print(f"⏭️ Market closed today ({today}) - NSE holiday.")
+                  sys.exit(0)
+
+              print(f"✅ Market open today ({today}) - continuing workflow.")
+
+          except Exception as e:
+              print(f"⚠️ Could not verify NSE holiday status: {e}")
+              print("⏭️ Stopping workflow for safety.")
+              sys.exit(0)
+          PY
 
       - name: Run Filter Script
         env:
-          # 🔹 Database
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
-
-          # 🔹 Google Sheets
           GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
-
-          # 🔹 TradingView Cookies
           TRADINGVIEW_COOKIES: ${{ secrets.TRADINGVIEW_COOKIES }}
-
         run: |
           python filter.py

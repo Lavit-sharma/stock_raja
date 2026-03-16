@@ -19,7 +19,6 @@ STOCK_LIST_GID = 1400370843
 MV2_SQL_URL = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skcBi1OFtaK8h1905oZOc/edit"
 
 TARGET_TABLE = "filter"
-TRIGGER_COLUMNS = ["D_Trigger", "D_Trigger_S"]
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -165,6 +164,37 @@ def inject_tv_cookies(driver):
         return False
 
 
+# ---------------- SCREENSHOT PROCESSOR ---------------- #
+def process_trigger_rows(driver, db, rows_df, day_urls, week_urls, filter_type, log_message):
+    log(log_message)
+
+    for _, row in rows_df.iterrows():
+        symbol = safe_str(row.iloc[0])
+        if not symbol:
+            continue
+
+        log(f"🚀 Triggered: {symbol} ({filter_type})")
+
+        tasks = [
+            ("day", day_urls.get(symbol)),
+            ("week", week_urls.get(symbol))
+        ]
+
+        for tf_name, url in tasks:
+            if url and "tradingview.com" in url:
+                try:
+                    driver.get(url)
+                    chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
+                        EC.visibility_of_element_located(
+                            (By.XPATH, "//div[contains(@class,'chart-container')]")
+                        )
+                    )
+                    time.sleep(POST_LOAD_SLEEP)
+                    save_screenshot(db, symbol, tf_name, filter_type, chart.screenshot_as_png)
+                except Exception as e:
+                    log(f"❌ Screenshot failed for {symbol} {tf_name}: {e}")
+
+
 # ---------------- MAIN ---------------- #
 def main():
     db = DB(DB_CONFIG)
@@ -202,52 +232,33 @@ def main():
             log("❌ Cookie injection failed.")
             return
 
-        # Make sure both columns exist
-        if "D_Trigger" not in df_mv2.columns:
-            log("⚠️ Header 'D_Trigger' not found in Google Sheet.")
-            return
-
-        if "D_Trigger_S" not in df_mv2.columns:
-            log("⚠️ Header 'D_Trigger_S' not found in Google Sheet.")
-            return
+        # Required columns
+        required_columns = ["D_Trigger", "D_Trigger_S", "W_Trigger", "W_Trigger_S"]
+        for col in required_columns:
+            if col not in df_mv2.columns:
+                log(f"⚠️ Header '{col}' not found in Google Sheet.")
+                return
 
         # Convert once for easy checking
         df_mv2["D_Trigger_num"] = df_mv2["D_Trigger"].apply(safe_int)
         df_mv2["D_Trigger_S_num"] = df_mv2["D_Trigger_S"].apply(safe_int)
+        df_mv2["W_Trigger_num"] = df_mv2["W_Trigger"].apply(safe_int)
+        df_mv2["W_Trigger_S_num"] = df_mv2["W_Trigger_S"].apply(safe_int)
 
         # -------------------------
         # PART 1: D_Trigger
         # Condition: D_Trigger == 0
         # -------------------------
-        log("🔍 Scanning D_Trigger for value 0")
-
         dtrigger_rows = df_mv2[df_mv2["D_Trigger_num"] == 0]
-
-        for _, row in dtrigger_rows.iterrows():
-            symbol = safe_str(row.iloc[0])
-            if not symbol:
-                continue
-
-            log(f"🚀 Triggered: {symbol} (D_Trigger=0)")
-
-            tasks = [
-                ("day", day_urls.get(symbol)),
-                ("week", week_urls.get(symbol))
-            ]
-
-            for tf_name, url in tasks:
-                if url and "tradingview.com" in url:
-                    try:
-                        driver.get(url)
-                        chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
-                            EC.visibility_of_element_located(
-                                (By.XPATH, "//div[contains(@class,'chart-container')]")
-                            )
-                        )
-                        time.sleep(POST_LOAD_SLEEP)
-                        save_screenshot(db, symbol, tf_name, "D_Trigger", chart.screenshot_as_png)
-                    except Exception as e:
-                        log(f"❌ Screenshot failed for {symbol} {tf_name}: {e}")
+        process_trigger_rows(
+            driver,
+            db,
+            dtrigger_rows,
+            day_urls,
+            week_urls,
+            "D_Trigger",
+            "🔍 Scanning D_Trigger for value 0"
+        )
 
         # -------------------------
         # PART 2: D_Trigger_S
@@ -255,38 +266,54 @@ def main():
         # D_Trigger_S == 0
         # AND D_Trigger_S != D_Trigger
         # -------------------------
-        log("🔍 Scanning D_Trigger_S for value 0 with D_Trigger_S != D_Trigger")
-
         dtrigger_s_rows = df_mv2[
             (df_mv2["D_Trigger_S_num"] == 0) &
             (df_mv2["D_Trigger_S_num"] != df_mv2["D_Trigger_num"])
         ]
+        process_trigger_rows(
+            driver,
+            db,
+            dtrigger_s_rows,
+            day_urls,
+            week_urls,
+            "D_Trigger_S",
+            "🔍 Scanning D_Trigger_S for value 0 with D_Trigger_S != D_Trigger"
+        )
 
-        for _, row in dtrigger_s_rows.iterrows():
-            symbol = safe_str(row.iloc[0])
-            if not symbol:
-                continue
+        # -------------------------
+        # PART 3: W_Trigger
+        # Condition: W_Trigger == 0
+        # -------------------------
+        wtrigger_rows = df_mv2[df_mv2["W_Trigger_num"] == 0]
+        process_trigger_rows(
+            driver,
+            db,
+            wtrigger_rows,
+            day_urls,
+            week_urls,
+            "W_Trigger",
+            "🔍 Scanning W_Trigger for value 0"
+        )
 
-            log(f"🚀 Triggered: {symbol} (D_Trigger_S=0 and D_Trigger!=0)")
-
-            tasks = [
-                ("day", day_urls.get(symbol)),
-                ("week", week_urls.get(symbol))
-            ]
-
-            for tf_name, url in tasks:
-                if url and "tradingview.com" in url:
-                    try:
-                        driver.get(url)
-                        chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
-                            EC.visibility_of_element_located(
-                                (By.XPATH, "//div[contains(@class,'chart-container')]")
-                            )
-                        )
-                        time.sleep(POST_LOAD_SLEEP)
-                        save_screenshot(db, symbol, tf_name, "D_Trigger_S", chart.screenshot_as_png)
-                    except Exception as e:
-                        log(f"❌ Screenshot failed for {symbol} {tf_name}: {e}")
+        # -------------------------
+        # PART 4: W_Trigger_S
+        # Condition:
+        # W_Trigger_S == 0
+        # AND W_Trigger_S != W_Trigger
+        # -------------------------
+        wtrigger_s_rows = df_mv2[
+            (df_mv2["W_Trigger_S_num"] == 0) &
+            (df_mv2["W_Trigger_S_num"] != df_mv2["W_Trigger_num"])
+        ]
+        process_trigger_rows(
+            driver,
+            db,
+            wtrigger_s_rows,
+            day_urls,
+            week_urls,
+            "W_Trigger_S",
+            "🔍 Scanning W_Trigger_S for value 0 with W_Trigger_S != W_Trigger"
+        )
 
         log("🏁 All triggers processed.")
 

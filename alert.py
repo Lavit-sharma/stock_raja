@@ -14,7 +14,10 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
-# ---------------- CONFIG ---------------- #
+
+# =========================================================
+# CONFIG
+# =========================================================
 STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
 STOCK_LIST_GID = 1400370843
 
@@ -33,10 +36,20 @@ POST_LOAD_SLEEP = 6
 DB_RETRY = 3
 GSHEET_RETRY = 5
 
+# Alert condition
+ACTIVE_REQUIRED = 1
+TRIGGERED_MIN = 2   # matches triggered >= 2
+
+# Save both day and week screenshots
+SAVE_DAY = True
+SAVE_WEEK = True
+
 CHROME_DRIVER_PATH = ChromeDriverManager().install()
 
 
-# ---------------- HELPERS ---------------- #
+# =========================================================
+# HELPERS
+# =========================================================
 def log(msg):
     print(msg, flush=True)
 
@@ -45,21 +58,26 @@ def safe_str(v):
         return ""
     return str(v).strip()
 
-def safe_int(v):
+def safe_int(v, default=0):
     try:
         val = safe_str(v)
         if val == "":
-            return 0
+            return default
         return int(float(val))
-    except:
-        return 0
+    except Exception:
+        return default
+
+def normalize_symbol(v):
+    return safe_str(v).upper()
 
 def clean_headers(header_list):
     return [safe_str(col) for col in header_list]
 
 def deduplicate_columns(df, df_name="DataFrame"):
-    if df.columns.duplicated().any():
-        log(f"⚠️ Duplicate columns found in {df_name}, keeping first occurrence only.")
+    duplicate_mask = df.columns.duplicated()
+    if duplicate_mask.any():
+        dupes = list(pd.Series(df.columns)[duplicate_mask])
+        log(f"⚠️ Duplicate columns found in {df_name}: {dupes}. Keeping first occurrence only.")
     return df.loc[:, ~df.columns.duplicated()]
 
 def retry_gsheet_call(fn, label="Google Sheets call", max_retry=GSHEET_RETRY):
@@ -79,7 +97,9 @@ def retry_gsheet_call(fn, label="Google Sheets call", max_retry=GSHEET_RETRY):
     raise Exception(f"{label} failed after {max_retry} attempts: {last_error}")
 
 
-# ---------------- DB CLASS ---------------- #
+# =========================================================
+# DB CLASS
+# =========================================================
 class DB:
     def __init__(self, config):
         self.config = config
@@ -90,7 +110,7 @@ class DB:
         if self.conn:
             try:
                 self.conn.close()
-            except:
+            except Exception:
                 pass
         self.conn = mysql.connector.connect(**self.config)
         self.conn.autocommit = True
@@ -105,19 +125,23 @@ class DB:
         try:
             if self.conn:
                 self.conn.close()
-        except:
+        except Exception:
             pass
 
 
-# ---------------- SELENIUM ---------------- #
+# =========================================================
+# SELENIUM
+# =========================================================
 def get_driver():
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--lang=en-US")
+
     service = Service(CHROME_DRIVER_PATH)
     return webdriver.Chrome(service=service, options=opts)
 
@@ -136,40 +160,62 @@ def inject_tv_cookies(driver):
         driver.get("https://www.tradingview.com/")
         time.sleep(2)
 
+        added = 0
+        skipped = 0
+
         for c in cookies:
             name = c.get("name")
             value = c.get("value")
+
             if not name or value is None:
+                skipped += 1
+                continue
+
+            cookie_domain = safe_str(c.get("domain")).lower()
+
+            # Skip cookies not related to tradingview
+            if cookie_domain and "tradingview.com" not in cookie_domain:
+                log(f"⚠️ Skipping cookie {name}: unsupported domain {cookie_domain}")
+                skipped += 1
                 continue
 
             try:
-                cookie_payload = {
+                payload = {
                     "name": name,
                     "value": value,
-                    "domain": c.get("domain", ".tradingview.com"),
                     "path": c.get("path", "/"),
                 }
 
+                if cookie_domain and cookie_domain != "tradingview.com":
+                    payload["domain"] = cookie_domain
+
                 if "expiry" in c and c["expiry"]:
                     try:
-                        cookie_payload["expiry"] = int(c["expiry"])
-                    except:
+                        payload["expiry"] = int(c["expiry"])
+                    except Exception:
                         pass
 
                 if "secure" in c:
-                    cookie_payload["secure"] = bool(c["secure"])
+                    payload["secure"] = bool(c["secure"])
 
                 if "httpOnly" in c:
-                    cookie_payload["httpOnly"] = bool(c["httpOnly"])
+                    payload["httpOnly"] = bool(c["httpOnly"])
 
-                driver.add_cookie(cookie_payload)
+                driver.add_cookie(payload)
+                added += 1
 
             except Exception as cookie_err:
                 log(f"⚠️ Skipping cookie {name}: {cookie_err}")
+                skipped += 1
 
         driver.refresh()
         time.sleep(3)
-        log("✅ TradingView cookies injected.")
+
+        if added == 0:
+            log("❌ No TradingView cookies could be added.")
+            return False
+
+        log(f"✅ TradingView cookies injected. Added={added}, Skipped={skipped}")
         return True
 
     except Exception as e:
@@ -177,7 +223,9 @@ def inject_tv_cookies(driver):
         return False
 
 
-# ---------------- GSHEET ---------------- #
+# =========================================================
+# GOOGLE SHEETS
+# =========================================================
 def get_gspread_client():
     creds = os.getenv("GSPREAD_CREDENTIALS")
     if not creds:
@@ -203,21 +251,43 @@ def load_stock_sheet(client):
         raise Exception("Stock list sheet is empty or invalid.")
 
     headers = clean_headers(stock_raw[0])
-    df_stocks = pd.DataFrame(stock_raw[1:], columns=headers)
-    df_stocks.columns = clean_headers(df_stocks.columns)
-    df_stocks = deduplicate_columns(df_stocks, "stock list sheet")
+    df = pd.DataFrame(stock_raw[1:], columns=headers)
+    df.columns = clean_headers(df.columns)
+    df = deduplicate_columns(df, "stock list sheet")
 
-    if df_stocks.shape[1] < 4:
+    if df.shape[1] < 4:
         raise Exception("Stock list sheet must have at least 4 columns: Symbol, ?, Week URL, Day URL")
 
+    # Column 0 = Symbol, Column 2 = Week URL, Column 3 = Day URL
+    df = df.copy()
+    df["_symbol_norm"] = df.iloc[:, 0].apply(normalize_symbol)
+    df["_week_url"] = df.iloc[:, 2].apply(safe_str)
+    df["_day_url"] = df.iloc[:, 3].apply(safe_str)
+
+    # Keep first valid symbol only
+    df = df[df["_symbol_norm"] != ""]
+
+    # If same symbol repeats, keep first non-empty urls
+    symbol_map = {}
+    for _, row in df.iterrows():
+        sym = row["_symbol_norm"]
+        if sym not in symbol_map:
+            symbol_map[sym] = {
+                "week": row["_week_url"],
+                "day": row["_day_url"],
+            }
+
     log("✅ Stock sheet loaded successfully.")
-    log(f"✅ Total stock rows: {len(df_stocks)}")
-    log(f"✅ Columns: {list(df_stocks.columns)}")
+    log(f"✅ Total stock rows: {len(df)}")
+    log(f"✅ Unique symbols mapped: {len(symbol_map)}")
+    log(f"✅ Columns: {list(df.columns)}")
 
-    return df_stocks
+    return symbol_map
 
 
-# ---------------- DB READ ---------------- #
+# =========================================================
+# DB READ
+# =========================================================
 def fetch_filter_rows(db: DB):
     query = f"""
         SELECT
@@ -249,7 +319,46 @@ def fetch_filter_rows(db: DB):
     return rows
 
 
-# ---------------- DUPLICATE CHECK ---------------- #
+# =========================================================
+# ALERT HELPERS
+# =========================================================
+def parse_alerts_json(raw_json, symbol, filter_id):
+    raw_json = safe_str(raw_json)
+    if not raw_json:
+        return []
+
+    try:
+        data = json.loads(raw_json)
+    except Exception as e:
+        log(f"⚠️ Invalid alerts_json for symbol={symbol}, filter_id={filter_id}: {e}")
+        return []
+
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+
+    if isinstance(data, dict):
+        # support single object also
+        return [data]
+
+    log(f"⚠️ alerts_json is neither list nor object for symbol={symbol}, filter_id={filter_id}")
+    return []
+
+def alert_matches_condition(alert_obj):
+    active_val = safe_int(alert_obj.get("active"))
+    triggered_val = safe_int(alert_obj.get("triggered"))
+
+    return active_val == ACTIVE_REQUIRED and triggered_val >= TRIGGERED_MIN
+
+def explain_alert_condition(alert_obj):
+    active_val = safe_int(alert_obj.get("active"))
+    triggered_val = safe_int(alert_obj.get("triggered"))
+
+    return f"active={active_val}, triggered={triggered_val}, needs active={ACTIVE_REQUIRED}, triggered>={TRIGGERED_MIN}"
+
+
+# =========================================================
+# DUPLICATE CHECK
+# =========================================================
 def already_saved(db: DB, filter_id, symbol, timeframe, alert_id, triggered):
     query = f"""
         SELECT id
@@ -274,7 +383,9 @@ def already_saved(db: DB, filter_id, symbol, timeframe, alert_id, triggered):
         return False
 
 
-# ---------------- DB SAVE ---------------- #
+# =========================================================
+# DB SAVE
+# =========================================================
 def save_alert_screenshot(db: DB, source_row, timeframe, alert_obj, image_data):
     query = f"""
         INSERT INTO `{TARGET_TABLE}` (
@@ -305,7 +416,7 @@ def save_alert_screenshot(db: DB, source_row, timeframe, alert_obj, image_data):
 
     values = (
         source_row.get("id"),
-        safe_str(source_row.get("symbol")),
+        normalize_symbol(source_row.get("symbol")),
         timeframe,
         safe_str(alert_obj.get("id")) or None,
         safe_str(alert_obj.get("type")) or None,
@@ -334,24 +445,30 @@ def save_alert_screenshot(db: DB, source_row, timeframe, alert_obj, image_data):
             cur = conn.cursor()
             cur.execute(query, values)
             cur.close()
-            log(f"✅ Saved: {source_row.get('symbol')} | {timeframe} | {alert_obj.get('type')} | triggered={alert_obj.get('triggered')}")
+            log(
+                f"✅ Saved: symbol={normalize_symbol(source_row.get('symbol'))} | "
+                f"timeframe={timeframe} | alert_type={safe_str(alert_obj.get('type'))} | "
+                f"alert_id={safe_str(alert_obj.get('id'))} | triggered={safe_int(alert_obj.get('triggered'))}"
+            )
             return True
         except Exception as e:
-            log(f"⚠️ DB save error ({attempt + 1}/{DB_RETRY}) for {source_row.get('symbol')} | {timeframe}: {e}")
+            log(f"⚠️ DB save error ({attempt + 1}/{DB_RETRY}): {e}")
             db.connect()
             time.sleep(1)
 
-    log(f"❌ Failed to save: {source_row.get('symbol')} | {timeframe}")
+    log(f"❌ Failed to save screenshot for symbol={normalize_symbol(source_row.get('symbol'))} | timeframe={timeframe}")
     return False
 
 
-# ---------------- SCREENSHOT ---------------- #
+# =========================================================
+# SCREENSHOT
+# =========================================================
 def take_chart_screenshot(driver, url, symbol, timeframe):
     if not url:
         log(f"⚠️ Missing URL for {symbol} | {timeframe}")
         return None
 
-    if "tradingview.com" not in url:
+    if "tradingview.com" not in url.lower():
         log(f"⚠️ Invalid TradingView URL for {symbol} | {timeframe}: {url}")
         return None
 
@@ -378,77 +495,102 @@ def take_chart_screenshot(driver, url, symbol, timeframe):
         return None
 
 
-# ---------------- ALERT PROCESS ---------------- #
-def process_alert_rows(driver, db, filter_rows, day_urls, week_urls):
+# =========================================================
+# MAIN PROCESS
+# =========================================================
+def process_alert_rows(driver, db, filter_rows, symbol_map):
     if not filter_rows:
         log("ℹ️ No rows found in filter table.")
         return
 
+    total_alert_objects = 0
     total_matched_alerts = 0
     total_saved = 0
+    total_skipped_duplicate = 0
+    total_missing_symbol_url = 0
 
     for row in filter_rows:
-        symbol = safe_str(row.get("symbol"))
-        alerts_json = safe_str(row.get("alerts_json"))
+        symbol = normalize_symbol(row.get("symbol"))
+        filter_id = row.get("id")
+        raw_json = row.get("alerts_json")
 
-        if not symbol or not alerts_json:
+        if not symbol:
+            log(f"⚠️ Skipping row with empty symbol | filter_id={filter_id}")
             continue
 
-        try:
-            alerts = json.loads(alerts_json)
-        except Exception as e:
-            log(f"⚠️ Invalid alerts_json for symbol={symbol}, filter_id={row.get('id')}: {e}")
+        alerts = parse_alerts_json(raw_json, symbol, filter_id)
+        if not alerts:
+            log(f"ℹ️ No valid alerts for symbol={symbol} | filter_id={filter_id}")
             continue
 
-        if not isinstance(alerts, list):
-            log(f"⚠️ alerts_json is not a list for symbol={symbol}, filter_id={row.get('id')}")
-            continue
+        total_alert_objects += len(alerts)
 
         matched_alerts = []
         for alert in alerts:
-            if not isinstance(alert, dict):
-                continue
+            log(
+                f"🔎 Checking alert | symbol={symbol} | filter_id={filter_id} | "
+                f"alert_id={safe_str(alert.get('id'))} | {explain_alert_condition(alert)}"
+            )
 
-            active_val = safe_int(alert.get("active"))
-            triggered_val = safe_int(alert.get("triggered"))
-
-            # Condition:
-            # active == 1 and triggered > 1
-            if active_val == 1 and triggered_val > 1:
+            if alert_matches_condition(alert):
                 matched_alerts.append(alert)
 
         if not matched_alerts:
+            log(f"ℹ️ No matched alerts for symbol={symbol} | filter_id={filter_id}")
             continue
 
-        log(f"🚀 Matched symbol: {symbol} | alerts matched: {len(matched_alerts)}")
         total_matched_alerts += len(matched_alerts)
+        log(f"🚀 Matched symbol={symbol} | matched alerts={len(matched_alerts)}")
+
+        symbol_urls = symbol_map.get(symbol)
+        if not symbol_urls:
+            log(f"⚠️ Symbol not found in stock sheet: {symbol}")
+            total_missing_symbol_url += len(matched_alerts)
+            continue
+
+        tasks = []
+        if SAVE_DAY:
+            tasks.append(("day", symbol_urls.get("day")))
+        if SAVE_WEEK:
+            tasks.append(("week", symbol_urls.get("week")))
 
         for alert_obj in matched_alerts:
             alert_id = safe_str(alert_obj.get("id"))
             triggered_val = safe_int(alert_obj.get("triggered"))
 
-            tasks = [
-                ("day", day_urls.get(symbol)),
-                ("week", week_urls.get(symbol))
-            ]
-
-            for tf_name, url in tasks:
-                if already_saved(db, row.get("id"), symbol, tf_name, alert_id, triggered_val):
-                    log(f"ℹ️ Already saved, skipping: {symbol} | {tf_name} | {alert_id} | triggered={triggered_val}")
+            for timeframe, url in tasks:
+                if not url:
+                    log(f"⚠️ URL missing for symbol={symbol} | timeframe={timeframe}")
+                    total_missing_symbol_url += 1
                     continue
 
-                image_data = take_chart_screenshot(driver, url, symbol, tf_name)
+                if already_saved(db, filter_id, symbol, timeframe, alert_id, triggered_val):
+                    log(
+                        f"ℹ️ Already saved, skipping duplicate | "
+                        f"symbol={symbol} | timeframe={timeframe} | alert_id={alert_id} | triggered={triggered_val}"
+                    )
+                    total_skipped_duplicate += 1
+                    continue
+
+                image_data = take_chart_screenshot(driver, url, symbol, timeframe)
                 if not image_data:
                     continue
 
-                if save_alert_screenshot(db, row, tf_name, alert_obj, image_data):
+                if save_alert_screenshot(db, row, timeframe, alert_obj, image_data):
                     total_saved += 1
 
+    log("=====================================================")
+    log(f"✅ Total alert objects parsed: {total_alert_objects}")
     log(f"✅ Total matched alerts: {total_matched_alerts}")
     log(f"✅ Total screenshots saved: {total_saved}")
+    log(f"✅ Total duplicate skips: {total_skipped_duplicate}")
+    log(f"✅ Total missing symbol/url skips: {total_missing_symbol_url}")
+    log("=====================================================")
 
 
-# ---------------- MAIN ---------------- #
+# =========================================================
+# MAIN
+# =========================================================
 def main():
     db = None
     driver = None
@@ -456,39 +598,21 @@ def main():
     try:
         log("🚀 Starting alert screenshot bot...")
 
-        # DB
         db = DB(DB_CONFIG)
         log("✅ Database connected.")
 
-        # Google auth + stock sheet
         client = get_gspread_client()
-        df_stocks = load_stock_sheet(client)
+        symbol_map = load_stock_sheet(client)
 
-        # Column mapping:
-        # column 0 = symbol
-        # column 2 = week URL
-        # column 3 = day URL
-        symbol_series = df_stocks.iloc[:, 0].astype(str).str.strip()
-        week_series = df_stocks.iloc[:, 2].astype(str).str.strip()
-        day_series = df_stocks.iloc[:, 3].astype(str).str.strip()
-
-        week_urls = dict(zip(symbol_series, week_series))
-        day_urls = dict(zip(symbol_series, day_series))
-
-        log(f"✅ URL map prepared for {len(day_urls)} symbols.")
-
-        # Filter rows
         filter_rows = fetch_filter_rows(db)
 
-        # Selenium
         driver = get_driver()
         log("✅ Chrome driver started.")
 
         if not inject_tv_cookies(driver):
             raise Exception("TradingView cookie injection failed.")
 
-        # Process rows
-        process_alert_rows(driver, db, filter_rows, day_urls, week_urls)
+        process_alert_rows(driver, db, filter_rows, symbol_map)
 
         log("🏁 Alert screenshot bot finished successfully.")
 
@@ -500,7 +624,7 @@ def main():
             try:
                 driver.quit()
                 log("✅ Browser closed.")
-            except:
+            except Exception:
                 pass
 
         if db:

@@ -36,11 +36,6 @@ POST_LOAD_SLEEP = 6
 DB_RETRY = 3
 GSHEET_RETRY = 5
 
-# Alert condition
-ACTIVE_REQUIRED = 1
-TRIGGERED_MIN = 2   # matches triggered >= 2
-
-# Save both day and week screenshots
 SAVE_DAY = True
 SAVE_WEEK = True
 
@@ -173,12 +168,6 @@ def inject_tv_cookies(driver):
 
             cookie_domain = safe_str(c.get("domain")).lower()
 
-            # Skip cookies not related to tradingview
-            if cookie_domain and "tradingview.com" not in cookie_domain:
-                log(f"⚠️ Skipping cookie {name}: unsupported domain {cookie_domain}")
-                skipped += 1
-                continue
-
             try:
                 payload = {
                     "name": name,
@@ -186,7 +175,7 @@ def inject_tv_cookies(driver):
                     "path": c.get("path", "/"),
                 }
 
-                if cookie_domain and cookie_domain != "tradingview.com":
+                if cookie_domain and "tradingview.com" in cookie_domain and cookie_domain != "tradingview.com":
                     payload["domain"] = cookie_domain
 
                 if "expiry" in c and c["expiry"]:
@@ -258,16 +247,13 @@ def load_stock_sheet(client):
     if df.shape[1] < 4:
         raise Exception("Stock list sheet must have at least 4 columns: Symbol, ?, Week URL, Day URL")
 
-    # Column 0 = Symbol, Column 2 = Week URL, Column 3 = Day URL
     df = df.copy()
     df["_symbol_norm"] = df.iloc[:, 0].apply(normalize_symbol)
     df["_week_url"] = df.iloc[:, 2].apply(safe_str)
     df["_day_url"] = df.iloc[:, 3].apply(safe_str)
 
-    # Keep first valid symbol only
     df = df[df["_symbol_norm"] != ""]
 
-    # If same symbol repeats, keep first non-empty urls
     symbol_map = {}
     for _, row in df.iterrows():
         sym = row["_symbol_norm"]
@@ -337,7 +323,6 @@ def parse_alerts_json(raw_json, symbol, filter_id):
         return [x for x in data if isinstance(x, dict)]
 
     if isinstance(data, dict):
-        # support single object also
         return [data]
 
     log(f"⚠️ alerts_json is neither list nor object for symbol={symbol}, filter_id={filter_id}")
@@ -346,14 +331,12 @@ def parse_alerts_json(raw_json, symbol, filter_id):
 def alert_matches_condition(alert_obj):
     active_val = safe_int(alert_obj.get("active"))
     triggered_val = safe_int(alert_obj.get("triggered"))
-
-    return active_val == ACTIVE_REQUIRED and triggered_val >= TRIGGERED_MIN
+    return active_val == 1 and triggered_val > 0
 
 def explain_alert_condition(alert_obj):
     active_val = safe_int(alert_obj.get("active"))
     triggered_val = safe_int(alert_obj.get("triggered"))
-
-    return f"active={active_val}, triggered={triggered_val}, needs active={ACTIVE_REQUIRED}, triggered>={TRIGGERED_MIN}"
+    return f"active={active_val}, triggered={triggered_val}, needs active=1, triggered>0"
 
 
 # =========================================================

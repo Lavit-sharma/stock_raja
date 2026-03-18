@@ -121,10 +121,15 @@ class DB:
 def roll_days_forward(db: DB):
     """
     Runs once per script execution.
-    Shifts day values and deletes rows older than day 4.
+    Shifts day values and deletes only rows older than day 4
+    where review_status = 'rejected'.
     """
     update_query = f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 1"
-    delete_query = f"DELETE FROM `{TARGET_TABLE}` WHERE `day` > %s"
+    delete_query = f"""
+        DELETE FROM `{TARGET_TABLE}`
+        WHERE `day` > %s
+          AND LOWER(TRIM(COALESCE(`review_status`, ''))) = 'rejected'
+    """
 
     for attempt in range(DB_RETRY):
         try:
@@ -134,8 +139,10 @@ def roll_days_forward(db: DB):
             cur.execute(update_query)
             cur.execute(delete_query, (MAX_DAY_TO_KEEP,))
 
+            deleted_rows = cur.rowcount
             cur.close()
-            log("✅ Day rollover completed.")
+
+            log(f"✅ Day rollover completed. Deleted rejected rows older than day {MAX_DAY_TO_KEEP}: {deleted_rows}")
             return
         except Exception as e:
             log(f"⚠️ Rollover error (attempt {attempt + 1}/{DB_RETRY}): {e}")

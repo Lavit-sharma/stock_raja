@@ -22,9 +22,10 @@ from datetime import datetime
 SPREADSHEET_NAME = "Stock List"
 TAB_NAME = "Weekday"
 
-MAX_THREADS = int(os.getenv("MAX_THREADS", "3"))
-SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
-SHARD_COUNT = int(os.getenv("SHARD_COUNT", "1"))
+MAX_THREADS = int(os.getenv("MAX_THREADS", "4"))
+START_ROW = int(os.getenv("START_ROW", "0"))
+END_ROW = int(os.getenv("END_ROW", "999999"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
 TRUNCATE_ON_START = os.getenv("TRUNCATE_ON_START", "0") == "1"
 
 DB_CONFIG = {
@@ -34,21 +35,20 @@ DB_CONFIG = {
     "database": os.getenv("DB_NAME"),
     "port": int(os.getenv("DB_PORT", "3306")),
     "connect_timeout": 10,
-    "autocommit": False,
+    "autocommit": False
 }
 
 # ---------------- DB POOL ---------------- #
 db_pool = None
 try:
     db_pool = mysql.connector.pooling.MySQLConnectionPool(
-        pool_name=f"screenshot_pool_{SHARD_INDEX}",
+        pool_name=f"screenshot_pool_{START_ROW}_{END_ROW}",
         pool_size=max(MAX_THREADS + 2, 5),
         **DB_CONFIG
     )
 except Exception as e:
     print(f"[FATAL] Could not initialize DB Pool: {e}", flush=True)
 
-# Install once per runner
 CHROME_DRIVER_PATH = ChromeDriverManager().install()
 
 # ---------------- LOGGING ---------------- #
@@ -56,7 +56,10 @@ RUN_ID = datetime.now().strftime("%Y%m%d-%H%M%S")
 
 def log(msg, symbol="-", tf="-"):
     ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] [{RUN_ID}] [Shard {SHARD_INDEX}/{SHARD_COUNT}] [{symbol}] [{tf}] {msg}", flush=True)
+    print(
+        f"[{ts}] [{RUN_ID}] [Rows {START_ROW}-{END_ROW}] [{symbol}] [{tf}] {msg}",
+        flush=True
+    )
 
 def short_exc(e: Exception, max_len=220):
     s = f"{type(e).__name__}: {e}"
@@ -81,11 +84,11 @@ def make_unique_headers(headers):
 
 def get_month_name(date_str):
     try:
-        clean_date = re.sub(r"[*]", "", str(date_str)).strip()
+        clean_date = re.sub(r'[*]', '', str(date_str)).strip()
         for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d", "%d/%m/%Y"):
             try:
                 dt = datetime.strptime(clean_date, fmt)
-                return dt.strftime("%B")
+                return dt.strftime('%B')
             except ValueError:
                 continue
         return "Unknown"
@@ -118,6 +121,7 @@ def save_to_mysql(symbol, timeframe, image_data, chart_date, month_val):
         cursor.execute(query, (symbol, timeframe, image_data, chart_date, month_val))
         conn.commit()
         return True
+
     except Exception as err:
         if conn:
             try:
@@ -126,6 +130,7 @@ def save_to_mysql(symbol, timeframe, image_data, chart_date, month_val):
                 pass
         log(f"❌ DB Save Error: {short_exc(err)}", symbol, timeframe)
         return False
+
     finally:
         if cursor:
             try:
@@ -143,12 +148,13 @@ def get_driver():
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--disable-gpu")
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--disable-extensions")
     opts.add_argument("--disable-infobars")
     opts.add_argument("--mute-audio")
+
     service = Service(CHROME_DRIVER_PATH)
     driver = webdriver.Chrome(service=service, options=opts)
     driver.set_page_load_timeout(90)
@@ -179,11 +185,12 @@ def inject_tv_cookies(driver, symbol="-"):
         driver.refresh()
         time.sleep(2)
         return True
+
     except Exception as e:
         log(f"⚠️ Cookie Error: {short_exc(e)}", symbol)
         return False
 
-def wait_for_chart_ready(driver, symbol, timeframe):
+def wait_for_chart_ready(driver):
     wait = WebDriverWait(driver, 35)
     chart = wait.until(
         EC.element_to_be_clickable(
@@ -197,20 +204,17 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
         log(f"🌐 Loading {timeframe}: {url}", symbol, timeframe)
         driver.get(url)
 
-        # page shell
-        time.sleep(6)
+        time.sleep(8)
 
-        chart = wait_for_chart_ready(driver, symbol, timeframe)
+        chart = wait_for_chart_ready(driver)
 
-        # focus chart
         ActionChains(driver).move_to_element(chart).click().perform()
         time.sleep(1)
 
-        # open goto dialog
         ActionChains(driver).key_down(Keys.ALT).send_keys("g").key_up(Keys.ALT).perform()
 
-        input_xpath = "//input[contains(@class,'query') or @data-role='search' or contains(@class,'input')]"
         wait = WebDriverWait(driver, 20)
+        input_xpath = "//input[contains(@class,'query') or @data-role='search' or contains(@class,'input')]"
         goto_input = wait.until(EC.visibility_of_element_located((By.XPATH, input_xpath)))
 
         goto_input.send_keys(Keys.CONTROL + "a")
@@ -218,11 +222,10 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
         goto_input.send_keys(str(target_date))
         goto_input.send_keys(Keys.ENTER)
 
-        # allow chart to jump + render
-        log("⏳ Waiting 8s for rendering...", symbol, timeframe)
-        time.sleep(8)
+        log("⏳ Waiting 10s for candles/indicators to render...", symbol, timeframe)
+        time.sleep(10)
 
-        chart = wait_for_chart_ready(driver, symbol, timeframe)
+        chart = wait_for_chart_ready(driver)
         img = chart.screenshot_as_png
 
         if save_to_mysql(symbol, timeframe, img, target_date, month_val):
@@ -233,7 +236,7 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
     except Exception as e:
         log(f"❌ Screenshot Error: {short_exc(e)}", symbol, timeframe)
 
-def process_row(row, idx):
+def process_row(row, actual_index):
     symbol = str(row.get("Symbol", "")).strip()
     target_date = str(row.get("dates", "")).strip()
     day_url = str(row.get("Day", "")).strip()
@@ -242,14 +245,10 @@ def process_row(row, idx):
     if not symbol or not target_date:
         return
 
-    # shard filtering
-    # idx starts from 1
-    if ((idx - 1) % SHARD_COUNT) != SHARD_INDEX:
-        return
-
     driver = None
     try:
         driver = get_driver()
+
         if not inject_tv_cookies(driver, symbol):
             log("⚠️ Could not inject TradingView cookies", symbol)
             return
@@ -258,13 +257,13 @@ def process_row(row, idx):
 
         if day_url and "tradingview.com" in day_url:
             navigate_and_snap(driver, symbol, "day", day_url, target_date, month_name)
-            time.sleep(2)
+            time.sleep(3)
 
         if week_url and "tradingview.com" in week_url:
             navigate_and_snap(driver, symbol, "week", week_url, target_date, month_name)
 
     except Exception as e:
-        log(f"❌ Row Error: {short_exc(e)}", symbol)
+        log(f"❌ Row Error at actual row {actual_index}: {short_exc(e)}", symbol)
     finally:
         if driver:
             try:
@@ -281,13 +280,13 @@ def truncate_table_if_needed():
     try:
         conn = get_db_connection()
         if not conn:
-            log("❌ Cannot truncate: DB connection unavailable")
+            log("❌ Cannot truncate table: DB unavailable")
             return
 
         cursor = conn.cursor()
         cursor.execute("TRUNCATE TABLE another_screenshot")
         conn.commit()
-        log("✅ Table Truncated")
+        log("✅ Table Truncated.")
     except Exception as e:
         if conn:
             try:
@@ -316,27 +315,11 @@ def load_rows():
     rows = pd.DataFrame(data[1:], columns=headers).to_dict("records")
     return rows
 
-def main():
-    if not db_pool:
-        log("❌ DB pool initialization failed")
-        return
-
-    truncate_table_if_needed()
-
-    try:
-        rows = load_rows()
-        total_rows = len(rows)
-        shard_rows = sum(1 for i in range(1, total_rows + 1) if ((i - 1) % SHARD_COUNT) == SHARD_INDEX)
-        log(f"✅ Loaded {total_rows} rows. This shard will process {shard_rows} rows.")
-    except Exception as e:
-        log(f"❌ Google Sheet Error: {short_exc(e)}")
-        return
-
+def process_batch(batch_rows):
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         futures = []
-        for idx, row in enumerate(rows, start=1):
-            if ((idx - 1) % SHARD_COUNT) == SHARD_INDEX:
-                futures.append(executor.submit(process_row, row, idx))
+        for actual_index, row in batch_rows:
+            futures.append(executor.submit(process_row, row, actual_index))
 
         for future in concurrent.futures.as_completed(futures):
             try:
@@ -344,7 +327,44 @@ def main():
             except Exception as e:
                 log(f"⚠️ Worker failure: {short_exc(e)}")
 
-    log("🏁 Finished shard")
+def main():
+    if not db_pool:
+        log("❌ Connection pool failed. Check DB config.")
+        return
+
+    truncate_table_if_needed()
+
+    try:
+        all_rows = load_rows()
+        total_rows = len(all_rows)
+        log(f"✅ Loaded total rows: {total_rows}")
+    except Exception as e:
+        log(f"❌ Google Sheet Error: {short_exc(e)}")
+        return
+
+    # Python slicing uses 0-based indexing, END_ROW excluded
+    selected_rows = all_rows[START_ROW:END_ROW]
+    selected_count = len(selected_rows)
+
+    if selected_count == 0:
+        log("⚠️ No rows found in selected range.")
+        return
+
+    log(f"✅ Selected rows: {selected_count} from range {START_ROW}-{END_ROW}")
+    log(f"✅ Processing in batches of {BATCH_SIZE}")
+
+    indexed_rows = list(enumerate(selected_rows, start=START_ROW + 1))
+
+    for batch_start in range(0, len(indexed_rows), BATCH_SIZE):
+        batch = indexed_rows[batch_start:batch_start + BATCH_SIZE]
+        batch_first = batch[0][0]
+        batch_last = batch[-1][0]
+
+        log(f"🚀 Starting batch {batch_first}-{batch_last}")
+        process_batch(batch)
+        log(f"✅ Finished batch {batch_first}-{batch_last}")
+
+    log("🏁 Finished all selected rows.")
 
 if __name__ == "__main__":
     main()

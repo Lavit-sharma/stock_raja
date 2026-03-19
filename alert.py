@@ -2,6 +2,7 @@ import os
 import time
 import json
 import random
+import hashlib
 import gspread
 import pandas as pd
 import mysql.connector
@@ -340,36 +341,80 @@ def explain_alert_condition(alert_obj):
 
 
 # =========================================================
-# DUPLICATE CHECK
+# CHANGE HASH / DUPLICATE REDUCTION
 # =========================================================
-def already_saved(db: DB, filter_id, symbol, timeframe, alert_id, triggered):
+def build_change_hash(source_row, timeframe, alert_obj):
+    payload = {
+        "filter_id": safe_int(source_row.get("id")),
+        "symbol": normalize_symbol(source_row.get("symbol")),
+        "timeframe": safe_str(timeframe).lower(),
+
+        "alert_id": safe_str(alert_obj.get("id")),
+        "alert_type": safe_str(alert_obj.get("type")),
+        "alert_email": safe_str(alert_obj.get("email")),
+        "active": safe_int(alert_obj.get("active")),
+        "triggered": safe_int(alert_obj.get("triggered")),
+        "triggered_at": safe_str(alert_obj.get("triggered_at")),
+        "created_at": safe_str(alert_obj.get("created_at")),
+
+        "source_filter_type": safe_str(source_row.get("filter_type")),
+        "source_timeframe": safe_str(source_row.get("timeframe")),
+        "source_day": safe_int(source_row.get("day")),
+        "source_last_shift_date": safe_str(source_row.get("last_shift_date")),
+        "source_review_status": safe_str(source_row.get("review_status")),
+        "source_review_reason": safe_str(source_row.get("review_reason")),
+        "source_entry_price": safe_str(source_row.get("entry_price")),
+        "source_action_date": safe_str(source_row.get("action_date")),
+        "source_month_name": safe_str(source_row.get("month_name")),
+        "source_week_label": safe_str(source_row.get("week_label")),
+
+        "raw_alert": alert_obj,
+    }
+
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+def get_last_saved_hash(db: DB, filter_id, symbol, timeframe, alert_id):
     query = f"""
-        SELECT id
+        SELECT change_hash
         FROM `{TARGET_TABLE}`
         WHERE filter_id = %s
           AND symbol = %s
           AND timeframe = %s
           AND alert_id = %s
-          AND triggered = %s
+        ORDER BY id DESC
         LIMIT 1
     """
 
     try:
         conn = db.ensure()
         cur = conn.cursor()
-        cur.execute(query, (filter_id, symbol, timeframe, alert_id, triggered))
+        cur.execute(query, (filter_id, symbol, timeframe, alert_id))
         row = cur.fetchone()
         cur.close()
-        return row is not None
+        return row[0] if row and row[0] else None
     except Exception as e:
-        log(f"⚠️ Duplicate check failed for {symbol} | {timeframe} | {alert_id}: {e}")
-        return False
+        log(f"⚠️ Failed to fetch last change hash for {symbol} | {timeframe} | {alert_id}: {e}")
+        return None
+
+def has_state_changed(db: DB, source_row, timeframe, alert_obj):
+    filter_id = safe_int(source_row.get("id"))
+    symbol = normalize_symbol(source_row.get("symbol"))
+    alert_id = safe_str(alert_obj.get("id"))
+
+    new_hash = build_change_hash(source_row, timeframe, alert_obj)
+    old_hash = get_last_saved_hash(db, filter_id, symbol, timeframe, alert_id)
+
+    if old_hash == new_hash:
+        return False, new_hash
+
+    return True, new_hash
 
 
 # =========================================================
 # DB SAVE
 # =========================================================
-def save_alert_screenshot(db: DB, source_row, timeframe, alert_obj, image_data):
+def save_alert_screenshot(db: DB, source_row, timeframe, alert_obj, image_data, change_hash):
     query = f"""
         INSERT INTO `{TARGET_TABLE}` (
             filter_id,
@@ -393,8 +438,9 @@ def save_alert_screenshot(db: DB, source_row, timeframe, alert_obj, image_data):
             source_month_name,
             source_week_label,
             raw_alert_json,
+            change_hash,
             screenshot
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     values = (
@@ -419,6 +465,7 @@ def save_alert_screenshot(db: DB, source_row, timeframe, alert_obj, image_data):
         safe_str(source_row.get("month_name")) or None,
         safe_str(source_row.get("week_label")) or None,
         json.dumps(alert_obj, ensure_ascii=False),
+        change_hash,
         image_data
     )
 
@@ -431,7 +478,7 @@ def save_alert_screenshot(db: DB, source_row, timeframe, alert_obj, image_data):
             log(
                 f"✅ Saved: symbol={normalize_symbol(source_row.get('symbol'))} | "
                 f"timeframe={timeframe} | alert_type={safe_str(alert_obj.get('type'))} | "
-                f"alert_id={safe_str(alert_obj.get('id'))} | triggered={safe_int(alert_obj.get('triggered'))}"
+                f"alert_id={safe_str(alert_obj.get('id'))}"
             )
             return True
         except Exception as e:
@@ -539,7 +586,6 @@ def process_alert_rows(driver, db, filter_rows, symbol_map):
 
         for alert_obj in matched_alerts:
             alert_id = safe_str(alert_obj.get("id"))
-            triggered_val = safe_int(alert_obj.get("triggered"))
 
             for timeframe, url in tasks:
                 if not url:
@@ -547,10 +593,12 @@ def process_alert_rows(driver, db, filter_rows, symbol_map):
                     total_missing_symbol_url += 1
                     continue
 
-                if already_saved(db, filter_id, symbol, timeframe, alert_id, triggered_val):
+                changed, change_hash = has_state_changed(db, row, timeframe, alert_obj)
+
+                if not changed:
                     log(
-                        f"ℹ️ Already saved, skipping duplicate | "
-                        f"symbol={symbol} | timeframe={timeframe} | alert_id={alert_id} | triggered={triggered_val}"
+                        f"ℹ️ No change detected, skipping screenshot | "
+                        f"symbol={symbol} | timeframe={timeframe} | alert_id={alert_id}"
                     )
                     total_skipped_duplicate += 1
                     continue
@@ -559,7 +607,7 @@ def process_alert_rows(driver, db, filter_rows, symbol_map):
                 if not image_data:
                     continue
 
-                if save_alert_screenshot(db, row, timeframe, alert_obj, image_data):
+                if save_alert_screenshot(db, row, timeframe, alert_obj, image_data, change_hash):
                     total_saved += 1
 
     log("=====================================================")

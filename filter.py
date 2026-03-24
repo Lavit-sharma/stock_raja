@@ -418,7 +418,7 @@ def main():
         # PART 3: W_Trigger
         # Condition: W_Trigger == 0
         # -------------------------
-        wtrigger_rows = df_mv2[df_mv2["W_Trigger_num"] == 0]
+        wtrigger_rows = df_mv2[df_mv2["W_Trigger_num"] == 1]
         process_trigger_rows(
             driver,
             db,
@@ -426,7 +426,7 @@ def main():
             day_urls,
             week_urls,
             "W_Trigger",
-            "🔍 Scanning W_Trigger for value 0"
+            "🔍 Scanning W_Trigger for value 1"
         )
 
         # -------------------------

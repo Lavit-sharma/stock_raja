@@ -1,5 +1,9 @@
 import os
 import time
+import json
+import hashlib
+import gspread
+import pandas as pd
 import mysql.connector
 
 from selenium import webdriver
@@ -11,6 +15,13 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- CONFIG ---------------- #
+STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
+STOCK_LIST_GID = 1400370843
+
+SOURCE_TABLE = "wp_live_close"
+TARGET_TABLE = "live_screen"
+CHANGE_THRESHOLD = 7.0  # Trigger for >= 7%
+
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "user": os.getenv("DB_USER"),
@@ -18,157 +29,124 @@ DB_CONFIG = {
     "database": os.getenv("DB_NAME"),
 }
 
-SOURCE_TABLE = "wp_live_close"
-TARGET_TABLE = "live_screen"
-
-CHART_WAIT_SEC = 25
+CHART_WAIT_SEC = 30
 POST_LOAD_SLEEP = 5
+DB_RETRY = 3
 
-# ---------------- DB CLASS ---------------- #
+CHROME_DRIVER_PATH = ChromeDriverManager().install()
+
+# ---------------- HELPERS ---------------- #
+def log(msg):
+    print(msg, flush=True)
+
+def get_hash(symbol, timeframe, change_val):
+    """Prevents duplicate screenshots if value hasn't changed."""
+    data = f"{symbol}_{timeframe}_{change_val}"
+    return hashlib.sha256(data.encode()).hexdigest()
+
 class DB:
     def __init__(self, config):
         self.config = config
-        self.conn = None
-        self.connect()
+        self.conn = mysql.connector.connect(**self.config)
+        self.conn.autocommit = True
 
-    def connect(self):
-        for attempt in range(5):
-            try:
-                print(f"🔌 Connecting to DB (attempt {attempt+1})...")
-                
-                self.conn = mysql.connector.connect(
-                    host=self.config["host"],
-                    user=self.config["user"],
-                    password=self.config["password"],
-                    database=self.config["database"],
-                    connection_timeout=10
-                )
-
-                print("✅ DB Connected Successfully")
-                return
-
-            except Exception as e:
-                print(f"❌ DB connection failed: {e}")
-                time.sleep(3)
-
-        raise Exception("🚨 Could not connect to DB after retries")
-
-    def fetch_symbols(self):
-        try:
-            print("📊 Fetching stocks with change >= 7...")
-
-            query = f"""
-                SELECT Symbol, real_close, real_change
-                FROM {SOURCE_TABLE}
-                WHERE CAST(real_change AS DECIMAL(10,2)) >= 7
-            """
-
-            cur = self.conn.cursor(dictionary=True)
-            cur.execute(query)
-            rows = cur.fetchall()
-            cur.close()
-
-            print(f"✅ Found {len(rows)} stocks")
-            return rows
-
-        except Exception as e:
-            print(f"❌ Fetch error: {e}")
-            return []
-
-    def save(self, symbol, real_close, real_change, image):
-        try:
-            query = f"""
-                INSERT INTO {TARGET_TABLE} 
-                (symbol, real_close, real_change, screenshot)
-                VALUES (%s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                real_close = VALUES(real_close),
-                real_change = VALUES(real_change),
-                screenshot = VALUES(screenshot)
-            """
-
-            cur = self.conn.cursor()
-            cur.execute(query, (symbol, real_close, real_change, image))
-            cur.close()
-
-            print(f"💾 Saved: {symbol}")
-
-        except Exception as e:
-            print(f"❌ Save error for {symbol}: {e}")
-
-    def close(self):
-        if self.conn:
-            self.conn.close()
-            print("🔌 DB Closed")
-
+    def ensure(self):
+        if not self.conn.is_connected():
+            self.conn.ping(reconnect=True)
+        return self.conn
 
 # ---------------- SELENIUM ---------------- #
 def get_driver():
-    options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080")
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--window-size=1920,1080")
+    service = Service(CHROME_DRIVER_PATH)
+    return webdriver.Chrome(service=service, options=opts)
 
-    return webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=options
-    )
+def inject_tv_cookies(driver):
+    cookie_data = os.getenv("TRADINGVIEW_COOKIES")
+    if not cookie_data: return False
+    driver.get("https://www.tradingview.com/")
+    time.sleep(2)
+    for c in json.loads(cookie_data):
+        driver.add_cookie({"name": c["name"], "value": c["value"], "domain": ".tradingview.com", "path": "/"})
+    driver.refresh()
+    return True
 
-
-# ---------------- MAIN ---------------- #
+# ---------------- PROCESSING ---------------- #
 def main():
-    print("🚀 Script started...")
-
-    # Debug env
-    print("DB_HOST:", os.getenv("DB_HOST"))
-    print("DB_USER:", os.getenv("DB_USER"))
-
     db = DB(DB_CONFIG)
-    driver = get_driver()
+    driver = None
 
     try:
-        rows = db.fetch_symbols()
+        # 1. Get Stock URLs from GSheets
+        creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
+        client = gspread.service_account_from_dict(creds)
+        sheet = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
+        df_stocks = pd.DataFrame(sheet.get_all_values()[1:])
+        url_map = dict(zip(df_stocks[0].str.strip().str.upper(), zip(df_stocks[3], df_stocks[2])))
 
-        if not rows:
-            print("⚠️ No stocks found. Exiting.")
+        # 2. Fetch stocks from WP table where real_change >= 7
+        conn = db.ensure()
+        cur = conn.cursor(dictionary=True)
+        # Using CAST because real_change is longtext in your schema
+        query = f"SELECT Symbol, real_close, real_change FROM `{SOURCE_TABLE}` WHERE CAST(real_change AS DECIMAL(10,2)) >= %s"
+        cur.execute(query, (CHANGE_THRESHOLD,))
+        triggered_stocks = cur.fetchall()
+        cur.close()
+
+        if not triggered_stocks:
+            log("No stocks found with >= 7% change.")
             return
 
-        for row in rows:
-            symbol = str(row["Symbol"]).strip()
-            real_close = row["real_close"]
-            real_change = float(row["real_change"])
+        # 3. Start Browser
+        driver = get_driver()
+        inject_tv_cookies(driver)
 
-            print(f"📈 Processing: {symbol} ({real_change}%)")
+        for stock in triggered_stocks:
+            symbol = stock['Symbol'].strip().upper()
+            change_val = stock['real_change']
+            
+            if symbol not in url_map:
+                continue
 
-            url = f"https://www.tradingview.com/chart/?symbol=NSE:{symbol}"
+            # Process both Day and Week
+            for i, tf in enumerate(["day", "week"]):
+                url = url_map[symbol][i]
+                new_hash = get_hash(symbol, tf, change_val)
 
-            try:
+                # Check if we already have this exact screenshot
+                cur = conn.cursor()
+                cur.execute(f"SELECT id FROM `{TARGET_TABLE}` WHERE change_hash = %s", (new_hash,))
+                if cur.fetchone():
+                    log(f"Skipping {symbol} {tf} - Already captured.")
+                    cur.close()
+                    continue
+                cur.close()
+
+                # Capture Screenshot
+                log(f"Capturing {symbol} ({tf}) at {change_val}%")
                 driver.get(url)
-
-                chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
-                    EC.presence_of_element_located(
-                        (By.XPATH, "//div[contains(@class,'chart-container')]")
+                try:
+                    chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
+                        EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
                     )
-                )
+                    time.sleep(POST_LOAD_SLEEP)
+                    img = chart.screenshot_as_png
 
-                time.sleep(POST_LOAD_SLEEP)
-
-                image = chart.screenshot_as_png
-
-                if image:
-                    db.save(symbol, real_close, real_change, image)
-                else:
-                    print(f"⚠️ Empty screenshot: {symbol}")
-
-            except Exception as e:
-                print(f"❌ Error for {symbol}: {e}")
+                    # Save to live_screen
+                    cur = conn.cursor()
+                    insert_query = f"""INSERT INTO `{TARGET_TABLE}` 
+                                    (symbol, timeframe, real_change, real_close, change_hash, screenshot) 
+                                    VALUES (%s, %s, %s, %s, %s, %s)"""
+                    cur.execute(insert_query, (symbol, tf, change_val, stock['real_close'], new_hash, img))
+                    cur.close()
+                except Exception as e:
+                    log(f"Failed {symbol}: {e}")
 
     finally:
-        driver.quit()
-        db.close()
-        print("🏁 Script finished")
-
+        if driver: driver.quit()
+        log("Done.")
 
 if __name__ == "__main__":
     main()

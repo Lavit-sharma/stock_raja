@@ -22,13 +22,17 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install selenium webdriver-manager mysql-connector-python
+          pip install selenium webdriver-manager mysql-connector-python gspread pandas
 
       - name: Run Live Screen Script
         env:
+          # Database Secrets
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
+          # Google & TradingView Secrets (Crucial for the new code)
+          GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
+          TRADINGVIEW_COOKIES: ${{ secrets.TRADINGVIEW_COOKIES }}
         run: |
           python livescreen.py

@@ -28,22 +28,22 @@ DB_CONFIG = {
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
     "database": os.getenv("DB_NAME"),
-    "connect_timeout": 15  # Prevents GitHub Actions from hanging forever
+    "connect_timeout": 30,
+    "autocommit": True
 }
 
-CHART_WAIT_SEC = 30
-POST_LOAD_SLEEP = 6
+CHART_WAIT_SEC = 25
+POST_LOAD_SLEEP = 4
 
-# ---------------- HELPERS ---------------- #
 def log(msg):
-    timestamp = time.strftime("%H:%M:%S")
-    print(f"[{timestamp}] {msg}", flush=True)
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
-def get_hash(symbol, timeframe, change_val):
-    data = f"{symbol}_{timeframe}_{change_val}"
+def get_hash(symbol, change_val):
+    # Only Day timeframe now, so hash is simpler
+    data = f"{symbol}_day_{change_val}"
     return hashlib.sha256(data.encode()).hexdigest()
 
-class DB:
+class DBManager:
     def __init__(self, config):
         self.config = config
         self.conn = None
@@ -51,134 +51,108 @@ class DB:
 
     def connect(self):
         try:
-            log(f"🔗 Attempting connection to {self.config['host']}...")
+            if self.conn: self.conn.close()
             self.conn = mysql.connector.connect(**self.config)
-            self.conn.autocommit = True
             log("✅ Database Connected.")
         except mysql.connector.Error as err:
-            if err.errno == errorcode.ER_ACCESS_DENIED_ERROR:
-                log("❌ DB Error: Bad username or password.")
-            elif err.errno == errorcode.ER_BAD_DB_ERROR:
-                log("❌ DB Error: Database does not exist.")
-            elif err.errno == 2003:
-                log("❌ DB Error: Connection Refused. Check 'Remote MySQL' settings and whitelist '%' in your hosting panel.")
-            else:
-                log(f"❌ DB Error: {err}")
+            log(f"❌ DB Connection Error: {err}")
             raise
 
-    def ensure(self):
-        if not self.conn or not self.conn.is_connected():
-            log("🔄 Connection lost. Reconnecting...")
+    def get_conn(self):
+        try:
+            if not self.conn or not self.conn.is_connected():
+                self.connect()
+            else:
+                self.conn.ping(reconnect=True, attempts=3, delay=2)
+        except:
             self.connect()
         return self.conn
 
-# ---------------- SELENIUM ---------------- #
 def get_driver():
-    log("🌐 Starting Chrome (Headless)...")
-    CHROME_DRIVER_PATH = ChromeDriverManager().install()
+    log("🌐 Initializing Chrome...")
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-    service = Service(CHROME_DRIVER_PATH)
-    return webdriver.Chrome(service=service, options=opts)
+    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
 
-def inject_tv_cookies(driver):
-    log("🍪 Injecting TradingView Cookies...")
-    cookie_data = os.getenv("TRADINGVIEW_COOKIES")
-    if not cookie_data:
-        log("⚠️ TRADINGVIEW_COOKIES secret is missing!")
-        return False
-    
-    driver.get("https://www.tradingview.com/")
-    time.sleep(2)
-    try:
-        cookies = json.loads(cookie_data)
-        for c in cookies:
-            driver.add_cookie({"name": c["name"], "value": c["value"], "domain": ".tradingview.com", "path": "/"})
-        driver.refresh()
-        log("✅ Cookies applied successfully.")
-        return True
-    except Exception as e:
-        log(f"❌ Failed to apply cookies: {e}")
-        return False
-
-# ---------------- MAIN ---------------- #
 def main():
-    db = None
+    db = DBManager(DB_CONFIG)
     driver = None
 
     try:
-        # 1. Connect to DB
-        db = DB(DB_CONFIG)
-        conn = db.ensure()
+        # 1. Load URLs from GSheet (Column 3 is Day URL)
+        log("📄 Loading URLs from Google Sheets...")
+        creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
+        gc = gspread.service_account_from_dict(creds)
+        ws = gc.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
+        df_sheet = pd.DataFrame(ws.get_all_values()[1:])
+        url_map = dict(zip(df_sheet[0].str.strip().str.upper(), df_sheet[3]))
 
-        # 2. Get Stocks from GSheets
-        log("📄 Fetching URL map from Google Sheets...")
-        creds_json = os.getenv("GSPREAD_CREDENTIALS")
-        if not creds_json: raise Exception("GSPREAD_CREDENTIALS missing!")
-        
-        client = gspread.service_account_from_dict(json.loads(creds_json))
-        sheet = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
-        df_stocks = pd.DataFrame(sheet.get_all_values()[1:])
-        url_map = dict(zip(df_stocks[0].str.strip().str.upper(), zip(df_stocks[3], df_stocks[2])))
-
-        # 3. Find stocks moving >= 7%
-        log(f"🔍 Checking `{SOURCE_TABLE}` for movements >= {CHANGE_THRESHOLD}%...")
+        # 2. Identify Stocks >= 7%
+        conn = db.get_conn()
         cur = conn.cursor(dictionary=True)
         query = f"SELECT Symbol, real_close, real_change FROM `{SOURCE_TABLE}` WHERE CAST(real_change AS DECIMAL(10,2)) >= %s"
         cur.execute(query, (CHANGE_THRESHOLD,))
-        triggered = cur.fetchall()
+        triggered_stocks = cur.fetchall()
         cur.close()
 
-        if not triggered:
-            log("😴 No high-movement stocks found. Job done.")
+        if not triggered_stocks:
+            log("😴 No stocks match criteria.")
             return
 
-        log(f"🚀 Found {len(triggered)} stocks. Starting screenshots...")
-        driver = get_driver()
-        if not inject_tv_cookies(driver): return
+        log(f"🚀 Found {len(triggered_stocks)} stocks. Processing Day Charts...")
 
-        for stock in triggered:
+        # 3. Setup Browser & Cookies
+        driver = get_driver()
+        driver.get("https://www.tradingview.com/")
+        time.sleep(2)
+        for c in json.loads(os.getenv("TRADINGVIEW_COOKIES")):
+            driver.add_cookie({"name": c["name"], "value": c["value"], "domain": ".tradingview.com", "path": "/"})
+        driver.refresh()
+        log("✅ TradingView Session Ready.")
+
+        # 4. Process Loop
+        success_count = 0
+        for stock in triggered_stocks:
             symbol = stock['Symbol'].strip().upper()
             change_val = stock['real_change']
-            
-            if symbol not in url_map:
-                log(f"⚠️ URL not found for {symbol} in GSheet. Skipping.")
-                continue
+            day_url = url_map.get(symbol)
 
-            for i, tf in enumerate(["day", "week"]):
-                url = url_map[symbol][i]
-                new_hash = get_hash(symbol, tf, change_val)
+            if not day_url: continue
 
-                # Deduplication Check
-                cur = conn.cursor()
-                cur.execute(f"SELECT id FROM `{TARGET_TABLE}` WHERE change_hash = %s", (new_hash,))
-                if cur.fetchone():
-                    log(f"⏭️  Already have {symbol} {tf} at {change_val}%. Skipping.")
-                    cur.close()
-                    continue
+            # Deduplication Check
+            new_hash = get_hash(symbol, change_val)
+            conn = db.get_conn()
+            cur = conn.cursor()
+            cur.execute(f"SELECT id FROM `{TARGET_TABLE}` WHERE change_hash = %s", (new_hash,))
+            if cur.fetchone():
                 cur.close()
+                continue
+            cur.close()
 
-                # Capture
-                log(f"📸 Capturing {symbol} ({tf}) | {url}")
-                try:
-                    driver.get(url)
-                    WebDriverWait(driver, CHART_WAIT_SEC).until(
-                        EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
-                    )
-                    time.sleep(POST_LOAD_SLEEP)
-                    img = driver.get_screenshot_as_png()
+            # Capture & Save
+            try:
+                log(f"📸 Capturing: {symbol} ({change_val}%)")
+                driver.get(day_url)
+                WebDriverWait(driver, CHART_WAIT_SEC).until(
+                    EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
+                )
+                time.sleep(POST_LOAD_SLEEP)
+                img = driver.get_screenshot_as_png()
 
-                    # Save to DB
-                    cur = conn.cursor()
-                    sql = f"INSERT INTO `{TARGET_TABLE}` (symbol, timeframe, real_change, real_close, change_hash, screenshot) VALUES (%s, %s, %s, %s, %s, %s)"
-                    cur.execute(sql, (symbol, tf, change_val, stock['real_close'], new_hash, img))
-                    cur.close()
-                    log(f"✅ Saved {symbol} {tf}")
-                except Exception as e:
-                    log(f"❌ Error capturing {symbol}: {e}")
+                # Optimized DB Insert
+                conn = db.get_conn()
+                cur = conn.cursor()
+                sql = f"INSERT INTO `{TARGET_TABLE}` (symbol, timeframe, real_change, real_close, change_hash, screenshot) VALUES (%s, %s, %s, %s, %s, %s)"
+                cur.execute(sql, (symbol, 'day', change_val, stock['real_close'], new_hash, img))
+                cur.close()
+                success_count += 1
+            except Exception as e:
+                log(f"⚠️ Failed {symbol}: {e}")
+
+        log(f"✅ Successfully processed {success_count} new charts.")
 
     except Exception as e:
         log(f"🚨 FATAL ERROR: {e}")

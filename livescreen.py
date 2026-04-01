@@ -24,72 +24,123 @@ TARGET_TABLE = "live_screen"
 CHART_WAIT_SEC = 25
 POST_LOAD_SLEEP = 5
 
-CHROME_DRIVER_PATH = ChromeDriverManager().install()
-
-# ---------------- DB ---------------- #
+# ---------------- DB CLASS ---------------- #
 class DB:
     def __init__(self, config):
-        self.conn = mysql.connector.connect(**config)
-        self.conn.autocommit = True
+        self.config = config
+        self.conn = None
+        self.connect()
+
+    def connect(self):
+        for attempt in range(5):
+            try:
+                print(f"🔌 Connecting to DB (attempt {attempt+1})...")
+                
+                self.conn = mysql.connector.connect(
+                    host=self.config["host"],
+                    user=self.config["user"],
+                    password=self.config["password"],
+                    database=self.config["database"],
+                    connection_timeout=10
+                )
+
+                print("✅ DB Connected Successfully")
+                return
+
+            except Exception as e:
+                print(f"❌ DB connection failed: {e}")
+                time.sleep(3)
+
+        raise Exception("🚨 Could not connect to DB after retries")
 
     def fetch_symbols(self):
-        query = f"""
-            SELECT Symbol, real_close, real_change
-            FROM {SOURCE_TABLE}
-            WHERE CAST(real_change AS DECIMAL(10,2)) >= 7
-        """
-        cur = self.conn.cursor(dictionary=True)
-        cur.execute(query)
-        rows = cur.fetchall()
-        cur.close()
-        return rows
+        try:
+            print("📊 Fetching stocks with change >= 7...")
+
+            query = f"""
+                SELECT Symbol, real_close, real_change
+                FROM {SOURCE_TABLE}
+                WHERE CAST(real_change AS DECIMAL(10,2)) >= 7
+            """
+
+            cur = self.conn.cursor(dictionary=True)
+            cur.execute(query)
+            rows = cur.fetchall()
+            cur.close()
+
+            print(f"✅ Found {len(rows)} stocks")
+            return rows
+
+        except Exception as e:
+            print(f"❌ Fetch error: {e}")
+            return []
 
     def save(self, symbol, real_close, real_change, image):
-        query = f"""
-            INSERT INTO {TARGET_TABLE} 
-            (symbol, real_close, real_change, screenshot)
-            VALUES (%s, %s, %s, %s)
-        """
-        cur = self.conn.cursor()
-        cur.execute(query, (symbol, real_close, real_change, image))
-        cur.close()
+        try:
+            query = f"""
+                INSERT INTO {TARGET_TABLE} 
+                (symbol, real_close, real_change, screenshot)
+                VALUES (%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                real_close = VALUES(real_close),
+                real_change = VALUES(real_change),
+                screenshot = VALUES(screenshot)
+            """
+
+            cur = self.conn.cursor()
+            cur.execute(query, (symbol, real_close, real_change, image))
+            cur.close()
+
+            print(f"💾 Saved: {symbol}")
+
+        except Exception as e:
+            print(f"❌ Save error for {symbol}: {e}")
 
     def close(self):
-        self.conn.close()
+        if self.conn:
+            self.conn.close()
+            print("🔌 DB Closed")
 
 
 # ---------------- SELENIUM ---------------- #
 def get_driver():
-    opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1920,1080")
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--window-size=1920,1080")
 
     return webdriver.Chrome(
-        service=Service(CHROME_DRIVER_PATH),
-        options=opts
+        service=Service(ChromeDriverManager().install()),
+        options=options
     )
 
 
-# ---------------- MAIN LOGIC ---------------- #
+# ---------------- MAIN ---------------- #
 def main():
+    print("🚀 Script started...")
+
+    # Debug env
+    print("DB_HOST:", os.getenv("DB_HOST"))
+    print("DB_USER:", os.getenv("DB_USER"))
+
     db = DB(DB_CONFIG)
     driver = get_driver()
 
     try:
         rows = db.fetch_symbols()
 
-        print(f"🔥 Found {len(rows)} stocks with change >= 7")
+        if not rows:
+            print("⚠️ No stocks found. Exiting.")
+            return
 
         for row in rows:
-            symbol = row["Symbol"]
+            symbol = str(row["Symbol"]).strip()
             real_close = row["real_close"]
             real_change = float(row["real_change"])
 
-            print(f"🚀 Processing: {symbol} ({real_change}%)")
+            print(f"📈 Processing: {symbol} ({real_change}%)")
 
-            # 👉 TradingView URL (EDIT if needed)
             url = f"https://www.tradingview.com/chart/?symbol=NSE:{symbol}"
 
             try:
@@ -107,7 +158,6 @@ def main():
 
                 if image:
                     db.save(symbol, real_close, real_change, image)
-                    print(f"✅ Saved: {symbol}")
                 else:
                     print(f"⚠️ Empty screenshot: {symbol}")
 
@@ -117,6 +167,7 @@ def main():
     finally:
         driver.quit()
         db.close()
+        print("🏁 Script finished")
 
 
 if __name__ == "__main__":

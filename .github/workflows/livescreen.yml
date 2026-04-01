@@ -1,0 +1,97 @@
+name: Live Screen Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run every 1 hour
+    - cron: "0 * * * *"
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          pip install selenium webdriver-manager mysql-connector-python requests
+
+      # -------------------------------
+      # MARKET CHECK (IMPORTANT)
+      # -------------------------------
+      - name: Check if market is open
+        env:
+          TZ: Asia/Kolkata
+        run: |
+          python - <<'PY'
+          import sys
+          import re
+          import requests
+          from datetime import datetime
+
+          today = datetime.now().date()
+          weekday = today.weekday()
+
+          # Weekend check
+          if weekday >= 5:
+              print(f"⏭️ Market closed today ({today}) - weekend.")
+              sys.exit(0)
+
+          headers = {
+              "User-Agent": "Mozilla/5.0",
+              "Accept": "text/html",
+              "Accept-Language": "en-US,en;q=0.9"
+          }
+
+          try:
+              session = requests.Session()
+
+              session.get("https://www.nseindia.com", headers=headers, timeout=30)
+
+              res = session.get(
+                  "https://www.nseindia.com/resources/exchange-communication-holidays",
+                  headers=headers,
+                  timeout=30
+              )
+
+              html = res.text
+
+              raw_dates = re.findall(r'\b\d{1,2}-[A-Za-z]{3}-\d{4}\b', html)
+
+              holiday_dates = set()
+              for d in raw_dates:
+                  try:
+                      holiday_dates.add(datetime.strptime(d, "%d-%b-%Y").date())
+                  except:
+                      pass
+
+              if today in holiday_dates:
+                  print(f"⏭️ Market closed today ({today}) - NSE holiday.")
+                  sys.exit(0)
+
+              print(f"✅ Market open today ({today})")
+
+          except Exception as e:
+              print(f"⚠️ Holiday check failed: {e}")
+              sys.exit(0)
+          PY
+
+      # -------------------------------
+      # RUN SCRIPT
+      # -------------------------------
+      - name: Run Live Screen Script
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+        run: |
+          python livescreen.py

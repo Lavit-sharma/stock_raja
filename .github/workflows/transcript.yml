@@ -4,9 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: ''
+        description: 'YouTube URL'
         required: true
-        default: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
 
 jobs:
   run-transcript:
@@ -20,19 +19,18 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-          cache: "pip"
+          # REMOVED cache: "pip" to ensure a fresh, working installation
 
-      - name: Install Dependencies
+      - name: Clean Install Dependencies
         run: |
-          pip install mysql-connector-python youtube-transcript-api
+          pip install --upgrade pip
+          pip install --no-cache-dir mysql-connector-python youtube-transcript-api
 
-      - name: Run Transcript Script
+      - name: Run Script
         env:
-          # Using your existing Database Secrets
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
         run: |
-          # Passing the URL from the manual input to the python script
           python transcript_downloader.py "${{ github.event.inputs.video_url }}"

@@ -3,7 +3,7 @@ import re
 import sys
 import time
 import mysql.connector
-from youtube_transcript_api import YouTubeTranscriptApi
+import youtube_transcript_api # Import the module directly
 
 # ---------------- CONFIG ---------------- #
 DB_CONFIG = {
@@ -52,14 +52,13 @@ def run_transcript_job(video_url):
     try:
         log(f"🔍 Searching transcript for: {video_id}")
         
-        # FIX: Explicitly calling the class method
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'hi'])
+        # Using the module level call to avoid class attribute errors
+        transcript_list = youtube_transcript_api.YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'hi'])
         full_text = " ".join([entry['text'] for entry in transcript_list])
 
         conn = db.get_conn()
         cursor = conn.cursor()
 
-        # Ensure table exists
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS transcript (
                 id INT AUTO_INCREMENT PRIMARY KEY,

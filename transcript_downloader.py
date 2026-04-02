@@ -15,7 +15,7 @@ DB_CONFIG = {
     "autocommit": True
 }
 
-# Ensure this file is in your repository root
+# The filename expected in the root directory
 COOKIES_FILE = "cookies.txt"
 
 def log(msg):
@@ -55,19 +55,25 @@ def run_transcript_job(video_url):
     try:
         log(f"🔍 Fetching transcript for ID: {video_id}")
 
-        # ✅ FIXED: Use cookies to bypass GitHub Actions IP block
-        if os.path.exists(COOKIES_FILE):
-            log(f"🍪 Found {COOKIES_FILE}, using for authentication...")
-            transcript_list = YouTubeTranscriptApi.get_transcript(
-                video_id, 
-                languages=['en', 'hi'], 
-                cookies=COOKIES_FILE
-            )
+        # ✅ FIX: Using the correct method and parameter structure
+        proxy_cookies = COOKIES_FILE if os.path.exists(COOKIES_FILE) else None
+        
+        if proxy_cookies:
+            log(f"🍪 Loading {COOKIES_FILE}...")
         else:
-            log("⚠️ Warning: cookies.txt not found. This will likely fail on GitHub Actions.")
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'hi'])
+            log("⚠️ No cookies.txt found. This will likely fail on GitHub IPs.")
 
-        full_text = " ".join([entry['text'] for entry in transcript_list])
+        # Fetch the transcript list
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=proxy_cookies)
+        
+        # Try to find Hindi first, then English, then any available
+        try:
+            transcript = transcript_list.find_transcript(['hi', 'en'])
+        except:
+            transcript = transcript_list.find_generated_transcript(['hi', 'en'])
+
+        data = transcript.fetch()
+        full_text = " ".join([entry['text'] for entry in data])
 
         conn = db.get_conn()
         cursor = conn.cursor()

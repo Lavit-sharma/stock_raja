@@ -26,10 +26,12 @@ jobs:
           pip install --no-cache-dir mysql-connector-python youtube-transcript-api==1.2.4
 
       - name: Create Cookies File
-        # This fixes your "echo "" > cookies.txt" issue by using the actual secret
+        # Use a heredoc to ensure the content is written exactly as it appears in the secret
         run: |
-          echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
-          # Verify the file is not empty in logs (hidden if secret is masked)
+          cat <<EOF > cookies.txt
+          ${{ secrets.YOUTUBE_COOKIES }}
+          EOF
+          # Check if the file was actually created and has size
           ls -l cookies.txt
 
       - name: Run Transcript Bot

@@ -36,7 +36,6 @@ CHART_WAIT_SEC = 25
 POST_LOAD_SLEEP = 4
 
 def log(msg):
-    # Forced flush ensures logs appear in real-time in GitHub Actions
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 def get_hash(symbol, change_val):
@@ -64,7 +63,7 @@ class DBManager:
                 if attempt == self.retry_limit:
                     log("❌ Max retries reached. Check your 'Remote MySQL' settings in your hosting panel and ensure '%' is whitelisted.")
                     raise
-                time.sleep(5) # Wait before retrying
+                time.sleep(5)
 
     def get_conn(self):
         try:
@@ -83,7 +82,6 @@ def get_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-    # Mask automation to prevent TradingView blocks
     opts.add_argument("--disable-blink-features=AutomationControlled")
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
 
@@ -92,22 +90,18 @@ def main():
     driver = None
 
     try:
-        # 1. Initial Connection Test
         db.connect()
 
-        # 2. Google Sheets Setup
         log("📄 Accessing Google Sheets...")
         creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
         gc = gspread.service_account_from_dict(creds)
         ws = gc.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
         
-        # Load all rows and map Symbol (Col 0) to Day URL (Col 3)
         sheet_data = ws.get_all_values()
         log(f"📊 Sheet Loaded: {len(sheet_data)} rows found.")
         df_sheet = pd.DataFrame(sheet_data[1:])
         url_map = dict(zip(df_sheet[0].str.strip().str.upper(), df_sheet[3]))
 
-        # 3. Fetch Triggered Stocks
         conn = db.get_conn()
         cur = conn.cursor(dictionary=True)
         log(f"🔍 Querying `{SOURCE_TABLE}` for stocks >= {CHANGE_THRESHOLD}%...")
@@ -122,7 +116,13 @@ def main():
 
         log(f"🚀 Found {len(triggered_stocks)} target stocks.")
 
-        # 4. Browser Initialization
+        # 🧹 TRUNCATE TABLE BEFORE INSERTING NEW DATA
+        conn = db.get_conn()
+        cur = conn.cursor()
+        log(f"🧹 Truncating `{TARGET_TABLE}` before inserting new data...")
+        cur.execute(f"TRUNCATE TABLE `{TARGET_TABLE}`")
+        cur.close()
+
         driver = get_driver()
         driver.get("https://www.tradingview.com/")
         time.sleep(2)
@@ -134,7 +134,6 @@ def main():
         driver.refresh()
         log("✅ Session Authenticated.")
 
-        # 5. Optimized Capture Loop
         success_count = 0
         for stock in triggered_stocks:
             symbol = str(stock['Symbol']).strip().upper()
@@ -144,7 +143,6 @@ def main():
             if not day_url or "tradingview.com" not in day_url:
                 continue
 
-            # Verify if already captured (Deduplication)
             new_hash = get_hash(symbol, change_val)
             conn = db.get_conn()
             cur = conn.cursor()
@@ -156,12 +154,10 @@ def main():
                 log(f"⏭️  Skipping {symbol}: Already captured at {change_val}%")
                 continue
 
-            # Process Screenshot
             try:
                 log(f"📸 Processing: {symbol} at {change_val}%")
                 driver.get(day_url)
                 
-                # Wait for chart to be visible
                 WebDriverWait(driver, CHART_WAIT_SEC).until(
                     EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
                 )
@@ -169,7 +165,6 @@ def main():
                 
                 img_data = driver.get_screenshot_as_png()
 
-                # Insert into DB
                 conn = db.get_conn()
                 cur = conn.cursor()
                 sql = f"""INSERT INTO `{TARGET_TABLE}` 

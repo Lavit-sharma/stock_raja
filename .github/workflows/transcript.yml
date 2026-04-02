@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: 'YouTube URL'
+        description: 'YouTube Video URL'
         required: true
 
 jobs:
@@ -19,14 +19,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-          # REMOVED cache: "pip" to ensure a fresh, working installation
+          # NO CACHE - Forces a clean environment every run
 
-      - name: Clean Install Dependencies
+      - name: Clean Install Libraries
         run: |
           pip install --upgrade pip
-          pip install --no-cache-dir mysql-connector-python youtube-transcript-api
+          # Use --no-cache-dir to prevent picking up broken local copies
+          pip install --no-cache-dir mysql-connector-python youtube-transcript-api==1.2.4
 
-      - name: Run Script
+      - name: Run Transcript Bot
         env:
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_USER: ${{ secrets.DB_USER }}

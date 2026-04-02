@@ -35,4 +35,4 @@ jobs:
           DB_NAME: ${{ secrets.DB_NAME }}
         run: |
           # Passing the URL from the manual input to the python script
-          python transcript.py "${{ github.event.inputs.video_url }}"
+          python transcript_downloader.py "${{ github.event.inputs.video_url }}"

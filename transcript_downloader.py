@@ -15,7 +15,6 @@ DB_CONFIG = {
     "autocommit": True
 }
 
-# The filename expected in the root directory
 COOKIES_FILE = "cookies.txt"
 
 def log(msg):
@@ -55,23 +54,20 @@ def run_transcript_job(video_url):
     try:
         log(f"🔍 Fetching transcript for ID: {video_id}")
 
-        # ✅ FIX: Using the correct method and parameter structure
-        proxy_cookies = COOKIES_FILE if os.path.exists(COOKIES_FILE) else None
+        # Use an instance of the API to access methods correctly
+        api = YouTubeTranscriptApi()
         
-        if proxy_cookies:
+        # Check if cookies file is non-empty
+        if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 10:
             log(f"🍪 Loading {COOKIES_FILE}...")
+            # For version 1.2.4, use the instance method
+            transcript_list = api.list_transcripts(video_id, cookies=COOKIES_FILE)
         else:
-            log("⚠️ No cookies.txt found. This will likely fail on GitHub IPs.")
-
-        # Fetch the transcript list
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=proxy_cookies)
+            log("⚠️ No valid cookies.txt found. Attempting without cookies...")
+            transcript_list = api.list_transcripts(video_id)
         
-        # Try to find Hindi first, then English, then any available
-        try:
-            transcript = transcript_list.find_transcript(['hi', 'en'])
-        except:
-            transcript = transcript_list.find_generated_transcript(['hi', 'en'])
-
+        # Try finding Hindi or English
+        transcript = transcript_list.find_transcript(['hi', 'en'])
         data = transcript.fetch()
         full_text = " ".join([entry['text'] for entry in data])
 
@@ -95,7 +91,7 @@ def run_transcript_job(video_url):
         """
         cursor.execute(sql, (video_id, video_url, full_text))
 
-        log("🚀 Transcript saved/updated successfully.")
+        log("🚀 Transcript saved successfully.")
         cursor.close()
 
     except Exception as e:

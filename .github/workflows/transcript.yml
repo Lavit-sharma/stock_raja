@@ -1,0 +1,38 @@
+name: YouTube Transcript Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: ''
+        required: true
+        default: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+
+jobs:
+  run-transcript:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          pip install mysql-connector-python youtube-transcript-api
+
+      - name: Run Transcript Script
+        env:
+          # Using your existing Database Secrets
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+        run: |
+          # Passing the URL from the manual input to the python script
+          python transcript.py "${{ github.event.inputs.video_url }}"

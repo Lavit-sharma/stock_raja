@@ -15,6 +15,9 @@ DB_CONFIG = {
     "autocommit": True
 }
 
+# Ensure this file is in your repository root
+COOKIES_FILE = "cookies.txt"
+
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -52,11 +55,17 @@ def run_transcript_job(video_url):
     try:
         log(f"🔍 Fetching transcript for ID: {video_id}")
 
-        api = YouTubeTranscriptApi()
-
-        # ✅ NEW API METHOD (FIXED)
-        transcript = api.fetch(video_id, languages=['en', 'hi'])
-        transcript_list = transcript.to_raw_data()
+        # ✅ FIXED: Use cookies to bypass GitHub Actions IP block
+        if os.path.exists(COOKIES_FILE):
+            log(f"🍪 Found {COOKIES_FILE}, using for authentication...")
+            transcript_list = YouTubeTranscriptApi.get_transcript(
+                video_id, 
+                languages=['en', 'hi'], 
+                cookies=COOKIES_FILE
+            )
+        else:
+            log("⚠️ Warning: cookies.txt not found. This will likely fail on GitHub Actions.")
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'hi'])
 
         full_text = " ".join([entry['text'] for entry in transcript_list])
 
@@ -81,7 +90,6 @@ def run_transcript_job(video_url):
         cursor.execute(sql, (video_id, video_url, full_text))
 
         log("🚀 Transcript saved/updated successfully.")
-
         cursor.close()
 
     except Exception as e:

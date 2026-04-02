@@ -51,13 +51,13 @@ def run_transcript_job(video_url):
 
     try:
         log(f"🔍 Fetching transcript for ID: {video_id}")
-        
-        # FIX: Instantiate the API class first
+
         api = YouTubeTranscriptApi()
-        
-        # Use the fetch method which is the most stable in recent versions
-        # This automatically handles English/Hindi based on availability
-        transcript_list = api.get_transcript(video_id, languages=['en', 'hi'])
+
+        # ✅ NEW API METHOD (FIXED)
+        transcript = api.fetch(video_id, languages=['en', 'hi'])
+        transcript_list = transcript.to_raw_data()
+
         full_text = " ".join([entry['text'] for entry in transcript_list])
 
         conn = db.get_conn()
@@ -73,13 +73,14 @@ def run_transcript_job(video_url):
             )
         """)
 
-        sql = "INSERT IGNORE INTO transcript (video_id, video_url, content) VALUES (%s, %s, %s)"
+        sql = """
+            INSERT INTO transcript (video_id, video_url, content)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE content = VALUES(content)
+        """
         cursor.execute(sql, (video_id, video_url, full_text))
-        
-        if cursor.rowcount > 0:
-            log(f"🚀 Success! Transcript saved.")
-        else:
-            log(f"ℹ️ Already exists in DB. Skipping.")
+
+        log("🚀 Transcript saved/updated successfully.")
 
         cursor.close()
 

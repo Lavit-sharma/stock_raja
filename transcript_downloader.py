@@ -3,7 +3,7 @@ import re
 import sys
 import time
 import mysql.connector
-import youtube_transcript_api # Import the module directly
+import youtube_transcript_api
 
 # ---------------- CONFIG ---------------- #
 DB_CONFIG = {
@@ -52,8 +52,10 @@ def run_transcript_job(video_url):
     try:
         log(f"🔍 Searching transcript for: {video_id}")
         
-        # Using the module level call to avoid class attribute errors
-        transcript_list = youtube_transcript_api.YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'hi'])
+        # CHANGED: Explicit call using the module's instance
+        loader = youtube_transcript_api.YouTubeTranscriptApi
+        transcript_list = loader.get_transcript(video_id, languages=['hi', 'en'])
+        
         full_text = " ".join([entry['text'] for entry in transcript_list])
 
         conn = db.get_conn()
@@ -80,11 +82,10 @@ def run_transcript_job(video_url):
         cursor.close()
 
     except Exception as e:
-        log(f"⚠️ Error occurred: {str(e)}")
+        log(f"⚠️ Error: {str(e)}")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        input_url = sys.argv[1]
-        run_transcript_job(input_url)
+        run_transcript_job(sys.argv[1])
     else:
-        log("❌ No URL provided. Usage: python script.py <URL>")
+        log("❌ No URL provided.")

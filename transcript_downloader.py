@@ -54,20 +54,24 @@ def run_transcript_job(video_url):
     try:
         log(f"🔍 Fetching transcript for ID: {video_id}")
 
-        # Use an instance of the API to access methods correctly
-        api = YouTubeTranscriptApi()
-        
-        # Check if cookies file is non-empty
-        if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 10:
+        # Check if cookies file exists and has content
+        proxy_cookies = None
+        if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0:
             log(f"🍪 Loading {COOKIES_FILE}...")
-            # For version 1.2.4, use the instance method
-            transcript_list = api.list_transcripts(video_id, cookies=COOKIES_FILE)
+            proxy_cookies = COOKIES_FILE
         else:
             log("⚠️ No valid cookies.txt found. Attempting without cookies...")
-            transcript_list = api.list_transcripts(video_id)
+
+        # FIXED API CALL: In 1.2.4, use the class method directly
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=proxy_cookies)
         
-        # Try finding Hindi or English
-        transcript = transcript_list.find_transcript(['hi', 'en'])
+        try:
+            # Prefer Hindi, fallback to English
+            transcript = transcript_list.find_transcript(['hi', 'en'])
+        except:
+            # Fallback to any available (including auto-generated)
+            transcript = transcript_list.find_generated_transcript(['hi', 'en'])
+
         data = transcript.fetch()
         full_text = " ".join([entry['text'] for entry in data])
 

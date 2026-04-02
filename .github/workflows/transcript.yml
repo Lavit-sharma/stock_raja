@@ -20,14 +20,17 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Clean Install Libraries
+      - name: Install Libraries
         run: |
           pip install --upgrade pip
-          pip install --no-cache-dir mysql-connector-python youtube-transcript-api
+          pip install --no-cache-dir mysql-connector-python youtube-transcript-api==1.2.4
 
       - name: Create Cookies File
-        # This step converts your secret into a physical file the Python script can read
-        run: echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
+        # This fixes your "echo "" > cookies.txt" issue by using the actual secret
+        run: |
+          echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
+          # Verify the file is not empty in logs (hidden if secret is masked)
+          ls -l cookies.txt
 
       - name: Run Transcript Bot
         env:

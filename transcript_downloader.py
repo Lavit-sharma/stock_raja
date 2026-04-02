@@ -3,7 +3,7 @@ import re
 import sys
 import time
 import mysql.connector
-import youtube_transcript_api
+from youtube_transcript_api import YouTubeTranscriptApi
 
 # ---------------- CONFIG ---------------- #
 DB_CONFIG = {
@@ -26,7 +26,7 @@ class DBManager:
     def connect(self):
         try:
             self.conn = mysql.connector.connect(**self.config)
-            log("✅ Connected to WordPress Database.")
+            log("✅ Connected to Database.")
         except mysql.connector.Error as err:
             log(f"❌ Connection Failed: {err}")
             raise
@@ -46,16 +46,18 @@ def run_transcript_job(video_url):
     video_id = extract_video_id(video_url)
 
     if not video_id:
-        log(f"❌ Invalid YouTube URL: {video_url}")
+        log(f"❌ Invalid URL: {video_url}")
         return
 
     try:
-        log(f"🔍 Searching transcript for: {video_id}")
+        log(f"🔍 Fetching transcript for ID: {video_id}")
         
-        # CHANGED: Explicit call using the module's instance
-        loader = youtube_transcript_api.YouTubeTranscriptApi
-        transcript_list = loader.get_transcript(video_id, languages=['hi', 'en'])
+        # FIX: Instantiate the API class first
+        api = YouTubeTranscriptApi()
         
+        # Use the fetch method which is the most stable in recent versions
+        # This automatically handles English/Hindi based on availability
+        transcript_list = api.get_transcript(video_id, languages=['en', 'hi'])
         full_text = " ".join([entry['text'] for entry in transcript_list])
 
         conn = db.get_conn()
@@ -75,14 +77,14 @@ def run_transcript_job(video_url):
         cursor.execute(sql, (video_id, video_url, full_text))
         
         if cursor.rowcount > 0:
-            log(f"🚀 Success! Transcript saved for {video_id}")
+            log(f"🚀 Success! Transcript saved.")
         else:
-            log(f"ℹ️ Video {video_id} already exists. Skipping.")
+            log(f"ℹ️ Already exists in DB. Skipping.")
 
         cursor.close()
 
     except Exception as e:
-        log(f"⚠️ Error: {str(e)}")
+        log(f"⚠️ Error Detail: {str(e)}")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:

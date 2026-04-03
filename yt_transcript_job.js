@@ -1,4 +1,4 @@
-const { YoutubeTranscript } = require('youtube-transcript');
+const { YoutubeTranscript } = require('youtube-transcript-api');
 const mysql = require('mysql2/promise');
 
 // ---------------- CONFIG ---------------- //
@@ -26,7 +26,7 @@ async function runTranscriptJob(videoUrl) {
     try {
         log(`🔍 Fetching transcript for ID: ${videoId}`);
         
-        // Use the library's fetchTranscript method
+        // This library uses the static fetchTranscript method
         const transcriptData = await YoutubeTranscript.fetchTranscript(videoId);
         
         if (!transcriptData || transcriptData.length === 0) {

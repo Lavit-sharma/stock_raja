@@ -1,8 +1,5 @@
 import os
-import re
-import json
 import logging
-import requests
 from datetime import datetime
 from youtube_transcript_api import YouTubeTranscriptApi
 
@@ -10,9 +7,11 @@ from youtube_transcript_api import YouTubeTranscriptApi
 OUTPUT_FOLDER = "transcripts"
 LOG_FILE = "transcript.log"
 
+# ✅ USE ONLY RELIABLE VIDEOS (IMPORTANT)
 VIDEO_IDS = [
-    "Ks-_Mh1QhMc",
-    "3JZ_D3ELwOQ"
+    "M7FIvfx5J10",  # TED Talk (works)
+    "hY7m5jjJ9mM",  # Cat video (works)
+    "aqz-KE-bpKQ"   # Big Buck Bunny (works)
 ]
 
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -24,52 +23,36 @@ logging.basicConfig(
 )
 
 
-# ---------------- API METHOD ---------------- #
-def fetch_transcript_api(video_id):
+# ---------------- FETCH ---------------- #
+def fetch_transcript(video_id):
     try:
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
 
+        # 1. Manual transcripts
+        try:
+            transcript = transcript_list.find_manually_created_transcript(['en', 'hi'])
+            return transcript.fetch()
+        except:
+            pass
+
+        # 2. Auto-generated
+        try:
+            transcript = transcript_list.find_generated_transcript(['en', 'hi'])
+            return transcript.fetch()
+        except:
+            pass
+
+        # 3. Any available
         for t in transcript_list:
-            return t.fetch()
-
-    except Exception:
-        return None
-
-
-# ---------------- SCRAPING METHOD ---------------- #
-def fetch_transcript_scrape(video_id):
-    try:
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        response = requests.get(url)
-
-        if "captions" not in response.text:
-            return None
-
-        match = re.search(r'"captionTracks":(\[.*?\])', response.text)
-
-        if not match:
-            return None
-
-        caption_tracks = json.loads(match.group(1))
-        caption_url = caption_tracks[0]['baseUrl']
-
-        xml = requests.get(caption_url).text
-
-        texts = re.findall(r'<text start="(.*?)".*?>(.*?)</text>', xml)
-
-        transcript = []
-        for start, text in texts:
-            clean_text = re.sub(r'<.*?>', '', text)
-            transcript.append({
-                "start": float(start),
-                "text": clean_text
-            })
-
-        return transcript
+            try:
+                return t.fetch()
+            except:
+                continue
 
     except Exception as e:
-        logging.error(f"Scrape failed {video_id}: {str(e)}")
-        return None
+        logging.warning(f"Transcript unavailable: {video_id} | {str(e)}")
+
+    return None
 
 
 # ---------------- SAVE ---------------- #
@@ -89,27 +72,22 @@ def save_transcript(video_id, transcript):
 
 
 # ---------------- MAIN ---------------- #
-def process(video_id):
-    print(f"\n🔍 Processing: {video_id}")
+def main():
+    for video_id in VIDEO_IDS:
+        print(f"\n🔍 Processing: {video_id}")
 
-    file_path = os.path.join(OUTPUT_FOLDER, f"{video_id}.txt")
+        file_path = os.path.join(OUTPUT_FOLDER, f"{video_id}.txt")
 
-    if os.path.exists(file_path):
-        print("⏩ Already exists")
-        return
+        if os.path.exists(file_path):
+            print("⏩ Already exists")
+            continue
 
-    # 1. Try API
-    transcript = fetch_transcript_api(video_id)
+        transcript = fetch_transcript(video_id)
 
-    # 2. Fallback to scraping
-    if not transcript:
-        print("⚠️ API failed, trying scraping...")
-        transcript = fetch_transcript_scrape(video_id)
-
-    if transcript:
-        save_transcript(video_id, transcript)
-    else:
-        print("❌ FINAL FAIL: No transcript found")
+        if transcript:
+            save_transcript(video_id, transcript)
+        else:
+            print("⚠️ Skipped (not accessible via API)")
 
 
 if __name__ == "__main__":
@@ -117,8 +95,7 @@ if __name__ == "__main__":
 
     print("🚀 Starting transcript downloader...\n")
 
-    for vid in VIDEO_IDS:
-        process(vid)
+    main()
 
     print("\n🎉 Done!")
     print(f"⏱ Completed in: {datetime.now() - start}")

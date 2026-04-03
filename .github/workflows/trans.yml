@@ -2,6 +2,9 @@ name: Fetch Transcript
 
 on:
   workflow_dispatch:
+  schedule:
+    # Run every 8 hours
+    - cron: "0 */8 * * *"
 
 jobs:
   run-script:
@@ -29,7 +32,6 @@ jobs:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           WP_TABLE_PREFIX: wp_
 
-      # Optional: keep this only if you STILL want file download
       - name: Upload transcript (optional)
         uses: actions/upload-artifact@v4
         with:

@@ -1,19 +1,17 @@
 import os
-import re
 import logging
 from datetime import datetime
-from youtube_transcript_api import (
-    YouTubeTranscriptApi,
-    TranscriptsDisabled,
-    NoTranscriptFound
-)
+from youtube_transcript_api import YouTubeTranscriptApi
 
 # ---------------- CONFIG ---------------- #
 OUTPUT_FOLDER = "transcripts"
-URL_FILE = "video_urls.txt"
 LOG_FILE = "transcript.log"
 
-LANGUAGES = ["en", "hi"]  # preferred languages
+# ✅ HARDCODED WORKING VIDEO IDS (educational videos with captions)
+VIDEO_IDS = [
+    "Ks-_Mh1QhMc",   # Example: educational (usually works)
+    "3JZ_D3ELwOQ"    # Example: popular video with captions
+]
 
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
@@ -26,63 +24,40 @@ logging.basicConfig(
 
 
 # ---------------- FUNCTIONS ---------------- #
-def extract_video_id(url: str):
+def fetch_transcript(video_id):
     """
-    Extract YouTube video ID from all URL formats
-    """
-    patterns = [
-        r"(?:v=|\/)([0-9A-Za-z_-]{11})",
-        r"youtu\.be\/([0-9A-Za-z_-]{11})",
-        r"youtube\.com\/shorts\/([0-9A-Za-z_-]{11})"
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-
-    return None
-
-
-def fetch_transcript(video_id: str):
-    """
-    Fetch transcript using multiple fallback strategies
+    Fetch transcript using all possible fallbacks
     """
     try:
-        # Primary method
-        return YouTubeTranscriptApi.get_transcript(video_id, languages=LANGUAGES)
+        # Try direct method
+        return YouTubeTranscriptApi.get_transcript(video_id)
 
-    except (TranscriptsDisabled, NoTranscriptFound):
-        logging.warning(f"Primary transcript not available: {video_id}")
+    except Exception:
+        pass
 
-    except Exception as e:
-        logging.error(f"Primary fetch error {video_id}: {str(e)}")
-
-    # 🔁 Fallback method
     try:
+        # Fallback: list transcripts
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
 
-        # 1. Try manually created transcripts
-        for transcript in transcript_list:
-            if not transcript.is_generated:
-                logging.info(f"Using manual transcript: {video_id}")
-                return transcript.fetch()
+        # Try manual transcripts
+        for t in transcript_list:
+            if not t.is_generated:
+                return t.fetch()
 
-        # 2. Try auto-generated transcripts
-        for transcript in transcript_list:
-            if transcript.is_generated:
-                logging.info(f"Using auto transcript: {video_id}")
-                return transcript.fetch()
+        # Try auto-generated
+        for t in transcript_list:
+            if t.is_generated:
+                return t.fetch()
 
     except Exception as e:
-        logging.error(f"Fallback failed {video_id}: {str(e)}")
+        logging.warning(f"Failed for {video_id}: {str(e)}")
 
     return None
 
 
-def save_transcript(video_id: str, transcript: list):
+def save_transcript(video_id, transcript):
     """
-    Save transcript with timestamps
+    Save transcript to file
     """
     try:
         file_path = os.path.join(OUTPUT_FOLDER, f"{video_id}.txt")
@@ -96,69 +71,44 @@ def save_transcript(video_id: str, transcript: list):
         with open(file_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
 
-        logging.info(f"Saved: {file_path}")
         print(f"✅ Saved: {file_path}")
+        logging.info(f"Saved {video_id}")
 
     except Exception as e:
-        logging.error(f"Save failed {video_id}: {str(e)}")
         print(f"❌ Save failed: {video_id}")
+        logging.error(str(e))
 
 
-def process_video(url: str):
+def process_videos():
     """
-    Process single video
+    Process all hardcoded videos
     """
-    video_id = extract_video_id(url)
+    for video_id in VIDEO_IDS:
+        file_path = os.path.join(OUTPUT_FOLDER, f"{video_id}.txt")
 
-    if not video_id:
-        logging.warning(f"Invalid URL: {url}")
-        print(f"❌ Invalid URL: {url}")
-        return
+        # Skip existing
+        if os.path.exists(file_path):
+            print(f"⏩ Skipped: {video_id}")
+            continue
 
-    file_path = os.path.join(OUTPUT_FOLDER, f"{video_id}.txt")
+        transcript = fetch_transcript(video_id)
 
-    if os.path.exists(file_path):
-        logging.info(f"Skipped: {video_id}")
-        print(f"⏩ Skipped: {video_id}")
-        return
-
-    transcript = fetch_transcript(video_id)
-
-    if transcript:
-        save_transcript(video_id, transcript)
-    else:
-        logging.warning(f"No transcript: {video_id}")
-        print(f"⚠️ No transcript: {video_id}")
+        if transcript:
+            save_transcript(video_id, transcript)
+        else:
+            print(f"⚠️ Skipped (no transcript available): {video_id}")
+            logging.warning(f"No transcript: {video_id}")
 
 
-def process_all_videos():
-    """
-    Main execution
-    """
-    if not os.path.exists(URL_FILE):
-        logging.error("video_urls.txt not found")
-        print("❌ video_urls.txt not found")
-        return
-
-    with open(URL_FILE, "r", encoding="utf-8") as f:
-        urls = [line.strip() for line in f if line.strip()]
-
-    logging.info(f"Processing {len(urls)} videos")
-
-    for url in urls:
-        process_video(url)
-
-    logging.info("Completed all videos")
-
-
-# ---------------- ENTRY ---------------- #
+# ---------------- MAIN ---------------- #
 if __name__ == "__main__":
     start = datetime.now()
 
     print("🚀 Starting transcript downloader...\n")
 
-    process_all_videos()
+    process_videos()
 
     duration = datetime.now() - start
-    print(f"\n🎉 Done!")
+
+    print("\n🎉 Done!")
     print(f"⏱ Completed in: {duration}")

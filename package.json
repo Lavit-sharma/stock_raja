@@ -1,9 +1,17 @@
 {
-  "name": "stock-raja-transcript",
+  "name": "stock-raja-transcript-bot",
   "version": "1.0.0",
+  "description": "YouTube Transcript to MySQL Downloader",
+  "main": "yt_transcript_job.js",
+  "scripts": {
+    "start": "node yt_transcript_job.js"
+  },
   "dependencies": {
-    "youtube-transcript-api": "^1.1.1",
+    "dotenv": "^16.4.5",
     "mysql2": "^3.9.2",
-    "dotenv": "^16.4.5"
+    "youtube-transcript-api": "^1.1.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   }
 }

@@ -1,8 +1,5 @@
-const YoutubeTranscriptLib = require('youtube-transcript-api');
+const { YoutubeTranscript } = require('youtube-transcript-api');
 const mysql = require('mysql2/promise');
-
-// Fallback logic to find the correct class regardless of how it was imported
-const YoutubeTranscript = YoutubeTranscriptLib.default || YoutubeTranscriptLib.YoutubeTranscript || YoutubeTranscriptLib;
 
 // ---------------- CONFIG ---------------- //
 const dbConfig = {
@@ -34,15 +31,16 @@ async function runTranscriptJob(videoUrl) {
     try {
         log(`🔍 Fetching transcript for ID: ${videoId}`);
         
-        // Fetching transcript - specify languages if needed, e.g., { lang: 'en' }
+        // FIX: In the Node version, fetchTranscript is a STATIC method 
+        // but it must be called on the class correctly.
         const transcriptData = await YoutubeTranscript.fetchTranscript(videoId);
         
         if (!transcriptData || transcriptData.length === 0) {
-            throw new Error("Transcript is empty or not found.");
+            throw new Error("No transcript data returned.");
         }
 
         const fullText = transcriptData.map(entry => entry.text).join(' ');
-        log(`✅ Fetched ${transcriptData.length} lines. Connecting to DB...`);
+        log(`✅ Fetched ${transcriptData.length} segments.`);
 
         connection = await mysql.createConnection(dbConfig);
 
@@ -64,14 +62,10 @@ async function runTranscriptJob(videoUrl) {
         `;
 
         await connection.execute(sql, [videoId, videoUrl, fullText]);
-
-        log("🚀 SUCCESS: Transcript saved to Database.");
+        log("🚀 Success: Transcript saved to Database.");
 
     } catch (error) {
         log(`❌ ERROR: ${error.message}`);
-        if (error.message.includes('Transcript is disabled')) {
-            log("⚠️ Note: This video does not have transcripts enabled.");
-        }
     } finally {
         if (connection) {
             await connection.end();
@@ -80,10 +74,10 @@ async function runTranscriptJob(videoUrl) {
     }
 }
 
-// Execution
+// Execution logic
 const videoUrl = process.argv[2];
 if (videoUrl) {
     runTranscriptJob(videoUrl);
 } else {
-    log("❌ No URL provided in command arguments.");
+    log("❌ No URL provided.");
 }

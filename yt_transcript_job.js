@@ -31,15 +31,19 @@ async function runTranscriptJob(videoUrl) {
     try {
         log(`🔍 Fetching transcript for ID: ${videoId}`);
         
-        // Fetching transcript
+        // FIX: The library exports YoutubeTranscript with a static fetchTranscript method
         const transcriptData = await YoutubeTranscript.fetchTranscript(videoId);
+        
+        if (!transcriptData || transcriptData.length === 0) {
+            throw new Error("No transcript data found for this video.");
+        }
+
         const fullText = transcriptData.map(entry => entry.text).join(' ');
 
         log("✅ Transcript fetched. Connecting to Database...");
 
         connection = await mysql.createConnection(dbConfig);
 
-        // Ensure table exists
         await connection.execute(`
             CREATE TABLE IF NOT EXISTS transcript (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -62,10 +66,6 @@ async function runTranscriptJob(videoUrl) {
 
     } catch (error) {
         log(`❌ Error: ${error.message}`);
-        // If it's a transcript error, it might be disabled on the video
-        if (error.message.includes('Transcript is disabled')) {
-            log("⚠️ Note: Transcripts are disabled for this specific video.");
-        }
     } finally {
         if (connection) {
             await connection.end();
@@ -74,10 +74,10 @@ async function runTranscriptJob(videoUrl) {
     }
 }
 
-// Execution
-const videoUrl = process.argv[2];
-if (videoUrl) {
-    runTranscriptJob(videoUrl);
+// Get URL from command line arguments
+const args = process.argv.slice(2);
+if (args.length > 0) {
+    runTranscriptJob(args[0]);
 } else {
-    log("❌ No URL provided in arguments.");
+    log("❌ No URL provided.");
 }

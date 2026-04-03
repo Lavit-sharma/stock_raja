@@ -1,8 +1,6 @@
 {
-  "name": "youtube-transcript-bot",
+  "name": "stock-raja-transcript",
   "version": "1.0.0",
-  "description": "Fetch YouTube transcripts and save to MySQL",
-  "main": "yt_transcript_job.js",
   "dependencies": {
     "youtube-transcript-api": "^1.1.1",
     "mysql2": "^3.9.2",

@@ -1,4 +1,4 @@
-youtube-transcript-apirequests==2.31.0
+requests==2.31.0
 beautifulsoup4==4.12.2
 gspread==6.1.0
 google-auth==2.30.0

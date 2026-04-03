@@ -2,6 +2,7 @@ import os
 import requests
 import mysql.connector
 from bs4 import BeautifulSoup
+from datetime import datetime, timezone
 
 # ---------------- CONFIG ---------------- #
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
@@ -31,7 +32,7 @@ def get_channel_id(handle):
 
 
 # ---------------- GET LATEST VIDEOS ---------------- #
-def get_latest_videos(channel_id, max_results=3):
+def get_latest_videos(channel_id, max_results=5):
     url = f"https://www.googleapis.com/youtube/v3/search?key={YOUTUBE_API_KEY}&channelId={channel_id}&part=snippet,id&order=date&maxResults={max_results}"
 
     res = requests.get(url).json()
@@ -41,14 +42,23 @@ def get_latest_videos(channel_id, max_results=3):
         if item["id"]["kind"] == "youtube#video":
             vid = item["id"]["videoId"]
             title = item["snippet"]["title"]
+            published_at = item["snippet"]["publishedAt"]
 
             videos.append({
                 "video_id": vid,
                 "url": f"https://www.youtube.com/watch?v={vid}",
-                "title": title
+                "title": title,
+                "published_at": published_at
             })
 
     return videos
+
+
+# ---------------- CHECK IF TODAY ---------------- #
+def is_today(published_at):
+    video_date = datetime.fromisoformat(published_at.replace("Z", "+00:00")).date()
+    today = datetime.now(timezone.utc).date()
+    return video_date == today
 
 
 # ---------------- FETCH TRANSCRIPT ---------------- #
@@ -61,12 +71,11 @@ def fetch_transcript(video_url):
     soup = BeautifulSoup(res.text, "html.parser")
     blocks = soup.find_all("p")
 
-    transcript = "\n".join([b.get_text(strip=True) for b in blocks])
-    return transcript
+    return "\n".join([b.get_text(strip=True) for b in blocks])
 
 
-# ---------------- CHECK IF EXISTS ---------------- #
-def already_exists(video_id):
+# ---------------- DELETE OLD DATA ---------------- #
+def delete_old_records():
     conn = None
     cursor = None
 
@@ -74,13 +83,18 @@ def already_exists(video_id):
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
 
-        query = f"SELECT id FROM {TABLE_NAME} WHERE video_id = %s LIMIT 1"
-        cursor.execute(query, (video_id,))
+        query = f"""
+        DELETE FROM {TABLE_NAME}
+        WHERE DATE(created_at) < CURDATE()
+        """
 
-        return cursor.fetchone() is not None
+        cursor.execute(query)
+        conn.commit()
 
-    except:
-        return False
+        print("🧹 Old records deleted")
+
+    except Exception as e:
+        print("❌ Delete Error:", e)
 
     finally:
         if cursor:
@@ -101,6 +115,9 @@ def save_to_db(video_id, video_url, title, transcript):
         query = f"""
         INSERT INTO {TABLE_NAME} (video_id, video_url, title, content)
         VALUES (%s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE 
+            title = VALUES(title),
+            content = VALUES(content)
         """
 
         cursor.execute(query, (video_id, video_url, title, transcript))
@@ -120,8 +137,10 @@ def save_to_db(video_id, video_url, title, transcript):
 
 # ---------------- MAIN ---------------- #
 if __name__ == "__main__":
-    print("🔍 Getting channel...")
+    print("🧹 Cleaning old data...")
+    delete_old_records()
 
+    print("🔍 Getting channel...")
     channel_id = get_channel_id(CHANNEL_HANDLE)
 
     if not channel_id:
@@ -129,19 +148,17 @@ if __name__ == "__main__":
         exit()
 
     print("📺 Fetching latest videos...")
-    videos = get_latest_videos(channel_id, max_results=3)  # 🔥 only latest 3
+    videos = get_latest_videos(channel_id)
 
     for video in videos:
+        if not is_today(video["published_at"]):
+            continue  # ❌ skip old videos
+
         video_id = video["video_id"]
         url = video["url"]
         title = video["title"]
 
-        print(f"\n🚀 Processing: {title}")
-
-        # ✅ Skip if already stored
-        if already_exists(video_id):
-            print("⏭ Already exists, skipping...")
-            continue
+        print(f"\n🚀 Processing today's video: {title}")
 
         transcript = fetch_transcript(url)
 

@@ -3,17 +3,7 @@ import re
 import sys
 import time
 import mysql.connector
-
-# --- CONFLICT CHECK ---
-try:
-    from youtube_transcript_api import YouTubeTranscriptApi
-    import youtube_transcript_api
-    # This checks if the file being loaded is the real library or your own file
-    if "site-packages" not in youtube_transcript_api.__file__ and "lib" not in youtube_transcript_api.__file__:
-        print(f"⚠️ WARNING: Conflict detected! Loading from: {youtube_transcript_api.__file__}")
-except ImportError:
-    print("❌ ERROR: youtube-transcript-api is not installed.")
-    sys.exit(1)
+from youtube_transcript_api import YouTubeTranscriptApi
 
 # ---------------- CONFIG ---------------- #
 DB_CONFIG = {
@@ -30,30 +20,13 @@ COOKIES_FILE = "cookies.txt"
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
-class DBManager:
-    def __init__(self, config):
-        self.config = config
-        self.conn = None
-
-    def get_conn(self):
-        if not self.conn or not self.conn.is_connected():
-            try:
-                self.conn = mysql.connector.connect(**self.config)
-                log("✅ Connected to Database.")
-            except Exception as e:
-                log(f"❌ DB Connection Error: {e}")
-                raise
-        return self.conn
-
 def extract_video_id(url):
     pattern = r'(?:v=|\/)([0-9A-Za-z_-]{11}).*'
     match = re.search(pattern, url)
     return match.group(1) if match else None
 
 def run_transcript_job(video_url):
-    db = DBManager(DB_CONFIG)
     video_id = extract_video_id(video_url)
-
     if not video_id:
         log(f"❌ Invalid URL: {video_url}")
         return
@@ -66,7 +39,7 @@ def run_transcript_job(video_url):
             log(f"🍪 Using cookies from {COOKIES_FILE}")
             proxy_cookies = COOKIES_FILE
 
-        # Using the standard method with language fallbacks
+        # Using the class method with language list
         data = YouTubeTranscriptApi.get_transcript(
             video_id, 
             languages=['hi', 'en'], 
@@ -75,7 +48,8 @@ def run_transcript_job(video_url):
         
         full_text = " ".join([entry['text'] for entry in data])
 
-        conn = db.get_conn()
+        # Database logic
+        conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -94,12 +68,13 @@ def run_transcript_job(video_url):
             ON DUPLICATE KEY UPDATE content = VALUES(content)
         """
         cursor.execute(sql, (video_id, video_url, full_text))
-
+        
         log("🚀 Transcript saved successfully.")
         cursor.close()
+        conn.close()
 
     except Exception as e:
-        log(f"❌ Operation Failed: {str(e)}")
+        log(f"❌ Error Detail: {str(e)}")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:

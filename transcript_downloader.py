@@ -25,17 +25,10 @@ class DBManager:
         self.config = config
         self.conn = None
 
-    def connect(self):
-        try:
-            self.conn = mysql.connector.connect(**self.config)
-            log("✅ Connected to Database.")
-        except mysql.connector.Error as err:
-            log(f"❌ Connection Failed: {err}")
-            raise
-
     def get_conn(self):
         if not self.conn or not self.conn.is_connected():
-            self.connect()
+            self.conn = mysql.connector.connect(**self.config)
+            log("✅ Connected to Database.")
         return self.conn
 
 def extract_video_id(url):
@@ -56,28 +49,17 @@ def run_transcript_job(video_url):
 
         proxy_cookies = None
         if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0:
-            log(f"🍪 Loading {COOKIES_FILE}...")
+            log(f"🍪 Using cookies from {COOKIES_FILE}")
             proxy_cookies = COOKIES_FILE
-        else:
-            log("⚠️ No valid cookies.txt found. Attempting without cookies...")
 
-        # FIX: Ensure we are using the correct method call for the library
-        # Some versions require cookies to be passed via list_transcripts
-        try:
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=proxy_cookies)
-        except AttributeError:
-            # Fallback if the specific version installed handles cookies differently
-            log("🔄 Method list_transcripts failed, trying alternative...")
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-
-        try:
-            # Prefer Hindi, fallback to English
-            transcript = transcript_list.find_transcript(['hi', 'en'])
-        except:
-            # Fallback to any available (including auto-generated)
-            transcript = transcript_list.find_generated_transcript(['hi', 'en'])
-
-        data = transcript.fetch()
+        # SIMPLIFIED: Direct fetch with language preference
+        # This bypasses the 'list_transcripts' attribute issue
+        data = YouTubeTranscriptApi.get_transcript(
+            video_id, 
+            languages=['hi', 'en'], 
+            cookies=proxy_cookies
+        )
+        
         full_text = " ".join([entry['text'] for entry in data])
 
         conn = db.get_conn()
@@ -104,7 +86,7 @@ def run_transcript_job(video_url):
         cursor.close()
 
     except Exception as e:
-        log(f"❌ Error Detail: {str(e)}")
+        log(f"❌ Operation Failed: {str(e)}")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:

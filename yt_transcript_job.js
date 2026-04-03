@@ -1,5 +1,8 @@
-const { YoutubeTranscript } = require('youtube-transcript-api');
+const YoutubeTranscriptLib = require('youtube-transcript-api');
 const mysql = require('mysql2/promise');
+
+// Fallback logic to find the correct class regardless of how it was imported
+const YoutubeTranscript = YoutubeTranscriptLib.default || YoutubeTranscriptLib.YoutubeTranscript || YoutubeTranscriptLib;
 
 // ---------------- CONFIG ---------------- //
 const dbConfig = {
@@ -31,19 +34,19 @@ async function runTranscriptJob(videoUrl) {
     try {
         log(`🔍 Fetching transcript for ID: ${videoId}`);
         
-        // FIX: The library exports YoutubeTranscript with a static fetchTranscript method
+        // Fetching transcript - specify languages if needed, e.g., { lang: 'en' }
         const transcriptData = await YoutubeTranscript.fetchTranscript(videoId);
         
         if (!transcriptData || transcriptData.length === 0) {
-            throw new Error("No transcript data found for this video.");
+            throw new Error("Transcript is empty or not found.");
         }
 
         const fullText = transcriptData.map(entry => entry.text).join(' ');
-
-        log("✅ Transcript fetched. Connecting to Database...");
+        log(`✅ Fetched ${transcriptData.length} lines. Connecting to DB...`);
 
         connection = await mysql.createConnection(dbConfig);
 
+        // Ensure table exists
         await connection.execute(`
             CREATE TABLE IF NOT EXISTS transcript (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -62,10 +65,13 @@ async function runTranscriptJob(videoUrl) {
 
         await connection.execute(sql, [videoId, videoUrl, fullText]);
 
-        log("🚀 Success: Transcript saved to Database.");
+        log("🚀 SUCCESS: Transcript saved to Database.");
 
     } catch (error) {
-        log(`❌ Error: ${error.message}`);
+        log(`❌ ERROR: ${error.message}`);
+        if (error.message.includes('Transcript is disabled')) {
+            log("⚠️ Note: This video does not have transcripts enabled.");
+        }
     } finally {
         if (connection) {
             await connection.end();
@@ -74,10 +80,10 @@ async function runTranscriptJob(videoUrl) {
     }
 }
 
-// Get URL from command line arguments
-const args = process.argv.slice(2);
-if (args.length > 0) {
-    runTranscriptJob(args[0]);
+// Execution
+const videoUrl = process.argv[2];
+if (videoUrl) {
+    runTranscriptJob(videoUrl);
 } else {
-    log("❌ No URL provided.");
+    log("❌ No URL provided in command arguments.");
 }

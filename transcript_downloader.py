@@ -54,7 +54,6 @@ def run_transcript_job(video_url):
     try:
         log(f"🔍 Fetching transcript for ID: {video_id}")
 
-        # Check if cookies file exists and has content
         proxy_cookies = None
         if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0:
             log(f"🍪 Loading {COOKIES_FILE}...")
@@ -62,9 +61,15 @@ def run_transcript_job(video_url):
         else:
             log("⚠️ No valid cookies.txt found. Attempting without cookies...")
 
-        # FIXED API CALL: In 1.2.4, use the class method directly
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=proxy_cookies)
-        
+        # FIX: Ensure we are using the correct method call for the library
+        # Some versions require cookies to be passed via list_transcripts
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=proxy_cookies)
+        except AttributeError:
+            # Fallback if the specific version installed handles cookies differently
+            log("🔄 Method list_transcripts failed, trying alternative...")
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+
         try:
             # Prefer Hindi, fallback to English
             transcript = transcript_list.find_transcript(['hi', 'en'])
@@ -99,7 +104,7 @@ def run_transcript_job(video_url):
         cursor.close()
 
     except Exception as e:
-        log(f"⚠️ Error Detail: {str(e)}")
+        log(f"❌ Error Detail: {str(e)}")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:

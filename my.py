@@ -1,121 +1,115 @@
 import os
 import requests
-from bs4 import BeautifulSoup
-import urllib.parse
-import sys
 import mysql.connector
+from bs4 import BeautifulSoup
 
+# ---------------- CONFIG ---------------- #
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 
-# ---------------- DB CONFIG ---------------- #
 DB_CONFIG = {
-    "host": os.getenv("DB_HOST"),       # MUST NOT be localhost in GitHub
+    "host": os.getenv("DB_HOST"),
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
     "database": os.getenv("DB_NAME"),
-    "connect_timeout": 20
 }
 
-# WordPress table prefix (default wp_)
 TABLE_PREFIX = os.getenv("WP_TABLE_PREFIX", "wp_")
 TABLE_NAME = f"{TABLE_PREFIX}transcript"
 
+# 🔥 CHANNEL HANDLE
+CHANNEL_HANDLE = "stockmarketcommando"
 
-# ---------------- GET VIDEO ID ---------------- #
-def get_video_id(youtube_url):
-    parsed = urllib.parse.urlparse(youtube_url)
 
-    if parsed.hostname == "youtu.be":
-        return parsed.path[1:]
+# ---------------- GET CHANNEL ID ---------------- #
+def get_channel_id_from_handle(handle):
+    url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&q={handle}&type=channel&key={YOUTUBE_API_KEY}"
+    res = requests.get(url).json()
 
-    if parsed.hostname and "youtube.com" in parsed.hostname:
-        query = urllib.parse.parse_qs(parsed.query)
-        return query.get("v", [None])[0]
+    if "items" not in res or not res["items"]:
+        return None
 
-    return None
+    return res["items"][0]["snippet"]["channelId"]
+
+
+# ---------------- GET LATEST VIDEOS ---------------- #
+def get_latest_videos(channel_id, max_results=5):
+    url = f"https://www.googleapis.com/youtube/v3/search?key={YOUTUBE_API_KEY}&channelId={channel_id}&part=snippet,id&order=date&maxResults={max_results}"
+
+    res = requests.get(url).json()
+
+    videos = []
+    for item in res.get("items", []):
+        if item["id"]["kind"] == "youtube#video":
+            vid = item["id"]["videoId"]
+            videos.append(f"https://www.youtube.com/watch?v={vid}")
+
+    return videos
 
 
 # ---------------- FETCH TRANSCRIPT ---------------- #
-def fetch_transcript(youtube_url):
-    video_id = get_video_id(youtube_url)
+def fetch_transcript(url):
+    tactiq_url = f"https://tactiq.io/tools/run/youtube_transcript?yt={url}"
 
-    if not video_id:
-        print("❌ Invalid YouTube URL")
-        return None, None
+    headers = {"User-Agent": "Mozilla/5.0"}
+    res = requests.get(tactiq_url, headers=headers)
 
-    tactiq_url = f"https://tactiq.io/tools/run/youtube_transcript?yt={urllib.parse.quote(youtube_url)}"
+    soup = BeautifulSoup(res.text, "html.parser")
+    blocks = soup.find_all("p")
 
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    response = requests.get(tactiq_url, headers=headers)
-
-    if response.status_code != 200:
-        print("❌ Failed to fetch page")
-        return None, None
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    transcript_blocks = soup.find_all("p")
-    transcript = "\n".join([p.get_text(strip=True) for p in transcript_blocks])
-
-    if not transcript.strip():
-        print("❌ Empty transcript")
-        return None, None
-
-    return video_id, transcript
+    return "\n".join([b.get_text(strip=True) for b in blocks])
 
 
-# ---------------- SAVE TO WORDPRESS DB ---------------- #
+# ---------------- SAVE TO DB ---------------- #
 def save_to_db(video_id, video_url, transcript):
     conn = None
     cursor = None
 
     try:
-        print(f"🔌 Connecting to DB: {DB_CONFIG['host']}")
-
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
 
-        # Optional: prevent duplicate video_id
         query = f"""
         INSERT INTO {TABLE_NAME} (video_id, video_url, content)
         VALUES (%s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-            content = VALUES(content),
-            video_url = VALUES(video_url)
+        ON DUPLICATE KEY UPDATE content = VALUES(content)
         """
 
         cursor.execute(query, (video_id, video_url, transcript))
         conn.commit()
 
-        print(f"✅ Saved to WordPress table: {TABLE_NAME}")
+        print(f"✅ Saved: {video_id}")
 
     except Exception as e:
-        print(f"❌ DB Error: {e}")
-        sys.exit(1)
+        print("❌ DB Error:", e)
 
     finally:
-        if cursor is not None:
+        if cursor:
             cursor.close()
-        if conn is not None:
+        if conn:
             conn.close()
 
 
 # ---------------- MAIN ---------------- #
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        youtube_url = sys.argv[1]
-    else:
-        youtube_url = "https://www.youtube.com/watch?v=huW5sxhm3ow"
+    print("🔍 Finding channel ID...")
 
-    print("🚀 Starting transcript fetch...")
+    channel_id = get_channel_id_from_handle(CHANNEL_HANDLE)
 
-    video_id, transcript = fetch_transcript(youtube_url)
+    if not channel_id:
+        print("❌ Channel not found")
+        exit()
 
-    if transcript:
-        print("\n===== TRANSCRIPT FETCHED =====\n")
-        save_to_db(video_id, youtube_url, transcript)
-    else:
-        print("❌ No transcript found")
-        sys.exit(1)
+    print("📺 Fetching latest videos...")
+    videos = get_latest_videos(channel_id, max_results=5)
+
+    for url in videos:
+        video_id = url.split("v=")[-1]
+
+        print(f"\n🚀 Processing: {url}")
+
+        transcript = fetch_transcript(url)
+
+        if transcript.strip():
+            save_to_db(video_id, url, transcript)
+        else:
+            print("❌ No transcript found")

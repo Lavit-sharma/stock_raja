@@ -1,5 +1,8 @@
-import YoutubeTranscript from 'youtube-transcript';
+import * as yt from 'youtube-transcript';
 import mysql from 'mysql2/promise';
+
+// Extract the class from the namespace
+const YoutubeTranscript = yt.YoutubeTranscript || yt.default?.YoutubeTranscript || yt.default;
 
 // ---------------- CONFIG ---------------- //
 const dbConfig = {
@@ -26,7 +29,7 @@ async function runTranscriptJob(videoUrl) {
     try {
         log(`🔍 Fetching transcript for ID: ${videoId}`);
         
-        // Use the fetchTranscript method on the default export
+        // This specific library call
         const transcriptData = await YoutubeTranscript.fetchTranscript(videoId);
         
         if (!transcriptData || transcriptData.length === 0) {
@@ -56,7 +59,6 @@ async function runTranscriptJob(videoUrl) {
         `;
 
         await connection.execute(sql, [videoId, videoUrl, fullText]);
-
         log("🚀 SUCCESS: Transcript saved to Database.");
 
     } catch (error) {

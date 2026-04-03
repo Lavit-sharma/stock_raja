@@ -1,5 +1,8 @@
 import os
+import re
+import json
 import logging
+import requests
 from datetime import datetime
 from youtube_transcript_api import YouTubeTranscriptApi
 
@@ -21,84 +24,92 @@ logging.basicConfig(
 )
 
 
-def fetch_transcript(video_id):
-    """
-    MAXIMUM fallback logic (handles almost all cases)
-    """
+# ---------------- API METHOD ---------------- #
+def fetch_transcript_api(video_id):
     try:
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
 
-        # ✅ 1. Try manually created transcripts
-        try:
-            transcript = transcript_list.find_manually_created_transcript(['en', 'hi'])
-            return transcript.fetch()
-        except:
-            pass
-
-        # ✅ 2. Try generated transcripts
-        try:
-            transcript = transcript_list.find_generated_transcript(['en', 'hi'])
-            return transcript.fetch()
-        except:
-            pass
-
-        # ✅ 3. Try ANY transcript (force fetch)
         for t in transcript_list:
-            try:
-                return t.fetch()
-            except:
-                continue
+            return t.fetch()
 
-        # ✅ 4. Try translation (VERY IMPORTANT)
-        for t in transcript_list:
-            try:
-                translated = t.translate('en')
-                return translated.fetch()
-            except:
-                continue
-
-    except Exception as e:
-        logging.error(f"Error fetching {video_id}: {str(e)}")
-
-    return None
+    except Exception:
+        return None
 
 
-def save_transcript(video_id, transcript):
+# ---------------- SCRAPING METHOD ---------------- #
+def fetch_transcript_scrape(video_id):
     try:
-        file_path = os.path.join(OUTPUT_FOLDER, f"{video_id}.txt")
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        response = requests.get(url)
 
-        lines = []
-        for entry in transcript:
-            start = round(entry.get("start", 0), 2)
-            text = entry.get("text", "").strip()
-            lines.append(f"[{start}s] {text}")
+        if "captions" not in response.text:
+            return None
 
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
+        match = re.search(r'"captionTracks":(\[.*?\])', response.text)
 
-        print(f"✅ Saved: {file_path}")
+        if not match:
+            return None
+
+        caption_tracks = json.loads(match.group(1))
+        caption_url = caption_tracks[0]['baseUrl']
+
+        xml = requests.get(caption_url).text
+
+        texts = re.findall(r'<text start="(.*?)".*?>(.*?)</text>', xml)
+
+        transcript = []
+        for start, text in texts:
+            clean_text = re.sub(r'<.*?>', '', text)
+            transcript.append({
+                "start": float(start),
+                "text": clean_text
+            })
+
+        return transcript
 
     except Exception as e:
-        print(f"❌ Save failed: {video_id}")
-        logging.error(str(e))
+        logging.error(f"Scrape failed {video_id}: {str(e)}")
+        return None
 
 
-def main():
-    for video_id in VIDEO_IDS:
-        print(f"\n🔍 Processing: {video_id}")
+# ---------------- SAVE ---------------- #
+def save_transcript(video_id, transcript):
+    file_path = os.path.join(OUTPUT_FOLDER, f"{video_id}.txt")
 
-        file_path = os.path.join(OUTPUT_FOLDER, f"{video_id}.txt")
+    lines = []
+    for entry in transcript:
+        start = round(entry.get("start", 0), 2)
+        text = entry.get("text", "").strip()
+        lines.append(f"[{start}s] {text}")
 
-        if os.path.exists(file_path):
-            print("⏩ Already exists, skipping")
-            continue
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
 
-        transcript = fetch_transcript(video_id)
+    print(f"✅ Saved: {file_path}")
 
-        if transcript:
-            save_transcript(video_id, transcript)
-        else:
-            print("❌ FAILED: No transcript found")
+
+# ---------------- MAIN ---------------- #
+def process(video_id):
+    print(f"\n🔍 Processing: {video_id}")
+
+    file_path = os.path.join(OUTPUT_FOLDER, f"{video_id}.txt")
+
+    if os.path.exists(file_path):
+        print("⏩ Already exists")
+        return
+
+    # 1. Try API
+    transcript = fetch_transcript_api(video_id)
+
+    # 2. Fallback to scraping
+    if not transcript:
+        print("⚠️ API failed, trying scraping...")
+        transcript = fetch_transcript_scrape(video_id)
+
+    if transcript:
+        save_transcript(video_id, transcript)
+    else:
+        print("❌ FINAL FAIL: No transcript found")
 
 
 if __name__ == "__main__":
@@ -106,7 +117,8 @@ if __name__ == "__main__":
 
     print("🚀 Starting transcript downloader...\n")
 
-    main()
+    for vid in VIDEO_IDS:
+        process(vid)
 
     print("\n🎉 Done!")
     print(f"⏱ Completed in: {datetime.now() - start}")

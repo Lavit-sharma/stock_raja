@@ -1,18 +1,6 @@
-const youtube = require('youtube-transcript-api');
+// FIX: The name here MUST match the package.json dependency exactly
+const { YoutubeTranscript } = require('youtube-transcript');
 const mysql = require('mysql2/promise');
-
-/**
- * FAIL-SAFE: This line ensures we find the correct 'fetchTranscript' method
- * regardless of whether the library uses 'default', 'YoutubeTranscript', or direct export.
- */
-const getFetchMethod = () => {
-    if (youtube.fetchTranscript) return youtube.fetchTranscript;
-    if (youtube.default && youtube.default.fetchTranscript) return youtube.default.fetchTranscript;
-    if (youtube.YoutubeTranscript && youtube.YoutubeTranscript.fetchTranscript) return youtube.YoutubeTranscript.fetchTranscript;
-    return null;
-};
-
-const fetchTranscript = getFetchMethod();
 
 // ---------------- CONFIG ---------------- //
 const dbConfig = {
@@ -35,21 +23,24 @@ async function runTranscriptJob(videoUrl) {
     const videoId = extractVideoId(videoUrl);
     if (!videoId) return log("❌ Invalid URL.");
 
-    if (!fetchTranscript) {
-        return log("❌ ERROR: Could not find fetchTranscript in the library. Please check your package.json.");
-    }
-
     let connection;
     try {
         log(`🔍 Fetching transcript for ID: ${videoId}`);
         
-        // Use the safely extracted fetch method
-        const transcriptData = await fetchTranscript(videoId);
+        // This library uses .fetch()
+        const transcriptData = await YoutubeTranscript.fetch(videoId);
+        
+        if (!transcriptData || transcriptData.length === 0) {
+            throw new Error("No transcript data found.");
+        }
+
         const fullText = transcriptData.map(entry => entry.text).join(' ');
+        log(`✅ Successfully fetched ${transcriptData.length} lines.`);
 
-        log("✅ Transcript fetched. Connecting to Database...");
-
+        log("🗄️ Connecting to Database...");
         connection = await mysql.createConnection(dbConfig);
+
+        // Ensure table exists
         await connection.execute(`
             CREATE TABLE IF NOT EXISTS transcript (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -60,17 +51,30 @@ async function runTranscriptJob(videoUrl) {
             )
         `);
 
-        await connection.execute(
-            "INSERT INTO transcript (video_id, video_url, content) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE content = VALUES(content)",
-            [videoId, videoUrl, fullText]
-        );
+        const sql = `
+            INSERT INTO transcript (video_id, video_url, content)
+            VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE content = VALUES(content)
+        `;
 
-        log("🚀 Success: Transcript saved to Database.");
+        await connection.execute(sql, [videoId, videoUrl, fullText]);
+
+        log("🚀 SUCCESS: Transcript saved to Database.");
+
     } catch (error) {
         log(`❌ ERROR: ${error.message}`);
     } finally {
-        if (connection) await connection.end();
+        if (connection) {
+            await connection.end();
+            log("🔌 DB Connection closed.");
+        }
     }
 }
 
-runTranscriptJob(process.argv[2]);
+// Execution
+const videoUrl = process.argv[2];
+if (videoUrl) {
+    runTranscriptJob(videoUrl);
+} else {
+    log("❌ No URL provided.");
+}

@@ -1,4 +1,4 @@
-import { YoutubeTranscript } from 'youtube-transcript';
+import YoutubeTranscript from 'youtube-transcript';
 import mysql from 'mysql2/promise';
 
 // ---------------- CONFIG ---------------- //
@@ -26,14 +26,11 @@ async function runTranscriptJob(videoUrl) {
     try {
         log(`🔍 Fetching transcript for ID: ${videoId}`);
         
-        /**
-         * Calling the library method. 
-         * Note: youtube-transcript v1.2.1 uses fetchTranscript
-         */
+        // Use the fetchTranscript method on the default export
         const transcriptData = await YoutubeTranscript.fetchTranscript(videoId);
         
         if (!transcriptData || transcriptData.length === 0) {
-            throw new Error("No transcript data found for this video.");
+            throw new Error("No transcript data found.");
         }
 
         const fullText = transcriptData.map(entry => entry.text).join(' ');
@@ -42,7 +39,6 @@ async function runTranscriptJob(videoUrl) {
         log("🗄️ Connecting to Database...");
         connection = await mysql.createConnection(dbConfig);
 
-        // Ensure table exists
         await connection.execute(`
             CREATE TABLE IF NOT EXISTS transcript (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -73,10 +69,9 @@ async function runTranscriptJob(videoUrl) {
     }
 }
 
-// Get the URL from the GitHub Action input
 const videoUrl = process.argv[2];
 if (videoUrl) {
     runTranscriptJob(videoUrl);
 } else {
-    log("❌ No URL provided in command arguments.");
+    log("❌ No URL provided.");
 }

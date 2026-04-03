@@ -1,6 +1,5 @@
-// FIX: The name here MUST match the package.json dependency exactly
-const { YoutubeTranscript } = require('youtube-transcript');
-const mysql = require('mysql2/promise');
+import { YoutubeTranscript } from 'youtube-transcript';
+import mysql from 'mysql2/promise';
 
 // ---------------- CONFIG ---------------- //
 const dbConfig = {
@@ -27,11 +26,14 @@ async function runTranscriptJob(videoUrl) {
     try {
         log(`🔍 Fetching transcript for ID: ${videoId}`);
         
-        // This library uses .fetch()
-        const transcriptData = await YoutubeTranscript.fetch(videoId);
+        /**
+         * Calling the library method. 
+         * Note: youtube-transcript v1.2.1 uses fetchTranscript
+         */
+        const transcriptData = await YoutubeTranscript.fetchTranscript(videoId);
         
         if (!transcriptData || transcriptData.length === 0) {
-            throw new Error("No transcript data found.");
+            throw new Error("No transcript data found for this video.");
         }
 
         const fullText = transcriptData.map(entry => entry.text).join(' ');
@@ -71,10 +73,10 @@ async function runTranscriptJob(videoUrl) {
     }
 }
 
-// Execution
+// Get the URL from the GitHub Action input
 const videoUrl = process.argv[2];
 if (videoUrl) {
     runTranscriptJob(videoUrl);
 } else {
-    log("❌ No URL provided.");
+    log("❌ No URL provided in command arguments.");
 }

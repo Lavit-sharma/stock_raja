@@ -3,7 +3,7 @@ name: Download YouTube Transcripts
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * *"  # every hour
+    - cron: "0 * * * *"
 
 jobs:
   run-script:
@@ -13,7 +13,7 @@ jobs:
       contents: write
 
     steps:
-      - name: 📥 Checkout Repository
+      - name: 📥 Checkout Repo
         uses: actions/checkout@v4
 
       - name: 🐍 Setup Python

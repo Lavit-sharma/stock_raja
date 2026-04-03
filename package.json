@@ -4,6 +4,6 @@
   "main": "yt_transcript_job.js",
   "dependencies": {
     "mysql2": "^3.9.2",
-    "youtube-transcript": "^1.2.1"
+    "youtube-transcript-api": "^1.1.1"
   }
 }

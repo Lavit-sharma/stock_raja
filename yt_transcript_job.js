@@ -1,8 +1,5 @@
-import * as yt from 'youtube-transcript';
-import mysql from 'mysql2/promise';
-
-// Extract the class from the namespace
-const YoutubeTranscript = yt.YoutubeTranscript || yt.default?.YoutubeTranscript || yt.default;
+const { YoutubeTranscript } = require('youtube-transcript');
+const mysql = require('mysql2/promise');
 
 // ---------------- CONFIG ---------------- //
 const dbConfig = {
@@ -29,7 +26,7 @@ async function runTranscriptJob(videoUrl) {
     try {
         log(`🔍 Fetching transcript for ID: ${videoId}`);
         
-        // This specific library call
+        // This specific library requires calling fetchTranscript
         const transcriptData = await YoutubeTranscript.fetchTranscript(videoId);
         
         if (!transcriptData || transcriptData.length === 0) {
@@ -42,6 +39,7 @@ async function runTranscriptJob(videoUrl) {
         log("🗄️ Connecting to Database...");
         connection = await mysql.createConnection(dbConfig);
 
+        // Ensure table exists
         await connection.execute(`
             CREATE TABLE IF NOT EXISTS transcript (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -59,6 +57,7 @@ async function runTranscriptJob(videoUrl) {
         `;
 
         await connection.execute(sql, [videoId, videoUrl, fullText]);
+
         log("🚀 SUCCESS: Transcript saved to Database.");
 
     } catch (error) {
@@ -71,6 +70,7 @@ async function runTranscriptJob(videoUrl) {
     }
 }
 
+// Execution
 const videoUrl = process.argv[2];
 if (videoUrl) {
     runTranscriptJob(videoUrl);

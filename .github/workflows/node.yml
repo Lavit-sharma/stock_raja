@@ -29,4 +29,4 @@ jobs:
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
-        run: node yt_transcript_job.js "${{ github.event.inputs.video_url }}"
+        run: node yt_transcript_job.cjs "${{ github.event.inputs.video_url }}"

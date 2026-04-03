@@ -3,7 +3,17 @@ import re
 import sys
 import time
 import mysql.connector
-from youtube_transcript_api import YouTubeTranscriptApi
+
+# --- CONFLICT CHECK ---
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi
+    import youtube_transcript_api
+    # This checks if the file being loaded is the real library or your own file
+    if "site-packages" not in youtube_transcript_api.__file__ and "lib" not in youtube_transcript_api.__file__:
+        print(f"⚠️ WARNING: Conflict detected! Loading from: {youtube_transcript_api.__file__}")
+except ImportError:
+    print("❌ ERROR: youtube-transcript-api is not installed.")
+    sys.exit(1)
 
 # ---------------- CONFIG ---------------- #
 DB_CONFIG = {
@@ -27,8 +37,12 @@ class DBManager:
 
     def get_conn(self):
         if not self.conn or not self.conn.is_connected():
-            self.conn = mysql.connector.connect(**self.config)
-            log("✅ Connected to Database.")
+            try:
+                self.conn = mysql.connector.connect(**self.config)
+                log("✅ Connected to Database.")
+            except Exception as e:
+                log(f"❌ DB Connection Error: {e}")
+                raise
         return self.conn
 
 def extract_video_id(url):
@@ -52,8 +66,7 @@ def run_transcript_job(video_url):
             log(f"🍪 Using cookies from {COOKIES_FILE}")
             proxy_cookies = COOKIES_FILE
 
-        # SIMPLIFIED: Direct fetch with language preference
-        # This bypasses the 'list_transcripts' attribute issue
+        # Using the standard method with language fallbacks
         data = YouTubeTranscriptApi.get_transcript(
             video_id, 
             languages=['hi', 'en'], 

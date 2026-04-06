@@ -1,6 +1,5 @@
-import sys
-import time
 import os
+import time
 import requests
 import pymysql
 import xml.etree.ElementTree as ET
@@ -15,7 +14,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
-# ---------------- CONFIG FROM SECRETS ---------------- #
+# ---------------- CONFIG ---------------- #
 DB_CONFIG = {
     'host': os.getenv('DB_HOST'),
     'user': os.getenv('DB_USER'),
@@ -24,35 +23,33 @@ DB_CONFIG = {
     'charset': 'utf8mb4'
 }
 
+CHANNEL_ID = os.getenv("YOUTUBE_CHANNEL_ID")
+
 DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
-if not os.path.exists(DOWNLOAD_DIR):
-    os.makedirs(DOWNLOAD_DIR)
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 def extract_video_id(url):
-    if "v=" in url:
-        return url.split("v=")[1].split("&")[0]
-    return None
+    return url.split("v=")[1].split("&")[0] if "v=" in url else None
 
-# ---------------- GET LATEST VIDEOS ---------------- #
-def get_latest_videos(channel_id, max_results=3):
-    feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+# ---------------- FETCH LATEST VIDEOS ---------------- #
+def get_latest_videos(max_results=3):
+    feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}"
     log("📡 Fetching latest videos...")
 
-    response = requests.get(feed_url)
-    if response.status_code != 200:
-        log("❌ Failed to fetch channel feed")
+    res = requests.get(feed_url)
+    if res.status_code != 200:
+        log("❌ Failed to fetch feed")
         return []
 
-    root = ET.fromstring(response.content)
+    root = ET.fromstring(res.content)
 
     videos = []
     for entry in root.findall("{http://www.w3.org/2005/Atom}entry")[:max_results]:
-        video_id = entry.find("{http://www.youtube.com/xml/schemas/2015}videoId").text
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        videos.append(video_url)
+        vid = entry.find("{http://www.youtube.com/xml/schemas/2015}videoId").text
+        videos.append(f"https://www.youtube.com/watch?v={vid}")
 
     log(f"✅ Found {len(videos)} videos")
     return videos
@@ -62,10 +59,7 @@ def is_video_processed(video_id):
     try:
         with closing(pymysql.connect(**DB_CONFIG)) as conn:
             with conn.cursor() as cursor:
-                cursor.execute(
-                    "SELECT 1 FROM wp_transcript WHERE video_id=%s LIMIT 1",
-                    (video_id,)
-                )
+                cursor.execute("SELECT 1 FROM wp_transcript WHERE video_id=%s LIMIT 1", (video_id,))
                 return cursor.fetchone() is not None
     except:
         return False
@@ -79,7 +73,7 @@ def create_driver():
 
     prefs = {
         "download.default_directory": DOWNLOAD_DIR,
-        "download.prompt_for_download": False,
+        "download.prompt_for_download": False
     }
     options.add_experimental_option("prefs", prefs)
 
@@ -96,22 +90,18 @@ def create_driver():
     return driver
 
 # ---------------- GET TRANSCRIPT ---------------- #
-def get_transcript(youtube_url):
+def get_transcript(url):
     driver = create_driver()
     try:
-        driver.get(f"https://downsub.com/?url={youtube_url}")
+        driver.get(f"https://downsub.com/?url={url}")
 
         wait = WebDriverWait(driver, 45)
-        btn = wait.until(EC.element_to_be_clickable(
-            (By.XPATH, "//button[contains(., 'TXT')]")
-        ))
+        btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'TXT')]")))
 
         driver.execute_script("arguments[0].click();", btn)
 
-        timeout = 60
         start = time.time()
-
-        while time.time() - start < timeout:
+        while time.time() - start < 60:
             files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith(".txt")]
             if files:
                 path = os.path.join(DOWNLOAD_DIR, files[0])
@@ -124,17 +114,17 @@ def get_transcript(youtube_url):
     finally:
         driver.quit()
 
-# ---------------- MAIN PROCESS ---------------- #
-def fetch_and_store(youtube_url):
-    video_id = extract_video_id(youtube_url)
+# ---------------- PROCESS ---------------- #
+def process_video(url):
+    video_id = extract_video_id(url)
 
     if is_video_processed(video_id):
-        log(f"⏭️ Skipping already processed: {video_id}")
+        log(f"⏭️ Skipping: {video_id}")
         return
 
-    log(f"🚀 Processing: {youtube_url}")
+    log(f"🚀 Processing: {url}")
 
-    transcript = get_transcript(youtube_url)
+    transcript = get_transcript(url)
     if not transcript:
         log("❌ Transcript failed")
         return
@@ -149,19 +139,21 @@ def fetch_and_store(youtube_url):
                     INSERT INTO wp_transcript (video_id, video_url, content)
                     VALUES (%s, %s, %s)
                     ON DUPLICATE KEY UPDATE content = VALUES(content)
-                """, (video_id, youtube_url, transcript))
+                """, (video_id, url, transcript))
             conn.commit()
 
         log("✅ Saved to DB")
 
     except Exception as e:
-        log(f"❌ DB error: {e}")
+        log(f"❌ DB Error: {e}")
 
-# ---------------- ENTRY ---------------- #
+# ---------------- MAIN ---------------- #
 if __name__ == "__main__":
-    CHANNEL_ID = "UChneGqGy_lmvfcR1v_avL6g"   # 🔴 PUT SKMC CHANNEL ID
+    if not CHANNEL_ID:
+        log("❌ Missing YOUTUBE_CHANNEL_ID")
+        exit(1)
 
-    videos = get_latest_videos(CHANNEL_ID, 3)
+    videos = get_latest_videos(3)
 
-    for url in videos:
-        fetch_and_store(url)
+    for v in videos:
+        process_video(v)

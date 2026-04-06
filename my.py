@@ -1,10 +1,19 @@
-import os
 import sys
-import subprocess
+import time
+import os
+import requests
 import pymysql
-import re
 from datetime import datetime
 from contextlib import closing
+
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+
 
 # ---------------- CONFIG FROM SECRETS ---------------- #
 DB_CONFIG = {
@@ -15,92 +24,171 @@ DB_CONFIG = {
     'charset': 'utf8mb4'
 }
 
+API_KEY = os.getenv("YOUTUBE_API_KEY")
+CHANNEL_ID = os.getenv("YOUTUBE_CHANNEL_ID")
+
+DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
+if not os.path.exists(DOWNLOAD_DIR):
+    os.makedirs(DOWNLOAD_DIR)
+
+
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-def clean_srt(srt_text):
-    """Removes timestamps, formatting, and line numbers from SRT files"""
-    text = re.sub(r'\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}', '', srt_text)
-    text = re.sub(r'^\d+$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'<[^>]*>', '', text)
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return "\n".join(lines)
 
-def process_channel(channel_url):
-    # Ensure URL ends with /videos to find the latest uploads
-    base_url = channel_url.split('?')[0].rstrip('/')
-    if not base_url.endswith("/videos"):
-        videos_url = f"{base_url}/videos"
-    else:
-        videos_url = base_url
-        
-    log(f"📺 Target URL: {videos_url}")
-    
-    # 1. Get the latest 3 Video IDs
-    # Using --extract-flat and --playlist-end 3 for speed and accuracy
-    cmd_ids = f'yt-dlp --get-id --playlist-end 3 --extract-flat "{videos_url}"'
-    
+def extract_video_id(url):
+    if "v=" in url:
+        return url.split("v=")[1].split("&")[0]
+    return None
+
+
+# ---------------- YOUTUBE API ---------------- #
+def get_latest_videos(channel_id, max_results=3):
+    log("📡 Fetching latest videos...")
+
+    url = "https://www.googleapis.com/youtube/v3/search"
+
+    params = {
+        "key": API_KEY,
+        "channelId": channel_id,
+        "part": "snippet",
+        "order": "date",
+        "maxResults": max_results,
+        "type": "video"
+    }
+
+    res = requests.get(url, params=params)
+    data = res.json()
+
+    videos = []
+
+    for item in data.get("items", []):
+        video_id = item["id"]["videoId"]
+        title = item["snippet"]["title"]
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+
+        log(f"🎬 Found: {title}")
+        videos.append(video_url)
+
+    return videos
+
+
+# ---------------- DRIVER ---------------- #
+def create_driver():
+    log("🌐 Starting browser...")
+
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--window-size=1920,1080")
+
+    prefs = {
+        "download.default_directory": DOWNLOAD_DIR,
+        "download.prompt_for_download": False,
+    }
+    options.add_experimental_option("prefs", prefs)
+
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=options
+    )
+
+    driver.execute_cdp_cmd("Page.setDownloadBehavior", {
+        "behavior": "allow",
+        "downloadPath": DOWNLOAD_DIR
+    })
+
+    return driver
+
+
+# ---------------- GET TRANSCRIPT ---------------- #
+def get_transcript(youtube_url):
+    driver = create_driver()
+
     try:
-        result = subprocess.run(cmd_ids, capture_output=True, text=True, shell=True)
-        # If the output is empty, try the main channel URL as a fallback
-        if not result.stdout.strip():
-            log("⚠️ Videos tab empty, trying channel root...")
-            cmd_ids = f'yt-dlp --get-id --playlist-end 3 --extract-flat "{base_url}"'
-            result = subprocess.run(cmd_ids, capture_output=True, text=True, shell=True)
-            
-        video_ids = [v.strip() for v in result.stdout.split('\n') if v.strip()]
-    except Exception as e:
-        log(f"❌ Error running yt-dlp: {e}")
-        return
+        downsub_url = f"https://downsub.com/?url={youtube_url}"
+        log(f"🌐 Opening: {downsub_url}")
 
-    if not video_ids:
-        log("❌ No videos found. Check if the channel is public.")
-        return
+        driver.get(downsub_url)
 
-    log(f"✅ Found {len(video_ids)} videos. Starting transcript sync...")
+        wait = WebDriverWait(driver, 45)
 
-    for v_id in video_ids:
-        video_url = f"https://www.youtube.com/watch?v={v_id}"
-        log(f"🎬 Processing: {v_id}")
-
-        output_template = f"trans_{v_id}"
-        # Download auto-generated subs (Hindi first, then English)
-        cmd_dl = (
-            f'yt-dlp --skip-download --write-auto-subs --sub-lang "hi.*,en.*" '
-            f'--convert-subs srt -o "{output_template}" "{video_url}"'
+        txt_button = wait.until(
+            EC.element_to_be_clickable(
+                (By.XPATH, "//div[@id='app']//button[contains(., 'TXT')]")
+            )
         )
-        subprocess.run(cmd_dl, shell=True)
 
-        # Find the generated srt file
-        srt_file = None
-        for f in os.listdir('.'):
-            if f.startswith(output_template) and f.endswith(".srt"):
-                srt_file = f
+        log("✅ Clicking TXT...")
+        driver.execute_script("arguments[0].click();", txt_button)
+
+        log("⏳ Waiting for download...")
+
+        start = time.time()
+        downloaded_file = None
+
+        while time.time() - start < 60:
+            files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith(".txt")]
+            if files:
+                downloaded_file = os.path.join(DOWNLOAD_DIR, files[0])
                 break
+            time.sleep(2)
 
-        if srt_file:
-            with open(srt_file, 'r', encoding='utf-8') as f:
-                content = clean_srt(f.read())
-            
-            try:
-                with closing(pymysql.connect(**DB_CONFIG)) as conn:
-                    with conn.cursor() as cursor:
-                        sql = """
-                            INSERT INTO wp_transcript (video_id, video_url, content)
-                            VALUES (%s, %s, %s)
-                            ON DUPLICATE KEY UPDATE content = VALUES(content)
-                        """
-                        cursor.execute(sql, (v_id, video_url, content))
-                    conn.commit()
-                log(f"💾 Saved to DB: {v_id}")
-            except Exception as e:
-                log(f"❌ DB Error: {e}")
-            
-            os.remove(srt_file) # Cleanup
-        else:
-            log(f"⚠️ Transcript unavailable for {v_id}")
+        if not downloaded_file:
+            raise Exception("Download failed")
 
+        log(f"⬇️ Downloaded: {downloaded_file}")
+
+        with open(downloaded_file, "r", encoding="utf-8") as f:
+            return f.read()
+
+    except Exception as e:
+        log(f"❌ Error: {e}")
+        return None
+
+    finally:
+        driver.quit()
+
+
+# ---------------- MAIN ---------------- #
+def fetch_and_store(youtube_url):
+    video_id = extract_video_id(youtube_url)
+
+    transcript = get_transcript(youtube_url)
+    if not transcript:
+        return
+
+    with open("transcript.txt", "w", encoding="utf-8") as f:
+        f.write(transcript)
+
+    log("📄 Saved transcript")
+
+    try:
+        with closing(pymysql.connect(**DB_CONFIG)) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO wp_transcript (video_id, video_url, content)
+                    VALUES (%s, %s, %s)
+                    ON DUPLICATE KEY UPDATE content = VALUES(content)
+                """, (video_id, youtube_url, transcript))
+            conn.commit()
+
+        log("✅ DB updated")
+
+    except Exception as e:
+        log(f"❌ DB error: {e}")
+
+
+# ---------------- ENTRY ---------------- #
 if __name__ == "__main__":
-    # Use the official handle for Stock Market Ka Commando
-    channel = "https://www.youtube.com/@stockmarketcommando"
-    process_channel(channel)
+
+    if not API_KEY or not CHANNEL_ID:
+        log("❌ Missing API key or Channel ID")
+        sys.exit(1)
+
+    videos = get_latest_videos(CHANNEL_ID)
+
+    for url in videos:
+        log(f"🚀 Processing: {url}")
+        fetch_and_store(url)

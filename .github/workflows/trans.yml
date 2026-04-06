@@ -16,15 +16,18 @@ jobs:
         with:
           python-version: '3.10'
 
+      # ✅ INSTALL ALL REQUIRED PACKAGES
       - name: Install Dependencies
         run: |
-          pip install requests beautifulsoup4
+          pip install requests beautifulsoup4 selenium webdriver-manager pymysql
 
       - name: Run Script (Latest Videos)
         run: python my.py
 
-      - name: Upload Transcript
+      - name: Upload Transcripts
         uses: actions/upload-artifact@v4
         with:
-          name: transcript
-          path: transcript.txt
+          name: transcripts
+          path: |
+            transcript*.txt
+            downloads/*.txt

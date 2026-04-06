@@ -32,7 +32,6 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 def extract_video_id(url):
-    """Robust Video ID Extraction"""
     parsed = urllib.parse.urlparse(url)
     if parsed.hostname == "youtu.be":
         return parsed.path[1:]
@@ -42,7 +41,6 @@ def extract_video_id(url):
     return None
 
 def create_driver():
-    log("🌐 Starting Headless Chrome...")
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
@@ -59,111 +57,100 @@ def create_driver():
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=options
-    )
-
-    driver.execute_cdp_cmd("Page.setDownloadBehavior", {
-        "behavior": "allow",
-        "downloadPath": DOWNLOAD_DIR
-    })
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": DOWNLOAD_DIR})
     return driver
 
-def get_latest_video_from_channel(channel_url):
-    """Uses Selenium to find the most recent video link if a channel URL is provided"""
+def get_latest_videos_from_channel(channel_url, count=3):
+    """Finds the top N latest video URLs from a channel"""
     driver = create_driver()
+    video_links = []
     try:
-        log(f"📺 Finding latest video from: {channel_url}")
-        driver.get(f"{channel_url.rstrip('/')}/videos")
+        log(f"📺 Accessing channel: {channel_url}")
+        # Navigate to the /videos tab specifically
+        target_url = f"{channel_url.rstrip('/')}/videos"
+        driver.get(target_url)
+        
         wait = WebDriverWait(driver, 20)
-        # Find the first video thumbnail link
-        video_element = wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="video-title-link"]')))
-        video_url = video_element.get_attribute("href")
-        log(f"✅ Found latest video: {video_url}")
-        return video_url
+        # Wait for video titles to load
+        wait.until(EC.presence_of_element_located((By.ID, "video-title-link")))
+        
+        # Get all video elements
+        elements = driver.find_elements(By.ID, "video-title-link")
+        
+        for i in range(min(count, len(elements))):
+            url = elements[i].get_attribute("href")
+            if url:
+                video_links.append(url)
+        
+        log(f"✅ Found {len(video_links)} recent videos.")
     except Exception as e:
-        log(f"❌ Could not find latest video: {e}")
-        return channel_url # Fallback to input
+        log(f"❌ Error finding videos: {e}")
     finally:
         driver.quit()
+    return video_links
 
 def download_transcript(youtube_url):
-    """Uses DownSub to download the TXT transcript"""
+    """Downloads transcript using DownSub"""
     driver = create_driver()
     try:
         downsub_url = f"https://downsub.com/?url={urllib.parse.quote(youtube_url)}"
-        log(f"🌐 Opening DownSub: {downsub_url}")
         driver.get(downsub_url)
+        wait = WebDriverWait(driver, 30)
+        
+        # Clear downloads folder before starting
+        for f in os.listdir(DOWNLOAD_DIR): os.remove(os.path.join(DOWNLOAD_DIR, f))
 
-        wait = WebDriverWait(driver, 45)
-        # Locate the TXT download button
-        txt_button_xpath = "//button[contains(., 'TXT') or contains(., '[TXT]')]"
+        txt_button_xpath = "//button[contains(., 'TXT')]"
         txt_button = wait.until(EC.element_to_be_clickable((By.XPATH, txt_button_xpath)))
-
-        log("🚀 Triggering download...")
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", txt_button)
-        time.sleep(2)
+        
         driver.execute_script("arguments[0].click();", txt_button)
-
-        # Wait for file to appear in folder
-        timeout = 30
+        
+        # Wait for file
+        timeout = 20
         start_time = time.time()
         while time.time() - start_time < timeout:
             files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.txt')]
             if files:
                 file_path = os.path.join(DOWNLOAD_DIR, files[0])
-                log(f"⬇️ Downloaded: {files[0]}")
                 with open(file_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                os.remove(file_path) # Clean up
                 return content
-            time.sleep(2)
-        
+            time.sleep(1)
         return None
     except Exception as e:
-        log(f"❌ Transcript Download Error: {e}")
+        log(f"⚠️ Could not get transcript for {youtube_url}")
         return None
     finally:
         driver.quit()
 
 def save_to_db(video_id, url, content):
-    if not DB_CONFIG['host']:
-        log("⚠️ No DB Config found. Skipping database save.")
-        return
+    if not DB_CONFIG['host'] or not content: return
     try:
         with closing(pymysql.connect(**DB_CONFIG)) as conn:
             with conn.cursor() as cursor:
-                sql = """
-                    INSERT INTO wp_transcript (video_id, video_url, content)
-                    VALUES (%s, %s, %s)
-                    ON DUPLICATE KEY UPDATE content = VALUES(content)
-                """
+                sql = "INSERT INTO wp_transcript (video_id, video_url, content) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE content = VALUES(content)"
                 cursor.execute(sql, (video_id, url, content))
             conn.commit()
-        log("✅ Database updated successfully")
+        log(f"✅ DB Updated for {video_id}")
     except Exception as e:
         log(f"❌ DB Error: {e}")
 
 if __name__ == "__main__":
-    input_url = sys.argv[1] if len(sys.argv) > 1 else "https://www.youtube.com/watch?v=huW5sxhm3ow"
+    # If no URL is passed, we default to the SMKC channel (your stock channel example)
+    target = sys.argv[1] if len(sys.argv) > 1 else "https://www.youtube.com/@SMKC"
     
-    # 1. Logic to handle if input is a channel or a direct video
-    final_video_url = input_url
-    if "channel" in input_url or "/@" in input_url:
-        final_video_url = get_latest_video_from_channel(input_url)
-    
-    video_id = extract_video_id(final_video_url)
-    
-    # 2. Get Transcript
-    transcript_text = download_transcript(final_video_url)
-
-    if transcript_text:
-        # 3. Save locally
-        with open("transcript.txt", "w", encoding="utf-8") as f:
-            f.write(transcript_text)
-        
-        # 4. Save to DB
-        save_to_db(video_id, final_video_url, transcript_text)
+    # 1. Identify if it's a channel or a single video
+    if "channel" in target or "/@" in target:
+        urls_to_process = get_latest_videos_from_channel(target, count=3)
     else:
-        log("❌ Operation failed: No transcript retrieved.")
+        urls_to_process = [target]
+
+    # 2. Loop through all found videos
+    for video_url in urls_to_process:
+        log(f"🎬 Processing: {video_url}")
+        vid_id = extract_video_id(video_url)
+        text = download_transcript(video_url)
+        if text:
+            save_to_db(vid_id, video_url, text)
+        time.sleep(2) # Small delay between videos

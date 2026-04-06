@@ -1,38 +1,32 @@
-name: Fetch Transcript
+name: Sync Stock Market Transcripts
 
 on:
-  workflow_dispatch: # Allows manual run
-  push:
-    branches:
-      - main
+  workflow_dispatch: # Allows manual button click
+  schedule:
+    - cron: '0 */12 * * *' # Runs every 12 hours
 
 jobs:
-  run-script:
+  update-transcripts:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
+      - name: Install yt-dlp & DB Client
         run: |
-          pip install selenium webdriver-manager requests pymysql
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+          pip install pymysql
 
-      - name: Run Scraper and Update DB
+      - name: Run Sync Script
         env:
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
-        run: python my.py "https://www.youtube.com/watch?v=huW5sxhm3ow"
-
-      - name: Upload Transcript Artifact
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: youtube-transcript
-          path: transcript.txt
+        run: python my.py

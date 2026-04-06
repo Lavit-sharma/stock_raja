@@ -2,37 +2,27 @@ name: Fetch Transcript
 
 on:
   workflow_dispatch:
-  schedule:
-    # Run every 8 hours
-    - cron: "0 */8 * * *"
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install pymysql selenium webdriver-manager
 
       - name: Run script
         run: python my.py "https://www.youtube.com/watch?v=huW5sxhm3ow"
-        env:
-          DB_HOST: ${{ secrets.DB_HOST }}
-          DB_USER: ${{ secrets.DB_USER }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          DB_NAME: ${{ secrets.DB_NAME }}
-          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-          WP_TABLE_PREFIX: wp_
 
-      - name: Upload transcript (optional)
+      - name: Upload transcript
         uses: actions/upload-artifact@v4
         with:
           name: transcript

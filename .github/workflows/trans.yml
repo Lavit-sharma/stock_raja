@@ -1,39 +1,53 @@
-name: Fetch Transcript
+name: Fetch YouTube Transcript and Update DB
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/30 * * * *"
+    inputs:
+      video_url:
+        description: 'YouTube Video or Channel URL'
+        required: true
+        default: 'https://www.youtube.com/watch?v=huW5sxhm3ow'
+  push:
+    branches:
+      - main
 
 jobs:
-  run-script:
+  run-scraper:
     runs-on: ubuntu-latest
-
+    
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: '3.10'
 
-      - name: Install deps
+      - name: Install Chrome Browser
         run: |
-          pip install selenium webdriver-manager requests pymysql beautifulsoup4
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
 
-      - name: Run script
+      - name: Install Python Dependencies
+        run: |
+          pip install selenium webdriver-manager requests pymysql
+
+      - name: Run Scraper and Update Database
         env:
+          # These must be set in your GitHub Repository Secrets
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
-          YOUTUBE_CHANNEL_ID: ${{ secrets.YOUTUBE_CHANNEL_ID }}
-        run: python my.py
+        # It uses the input from manual run, or the default hardcoded URL
+        run: |
+          python my.py "${{ github.event.inputs.video_url || 'https://www.youtube.com/watch?v=huW5sxhm3ow' }}"
 
-      - name: Upload artifact
+      - name: Upload Transcript as Artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: transcript
+          name: youtube-transcript
           path: transcript.txt
+          if-no-files-found: warn

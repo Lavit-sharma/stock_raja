@@ -1,53 +1,36 @@
-name: Fetch YouTube Transcript and Update DB
+name: Fetch Latest 3 Transcripts
 
 on:
   workflow_dispatch:
     inputs:
-      video_url:
-        description: 'YouTube Video or Channel URL'
+      target_url:
+        description: 'YouTube Channel or Video URL'
         required: true
-        default: 'https://www.youtube.com/watch?v=huW5sxhm3ow'
+        default: 'https://www.youtube.com/@SMKC'
   push:
-    branches:
-      - main
+    branches: [ main ]
 
 jobs:
-  run-scraper:
+  scrape:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install Chrome Browser
+      - name: Install Dependencies
         run: |
-          sudo apt-get update
+          pip install selenium webdriver-manager pymysql requests
           sudo apt-get install -y google-chrome-stable
 
-      - name: Install Python Dependencies
-        run: |
-          pip install selenium webdriver-manager requests pymysql
-
-      - name: Run Scraper and Update Database
+      - name: Run Script
         env:
-          # These must be set in your GitHub Repository Secrets
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
-        # It uses the input from manual run, or the default hardcoded URL
         run: |
-          python my.py "${{ github.event.inputs.video_url || 'https://www.youtube.com/watch?v=huW5sxhm3ow' }}"
-
-      - name: Upload Transcript as Artifact
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: youtube-transcript
-          path: transcript.txt
-          if-no-files-found: warn
+          # Use manual input if available, otherwise use default channel
+          python my.py "${{ github.event.inputs.target_url || 'https://www.youtube.com/@SMKC' }}"

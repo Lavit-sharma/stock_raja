@@ -42,38 +42,36 @@ def extract_video_id(url):
         return query.get("v", [None])[0]
     return None
 
-def get_latest_videos_via_rss(channel_url, count=3):
+def get_latest_videos(channel_url, count=3):
     video_links = []
     try:
-        log(f"📺 Fetching videos from: {channel_url}")
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        response = requests.get(channel_url, headers=headers)
-        
-        # Extract Channel ID using Regex from the page source
-        # This is the most reliable way to find the ID for @stockmarketcommando
-        channel_id_match = re.search(r'channelId":"(UC[^"]+)"', response.text)
-        
-        if channel_id_match:
-            channel_id = channel_id_match.group(1)
-            log(f"✅ Found Channel ID: {channel_id}")
-            rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-            rss_resp = requests.get(rss_url)
-            rss_soup = BeautifulSoup(rss_resp.content, "xml")
-            entries = rss_soup.find_all("entry")
+        # Ensure we are looking at the /videos tab
+        clean_url = channel_url.split('?')[0].rstrip('/')
+        if not clean_url.endswith('/videos'):
+            clean_url += '/videos'
             
-            for entry in entries[:count]:
-                video_links.append(entry.link['href'])
-        else:
-            log("⚠️ Could not find Channel ID, trying fallback scrape...")
-            soup = BeautifulSoup(response.text, "html.parser")
-            links = soup.find_all("a", href=True)
-            for link in links:
-                href = link['href']
-                if "/watch?v=" in href and "index=" not in href:
-                    full_url = f"https://www.youtube.com{href}" if href.startswith("/") else href
-                    if full_url not in video_links:
-                        video_links.append(full_url)
-                if len(video_links) >= count: break
+        log(f"📺 Fetching videos from: {clean_url}")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9"
+        }
+        response = requests.get(clean_url, headers=headers)
+        
+        # Method 1: Regex for video IDs (Fastest and works on almost all YT pages)
+        video_ids = re.findall(r'"videoId":"([^"]+)"', response.text)
+        
+        if video_ids:
+            # Remove duplicates while preserving order
+            unique_ids = []
+            for vid in video_ids:
+                if vid not in unique_ids:
+                    unique_ids.append(vid)
+            
+            for vid in unique_ids[:count]:
+                video_links.append(f"https://www.youtube.com/watch?v={vid}")
+            
+            log(f"✅ Found {len(video_links)} videos using ID scraping.")
+            
     except Exception as e:
         log(f"❌ Error fetching videos: {e}")
     return video_links
@@ -106,10 +104,10 @@ def download_transcript(youtube_url):
         driver.get(downsub_url)
         wait = WebDriverWait(driver, 45)
         
-        # Clear folder
         for f in os.listdir(DOWNLOAD_DIR): os.remove(os.path.join(DOWNLOAD_DIR, f))
 
-        txt_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'TXT')]")))
+        txt_xpath = "//button[contains(., 'TXT') or contains(., '[TXT]')]"
+        txt_button = wait.until(EC.element_to_be_clickable((By.XPATH, txt_xpath)))
         driver.execute_script("arguments[0].click();", txt_button)
         
         timeout = 30
@@ -141,16 +139,16 @@ def save_to_db(video_id, url, content):
         log(f"❌ DB Error: {e}")
 
 if __name__ == "__main__":
-    # Updated default to Stock Market Commando
+    # Force the new channel if no argument is provided
     target = sys.argv[1] if len(sys.argv) > 1 else "https://www.youtube.com/@stockmarketcommando"
     
     if "channel" in target or "/@" in target:
-        urls_to_process = get_latest_videos_via_rss(target, count=3)
+        urls_to_process = get_latest_videos(target, count=3)
     else:
         urls_to_process = [target]
 
     if not urls_to_process:
-        log("❌ No videos found. Check the channel URL.")
+        log("❌ No videos found. Check if the channel URL is public.")
         sys.exit(1)
 
     for video_url in urls_to_process:

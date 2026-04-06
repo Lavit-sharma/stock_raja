@@ -1,100 +1,152 @@
 import requests
 from bs4 import BeautifulSoup
 import urllib.parse
-import sys
+import re
 
-# ---------------- GET VIDEO ID ---------------- #
-def get_video_id(youtube_url):
-    parsed = urllib.parse.urlparse(youtube_url)
-
-    if parsed.hostname == "youtu.be":
-        return parsed.path[1:]
-
-    if "youtube.com" in parsed.hostname:
-        query = urllib.parse.parse_qs(parsed.query)
-        return query.get("v", [None])[0]
-
-    return None
-
-
-# ---------------- FETCH TRANSCRIPT ---------------- #
-def fetch_transcript(youtube_url):
-    video_id = get_video_id(youtube_url)
-
-    if not video_id:
-        print("❌ Invalid YouTube URL")
-        return None
-
-    tactiq_url = f"https://tactiq.io/tools/run/youtube_transcript?yt={urllib.parse.quote(youtube_url)}"
-
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    response = requests.get(tactiq_url, headers=headers)
-
-    if response.status_code != 200:
-        print("❌ Failed to fetch page")
-        return None
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    transcript_blocks = soup.find_all("p")
-    transcript = "\n".join([p.get_text(strip=True) for p in transcript_blocks])
-
-    return transcript
-
-
-# ---------------- NEW: GET LATEST VIDEOS ---------------- #
+# ---------------- GET LATEST VIDEOS ---------------- #
 def get_latest_videos(channel_url, max_results=3):
-    print("📡 Fetching latest videos from channel...")
+    print("📡 Fetching latest videos...")
 
     headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(channel_url, headers=headers)
+    res = requests.get(channel_url, headers=headers)
 
-    if response.status_code != 200:
-        print("❌ Failed to load channel page")
-        return []
+    video_ids = re.findall(r'"videoId":"(.*?)"', res.text)
 
-    html = response.text
-
-    # YouTube embeds video IDs in JSON
-    import re
-    video_ids = re.findall(r'"videoId":"(.*?)"', html)
-
-    # Remove duplicates
+    unique = []
     seen = set()
-    unique_ids = []
+
     for vid in video_ids:
         if vid not in seen:
             seen.add(vid)
-            unique_ids.append(vid)
+            unique.append(vid)
 
-    latest_ids = unique_ids[:max_results]
-
-    videos = [f"https://www.youtube.com/watch?v={vid}" for vid in latest_ids]
+    videos = [f"https://www.youtube.com/watch?v={vid}" for vid in unique[:max_results]]
 
     print(f"✅ Found {len(videos)} videos")
-
     return videos
+
+
+# ---------------- IMPORT YOUR WORKING LOGIC ---------------- #
+# (FROM YOUR FILE — NO CHANGE)
+
+import sys
+import time
+import os
+import pymysql
+from datetime import datetime
+from contextlib import closing
+
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+
+
+DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
+if not os.path.exists(DOWNLOAD_DIR):
+    os.makedirs(DOWNLOAD_DIR)
+
+
+def log(msg):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+
+def extract_video_id(url):
+    if "v=" in url:
+        return url.split("v=")[1].split("&")[0]
+    return None
+
+
+def create_driver():
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+
+    prefs = {
+        "download.default_directory": DOWNLOAD_DIR,
+        "download.prompt_for_download": False,
+    }
+    options.add_experimental_option("prefs", prefs)
+
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=options
+    )
+
+    driver.execute_cdp_cmd("Page.setDownloadBehavior", {
+        "behavior": "allow",
+        "downloadPath": DOWNLOAD_DIR
+    })
+
+    return driver
+
+
+def get_transcript(youtube_url):
+    driver = create_driver()
+
+    try:
+        downsub_url = f"https://downsub.com/?url={youtube_url}"
+        log(f"🌐 Opening: {downsub_url}")
+
+        driver.get(downsub_url)
+
+        wait = WebDriverWait(driver, 45)
+
+        txt_button = wait.until(
+            EC.element_to_be_clickable(
+                (By.XPATH, "//div[@id='app']//button[contains(., 'TXT')]")
+            )
+        )
+
+        log("✅ Clicking TXT...")
+        driver.execute_script("arguments[0].click();", txt_button)
+
+        start = time.time()
+        downloaded_file = None
+
+        while time.time() - start < 60:
+            files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith(".txt")]
+            if files:
+                downloaded_file = os.path.join(DOWNLOAD_DIR, files[0])
+                break
+            time.sleep(2)
+
+        if not downloaded_file:
+            raise Exception("Download failed")
+
+        with open(downloaded_file, "r", encoding="utf-8") as f:
+            return f.read()
+
+    except Exception as e:
+        log(f"❌ Error: {e}")
+        return None
+
+    finally:
+        driver.quit()
 
 
 # ---------------- MAIN ---------------- #
 if __name__ == "__main__":
 
-    # 👉 Your channel URL
     channel_url = "https://www.youtube.com/@stockmarketcommando/videos"
 
     videos = get_latest_videos(channel_url)
 
-    for youtube_url in videos:
-        print(f"\n🚀 Processing: {youtube_url}")
+    for url in videos:
+        print(f"\n🚀 Processing: {url}")
 
-        transcript = fetch_transcript(youtube_url)
+        transcript = get_transcript(url)
 
         if transcript:
-            print("\n===== TRANSCRIPT =====\n")
-            print(transcript[:500])  # preview
+            print("✅ Transcript fetched")
 
-            with open("transcript.txt", "w", encoding="utf-8") as f:
+            filename = f"transcript_{url.split('v=')[1]}.txt"
+
+            with open(filename, "w", encoding="utf-8") as f:
                 f.write(transcript)
 
-            print("✅ Saved to transcript.txt")
+            print(f"📄 Saved: {filename}")

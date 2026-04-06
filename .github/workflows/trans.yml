@@ -6,7 +6,7 @@ on:
       target_url:
         description: 'YouTube Channel or Video URL'
         required: true
-        default: 'https://www.youtube.com/@SMKC'
+        default: 'https://www.youtube.com/@stockmarketcommando'
   push:
     branches: [ main ]
 
@@ -22,13 +22,10 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Chrome and Dependencies
+      - name: Install Dependencies
         run: |
-          # Install System Chrome
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
-          
-          # Install Python Libraries (Added beautifulsoup4 and lxml)
           pip install selenium webdriver-manager pymysql requests beautifulsoup4 lxml
 
       - name: Run Scraper
@@ -38,11 +35,5 @@ jobs:
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
         run: |
-          python my.py "${{ github.event.inputs.target_url || 'https://www.youtube.com/@SMKC' }}"
-
-      - name: Upload Logs if Failed
-        uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: error-logs
-          path: transcript.txt
+          # Use the input or the new default handle
+          python my.py "${{ github.event.inputs.target_url || 'https://www.youtube.com/@stockmarketcommando' }}"

@@ -1,147 +1,154 @@
-import os
-import requests
-import mysql.connector
-from bs4 import BeautifulSoup
+import sys
+import time
+import pymysql
+import urllib.parse
+from contextlib import closing
+from datetime import datetime
+
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
+
 
 # ---------------- CONFIG ---------------- #
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
-
 DB_CONFIG = {
-    "host": os.getenv("DB_HOST"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD"),
-    "database": os.getenv("DB_NAME"),
+    'host': 'localhost',
+    'user': 'root',
+    'password': '',
+    'database': 'your_database',
+    'cursorclass': pymysql.cursors.DictCursor
 }
 
-TABLE_PREFIX = os.getenv("WP_TABLE_PREFIX", "wp_")
-TABLE_NAME = f"{TABLE_PREFIX}transcript"
 
-CHANNEL_HANDLE = "stockmarketcommando"
-
-
-# ---------------- GET CHANNEL ID ---------------- #
-def get_channel_id(handle):
-    url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&q={handle}&type=channel&key={YOUTUBE_API_KEY}"
-    res = requests.get(url).json()
-
-    if not res.get("items"):
-        return None
-
-    return res["items"][0]["snippet"]["channelId"]
+def log(msg):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 
-# ---------------- GET LATEST VIDEOS ---------------- #
-def get_latest_videos(channel_id, max_results=3):
-    url = f"https://www.googleapis.com/youtube/v3/search?key={YOUTUBE_API_KEY}&channelId={channel_id}&part=snippet,id&order=date&maxResults={max_results}"
-
-    res = requests.get(url).json()
-
-    videos = []
-    for item in res.get("items", []):
-        if item["id"]["kind"] == "youtube#video":
-            vid = item["id"]["videoId"]
-            title = item["snippet"]["title"]
-
-            videos.append({
-                "video_id": vid,
-                "url": f"https://www.youtube.com/watch?v={vid}",
-                "title": title
-            })
-
-    return videos
+def extract_video_id(url):
+    if "v=" in url:
+        return url.split("v=")[1].split("&")[0]
+    elif "youtu.be" in url:
+        return url.split("/")[-1]
+    return None
 
 
-# ---------------- FETCH TRANSCRIPT ---------------- #
-def fetch_transcript(video_url):
-    tactiq_url = f"https://tactiq.io/tools/run/youtube_transcript?yt={video_url}"
+# ---------------- DRIVER (MATCH YOUR WORKING CODE) ---------------- #
+def create_driver():
+    log("🌐 Initializing browser...")
 
-    headers = {"User-Agent": "Mozilla/5.0"}
-    res = requests.get(tactiq_url, headers=headers)
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--incognito")
 
-    soup = BeautifulSoup(res.text, "html.parser")
-    blocks = soup.find_all("p")
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+    )
 
-    return "\n".join([b.get_text(strip=True) for b in blocks])
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=opts
+    )
 
-
-# ---------------- DELETE ALL OLD RECORDS ---------------- #
-def clear_table():
-    conn = None
-    cursor = None
-
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
-
-        cursor.execute(f"DELETE FROM {TABLE_NAME}")
-        conn.commit()
-
-        print("🧹 Table cleared")
-
-    except Exception as e:
-        print("❌ Delete Error:", e)
-
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-
-# ---------------- SAVE TO DB ---------------- #
-def save_to_db(video_id, video_url, title, transcript):
-    conn = None
-    cursor = None
-
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
-
-        query = f"""
-        INSERT INTO {TABLE_NAME} (video_id, video_url, title, content)
-        VALUES (%s, %s, %s, %s)
-        """
-
-        cursor.execute(query, (video_id, video_url, title, transcript))
-        conn.commit()
-
-        print(f"✅ Saved: {title}")
-
-    except Exception as e:
-        print("❌ DB Error:", e)
-
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+    driver.set_page_load_timeout(60)
+    return driver
 
 
 # ---------------- MAIN ---------------- #
+def fetch_and_store(youtube_url):
+
+    video_id = extract_video_id(youtube_url)
+    if not video_id:
+        log("❌ Invalid URL")
+        return
+
+    driver = create_driver()
+
+    try:
+        target_url = f"https://tactiq.io/tools/run/youtube_transcript?yt={urllib.parse.quote(youtube_url)}"
+
+        log(f"🌐 Opening: {target_url}")
+        driver.get(target_url)
+
+        time.sleep(5)
+
+        log(f"📄 Title: {driver.title}")
+
+        transcript_text = ""
+        attempt = 0
+
+        while True:
+            attempt += 1
+            log(f"🔄 Attempt {attempt}")
+
+            transcript_text = driver.execute_script("""
+                let btn = document.querySelector('#copy');
+                if (!btn) return '';
+
+                let txt = btn.getAttribute('data-clipboard-text');
+                if (txt && txt.length > 500) return txt;
+
+                return '';
+            """)
+
+            length = len(transcript_text) if transcript_text else 0
+            log(f"📊 Length: {length}")
+
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+
+            if transcript_text and length > 500:
+                log("✅ Transcript captured")
+                break
+
+            if attempt % 5 == 0:
+                driver.save_screenshot(f"debug_{attempt}.png")
+
+            time.sleep(4)
+
+        # Save file
+        with open("transcript.txt", "w", encoding="utf-8") as f:
+            f.write(transcript_text)
+
+        log("📄 Transcript saved")
+
+        # Save DB
+        log("💾 Saving to DB...")
+
+        with closing(pymysql.connect(**DB_CONFIG)) as conn:
+            with conn.cursor() as cursor:
+
+                sql = """
+                INSERT INTO wp_transcript (video_id, video_url, title, content, created_at)
+                VALUES (%s, %s, %s, %s, NOW())
+                ON DUPLICATE KEY UPDATE content = VALUES(content)
+                """
+
+                cursor.execute(sql, (
+                    video_id,
+                    youtube_url,
+                    f"YouTube Video {video_id}",
+                    transcript_text
+                ))
+
+            conn.commit()
+
+        log("✅ DB saved")
+
+    except Exception as e:
+        log(f"❌ ERROR: {e}")
+        driver.save_screenshot("error.png")
+
+    finally:
+        driver.quit()
+        log("🛑 Browser closed")
+
+
 if __name__ == "__main__":
-    print("🧹 Clearing old data...")
-    clear_table()
-
-    print("🔍 Getting channel...")
-    channel_id = get_channel_id(CHANNEL_HANDLE)
-
-    if not channel_id:
-        print("❌ Channel not found")
-        exit()
-
-    print("📺 Fetching latest 3 videos...")
-    videos = get_latest_videos(channel_id, max_results=3)
-
-    for video in videos:
-        video_id = video["video_id"]
-        url = video["url"]
-        title = video["title"]
-
-        print(f"\n🚀 Processing: {title}")
-
-        transcript = fetch_transcript(url)
-
-        if transcript.strip():
-            save_to_db(video_id, url, title, transcript)
-        else:
-            print("❌ No transcript found")
+    url_input = sys.argv[1] if len(sys.argv) > 1 else "https://www.youtube.com/watch?v=huW5sxhm3ow"
+    fetch_and_store(url_input)

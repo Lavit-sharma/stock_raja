@@ -1,29 +1,38 @@
 name: Fetch Transcript
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Allows manual run
+  push:
+    branches:
+      - main
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install pymysql selenium webdriver-manager
+          pip install selenium webdriver-manager requests pymysql
 
-      - name: Run script
+      - name: Run Scraper and Update DB
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
         run: python my.py "https://www.youtube.com/watch?v=huW5sxhm3ow"
 
-      - name: Upload transcript
+      - name: Upload Transcript Artifact
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: transcript
+          name: youtube-transcript
           path: transcript.txt

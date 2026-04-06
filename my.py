@@ -39,21 +39,30 @@ def get_latest_videos(max_results=3):
     feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}"
     log("📡 Fetching latest videos...")
 
-    res = requests.get(feed_url)
-    if res.status_code != 200:
-        log("❌ Failed to fetch feed")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+
+    try:
+        res = requests.get(feed_url, headers=headers, timeout=10)
+
+        if res.status_code != 200:
+            log(f"❌ Failed to fetch feed | Status: {res.status_code}")
+            return []
+
+        root = ET.fromstring(res.content)
+
+        videos = []
+        for entry in root.findall("{http://www.w3.org/2005/Atom}entry")[:max_results]:
+            vid = entry.find("{http://www.youtube.com/xml/schemas/2015}videoId").text
+            videos.append(f"https://www.youtube.com/watch?v={vid}")
+
+        log(f"✅ Found {len(videos)} videos")
+        return videos
+
+    except Exception as e:
+        log(f"❌ Feed error: {e}")
         return []
-
-    root = ET.fromstring(res.content)
-
-    videos = []
-    for entry in root.findall("{http://www.w3.org/2005/Atom}entry")[:max_results]:
-        vid = entry.find("{http://www.youtube.com/xml/schemas/2015}videoId").text
-        videos.append(f"https://www.youtube.com/watch?v={vid}")
-
-    log(f"✅ Found {len(videos)} videos")
-    return videos
-
 # ---------------- CHECK DUPLICATE ---------------- #
 def is_video_processed(video_id):
     try:

@@ -3,7 +3,7 @@ name: Fetch Transcript
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 min
+    - cron: "*/30 * * * *"
 
 jobs:
   run-script:
@@ -20,7 +20,7 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install selenium webdriver-manager requests pymysql
+          pip install selenium webdriver-manager requests pymysql beautifulsoup4
 
       - name: Run script
         env:

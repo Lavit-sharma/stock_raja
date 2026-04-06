@@ -45,7 +45,6 @@ def extract_video_id(url):
 def get_latest_videos(channel_url, count=3):
     video_links = []
     try:
-        # Ensure we are looking at the /videos tab
         clean_url = channel_url.split('?')[0].rstrip('/')
         if not clean_url.endswith('/videos'):
             clean_url += '/videos'
@@ -53,15 +52,11 @@ def get_latest_videos(channel_url, count=3):
         log(f"📺 Fetching videos from: {clean_url}")
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9"
         }
         response = requests.get(clean_url, headers=headers)
-        
-        # Method 1: Regex for video IDs (Fastest and works on almost all YT pages)
         video_ids = re.findall(r'"videoId":"([^"]+)"', response.text)
         
         if video_ids:
-            # Remove duplicates while preserving order
             unique_ids = []
             for vid in video_ids:
                 if vid not in unique_ids:
@@ -69,9 +64,7 @@ def get_latest_videos(channel_url, count=3):
             
             for vid in unique_ids[:count]:
                 video_links.append(f"https://www.youtube.com/watch?v={vid}")
-            
-            log(f"✅ Found {len(video_links)} videos using ID scraping.")
-            
+            log(f"✅ Found {len(video_links)} videos.")
     except Exception as e:
         log(f"❌ Error fetching videos: {e}")
     return video_links
@@ -97,49 +90,75 @@ def create_driver():
     driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": DOWNLOAD_DIR})
     return driver
 
-def download_transcript(youtube_url):
+def get_video_data(youtube_url):
+    """Downloads transcript and also returns the video title."""
     driver = create_driver()
+    video_title = "Unknown Title"
+    transcript_text = None
+    
     try:
+        # Step 1: Visit DownSub to get the title and transcript
         downsub_url = f"https://downsub.com/?url={urllib.parse.quote(youtube_url)}"
         driver.get(downsub_url)
         wait = WebDriverWait(driver, 45)
         
-        for f in os.listdir(DOWNLOAD_DIR): os.remove(os.path.join(DOWNLOAD_DIR, f))
+        # Extract title from DownSub page (it usually displays the title near the top)
+        try:
+            title_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.card-header b")))
+            video_title = title_element.text
+        except:
+            log("⚠️ Could not extract title, using default.")
 
+        # Clear folder before download
+        for f in os.listdir(DOWNLOAD_DIR): 
+            try: os.remove(os.path.join(DOWNLOAD_DIR, f))
+            except: pass
+
+        # Step 2: Click Download TXT
         txt_xpath = "//button[contains(., 'TXT') or contains(., '[TXT]')]"
         txt_button = wait.until(EC.element_to_be_clickable((By.XPATH, txt_xpath)))
         driver.execute_script("arguments[0].click();", txt_button)
         
+        # Step 3: Wait for file
         timeout = 30
         start_time = time.time()
         while time.time() - start_time < timeout:
             files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.txt')]
             if files:
                 file_path = os.path.join(DOWNLOAD_DIR, files[0])
+                time.sleep(1) # Ensure write completion
                 with open(file_path, "r", encoding="utf-8") as f:
-                    return f.read()
+                    transcript_text = f.read()
+                break
             time.sleep(2)
-        return None
+            
+        return video_title, transcript_text
     except Exception as e:
-        log(f"⚠️ Transcript download failed for {youtube_url[:40]}")
-        return None
+        log(f"⚠️ Error processing {youtube_url[:40]}: {e}")
+        return video_title, None
     finally:
         driver.quit()
 
-def save_to_db(video_id, url, content):
+def save_to_db(video_id, url, title, content):
     if not DB_CONFIG['host'] or not content: return
     try:
         with closing(pymysql.connect(**DB_CONFIG)) as conn:
             with conn.cursor() as cursor:
-                sql = "INSERT INTO wp_transcript (video_id, video_url, content) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE content = VALUES(content)"
-                cursor.execute(sql, (video_id, url, content))
+                # Updated SQL to include 'title'
+                sql = """
+                INSERT INTO wp_transcript (video_id, video_url, title, content) 
+                VALUES (%s, %s, %s, %s) 
+                ON DUPLICATE KEY UPDATE 
+                    title = VALUES(title),
+                    content = VALUES(content)
+                """
+                cursor.execute(sql, (video_id, url, title, content))
             conn.commit()
-        log(f"✅ DB Updated: {video_id}")
+        log(f"✅ DB Updated: {title[:30]}...")
     except Exception as e:
         log(f"❌ DB Error: {e}")
 
 if __name__ == "__main__":
-    # Force the new channel if no argument is provided
     target = sys.argv[1] if len(sys.argv) > 1 else "https://www.youtube.com/@stockmarketcommando"
     
     if "channel" in target or "/@" in target:
@@ -148,13 +167,17 @@ if __name__ == "__main__":
         urls_to_process = [target]
 
     if not urls_to_process:
-        log("❌ No videos found. Check if the channel URL is public.")
+        log("❌ No videos found.")
         sys.exit(1)
 
     for video_url in urls_to_process:
         log(f"🎬 Processing: {video_url}")
         vid_id = extract_video_id(video_url)
-        text = download_transcript(video_url)
+        
+        # Get both Title and Transcript
+        title, text = get_video_data(video_url)
+        
         if text:
-            save_to_db(vid_id, video_url, text)
+            save_to_db(vid_id, video_url, title, text)
+        
         time.sleep(3)

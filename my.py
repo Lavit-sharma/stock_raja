@@ -5,7 +5,6 @@ import requests
 import pymysql
 import urllib.parse
 import re
-from bs4 import BeautifulSoup
 from datetime import datetime
 from contextlib import closing
 
@@ -50,9 +49,7 @@ def get_latest_videos(channel_url, count=3):
             clean_url += '/videos'
             
         log(f"📺 Fetching videos from: {clean_url}")
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         response = requests.get(clean_url, headers=headers)
         video_ids = re.findall(r'"videoId":"([^"]+)"', response.text)
         
@@ -84,49 +81,50 @@ def create_driver():
     }
     options.add_experimental_option("prefs", prefs)
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": DOWNLOAD_DIR})
     return driver
 
 def get_video_data(youtube_url):
-    """Downloads transcript and also returns the video title."""
     driver = create_driver()
     video_title = "Unknown Title"
     transcript_text = None
     
     try:
-        # Step 1: Visit DownSub to get the title and transcript
         downsub_url = f"https://downsub.com/?url={urllib.parse.quote(youtube_url)}"
         driver.get(downsub_url)
-        wait = WebDriverWait(driver, 45)
+        wait = WebDriverWait(driver, 30)
         
-        # Extract title from DownSub page (it usually displays the title near the top)
+        # 1. Wait for and Extract Title
+        # DownSub puts the title inside a card-header b tag
         try:
-            title_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.card-header b")))
-            video_title = title_element.text
-        except:
-            log("⚠️ Could not extract title, using default.")
+            title_el = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, ".card-header b")))
+            video_title = title_el.text.replace("Download Subtitles", "").strip()
+            # If title is empty or just generic text, try the fallback
+            if not video_title or len(video_title) < 3:
+                video_title = driver.title.split('-')[0].strip()
+        except Exception:
+            log("⚠️ Title element not found, attempting fallback...")
+            video_title = driver.title
 
-        # Clear folder before download
-        for f in os.listdir(DOWNLOAD_DIR): 
+        # 2. Handle Download
+        for f in os.listdir(DOWNLOAD_DIR):
             try: os.remove(os.path.join(DOWNLOAD_DIR, f))
             except: pass
 
-        # Step 2: Click Download TXT
         txt_xpath = "//button[contains(., 'TXT') or contains(., '[TXT]')]"
         txt_button = wait.until(EC.element_to_be_clickable((By.XPATH, txt_xpath)))
         driver.execute_script("arguments[0].click();", txt_button)
         
-        # Step 3: Wait for file
-        timeout = 30
+        timeout = 25
         start_time = time.time()
         while time.time() - start_time < timeout:
             files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.txt')]
             if files:
                 file_path = os.path.join(DOWNLOAD_DIR, files[0])
-                time.sleep(1) # Ensure write completion
+                time.sleep(1)
                 with open(file_path, "r", encoding="utf-8") as f:
                     transcript_text = f.read()
                 break
@@ -134,7 +132,7 @@ def get_video_data(youtube_url):
             
         return video_title, transcript_text
     except Exception as e:
-        log(f"⚠️ Error processing {youtube_url[:40]}: {e}")
+        log(f"❌ Error: {e}")
         return video_title, None
     finally:
         driver.quit()
@@ -144,7 +142,6 @@ def save_to_db(video_id, url, title, content):
     try:
         with closing(pymysql.connect(**DB_CONFIG)) as conn:
             with conn.cursor() as cursor:
-                # Updated SQL to include 'title'
                 sql = """
                 INSERT INTO wp_transcript (video_id, video_url, title, content) 
                 VALUES (%s, %s, %s, %s) 
@@ -154,17 +151,14 @@ def save_to_db(video_id, url, title, content):
                 """
                 cursor.execute(sql, (video_id, url, title, content))
             conn.commit()
-        log(f"✅ DB Updated: {title[:30]}...")
+        log(f"✅ Saved: {title[:50]}...")
     except Exception as e:
         log(f"❌ DB Error: {e}")
 
 if __name__ == "__main__":
     target = sys.argv[1] if len(sys.argv) > 1 else "https://www.youtube.com/@stockmarketcommando"
     
-    if "channel" in target or "/@" in target:
-        urls_to_process = get_latest_videos(target, count=3)
-    else:
-        urls_to_process = [target]
+    urls_to_process = get_latest_videos(target, count=3) if ("channel" in target or "/@" in target) else [target]
 
     if not urls_to_process:
         log("❌ No videos found.")
@@ -173,11 +167,9 @@ if __name__ == "__main__":
     for video_url in urls_to_process:
         log(f"🎬 Processing: {video_url}")
         vid_id = extract_video_id(video_url)
-        
-        # Get both Title and Transcript
         title, text = get_video_data(video_url)
         
         if text:
             save_to_db(vid_id, video_url, title, text)
         
-        time.sleep(3)
+        time.sleep(2)

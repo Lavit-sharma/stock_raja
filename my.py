@@ -3,6 +3,7 @@ import time
 import os
 import requests
 import pymysql
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from contextlib import closing
 
@@ -23,7 +24,6 @@ DB_CONFIG = {
     'charset': 'utf8mb4'
 }
 
-# Local folder to catch the auto-downloaded file
 DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
@@ -36,32 +36,58 @@ def extract_video_id(url):
         return url.split("v=")[1].split("&")[0]
     return None
 
+# ---------------- GET LATEST VIDEOS ---------------- #
+def get_latest_videos(channel_id, max_results=3):
+    feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+    log("📡 Fetching latest videos...")
+
+    response = requests.get(feed_url)
+    if response.status_code != 200:
+        log("❌ Failed to fetch channel feed")
+        return []
+
+    root = ET.fromstring(response.content)
+
+    videos = []
+    for entry in root.findall("{http://www.w3.org/2005/Atom}entry")[:max_results]:
+        video_id = entry.find("{http://www.youtube.com/xml/schemas/2015}videoId").text
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        videos.append(video_url)
+
+    log(f"✅ Found {len(videos)} videos")
+    return videos
+
+# ---------------- CHECK DUPLICATE ---------------- #
+def is_video_processed(video_id):
+    try:
+        with closing(pymysql.connect(**DB_CONFIG)) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT 1 FROM wp_transcript WHERE video_id=%s LIMIT 1",
+                    (video_id,)
+                )
+                return cursor.fetchone() is not None
+    except:
+        return False
+
 # ---------------- DRIVER ---------------- #
 def create_driver():
-    log("🌐 Starting browser (Headless Download Mode)...")
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080")
-    
-    # Configure Chrome to allow downloads in headless mode
+
     prefs = {
         "download.default_directory": DOWNLOAD_DIR,
         "download.prompt_for_download": False,
-        "download.directory_upgrade": True,
-        "safebrowsing.enabled": True
     }
     options.add_experimental_option("prefs", prefs)
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
     driver = webdriver.Chrome(
         service=Service(ChromeDriverManager().install()),
         options=options
     )
 
-    # Required for Headless Chrome to actually save files
     driver.execute_cdp_cmd("Page.setDownloadBehavior", {
         "behavior": "allow",
         "downloadPath": DOWNLOAD_DIR
@@ -73,82 +99,69 @@ def create_driver():
 def get_transcript(youtube_url):
     driver = create_driver()
     try:
-        downsub_url = f"https://downsub.com/?url={youtube_url}"
-        log(f"🌐 Opening: {downsub_url}")
-        driver.get(downsub_url)
+        driver.get(f"https://downsub.com/?url={youtube_url}")
 
         wait = WebDriverWait(driver, 45)
-        
-        # Wait for the TXT button
-        smart_xpath = "//div[@id='app']//button[contains(., 'TXT')]"
-        txt_button = wait.until(EC.element_to_be_clickable((By.XPATH, smart_xpath)))
+        btn = wait.until(EC.element_to_be_clickable(
+            (By.XPATH, "//button[contains(., 'TXT')]")
+        ))
 
-        log("✅ Button found. Triggering download...")
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", txt_button)
-        time.sleep(2)
-        driver.execute_script("arguments[0].click();", txt_button)
+        driver.execute_script("arguments[0].click();", btn)
 
-        log("⏳ Monitoring downloads folder...")
-        
         timeout = 60
-        start_time = time.time()
-        downloaded_file = None
+        start = time.time()
 
-        while time.time() - start_time < timeout:
-            files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.txt')]
+        while time.time() - start < timeout:
+            files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith(".txt")]
             if files:
-                downloaded_file = os.path.join(DOWNLOAD_DIR, files[0])
-                break
+                path = os.path.join(DOWNLOAD_DIR, files[0])
+                with open(path, "r", encoding="utf-8") as f:
+                    return f.read()
             time.sleep(2)
 
-        if not downloaded_file:
-            raise Exception("File did not download. Check logs/screenshots.")
-
-        log(f"⬇️ Successfully downloaded: {os.path.basename(downloaded_file)}")
-        
-        with open(downloaded_file, "r", encoding="utf-8") as f:
-            return f.read()
-
-    except Exception as e:
-        log(f"❌ Error: {e}")
         return None
+
     finally:
         driver.quit()
-        log("🛑 Browser closed")
 
-# ---------------- MAIN ---------------- #
+# ---------------- MAIN PROCESS ---------------- #
 def fetch_and_store(youtube_url):
     video_id = extract_video_id(youtube_url)
-    transcript_text = get_transcript(youtube_url)
 
-    if not transcript_text:
+    if is_video_processed(video_id):
+        log(f"⏭️ Skipping already processed: {video_id}")
         return
 
-    # Save locally as artifact
+    log(f"🚀 Processing: {youtube_url}")
+
+    transcript = get_transcript(youtube_url)
+    if not transcript:
+        log("❌ Transcript failed")
+        return
+
     with open("transcript.txt", "w", encoding="utf-8") as f:
-        f.write(transcript_text)
-    log("📄 File saved to transcript.txt")
+        f.write(transcript)
 
-    # Save to Remote Database using Secrets
     try:
-        if not DB_CONFIG['host']:
-            log("⚠️ DB_HOST is empty. Check your GitHub Secrets.")
-            return
-
         with closing(pymysql.connect(**DB_CONFIG)) as conn:
             with conn.cursor() as cursor:
-                sql = """
+                cursor.execute("""
                     INSERT INTO wp_transcript (video_id, video_url, content)
                     VALUES (%s, %s, %s)
                     ON DUPLICATE KEY UPDATE content = VALUES(content)
-                """
-                cursor.execute(sql, (video_id, youtube_url, transcript_text))
+                """, (video_id, youtube_url, transcript))
             conn.commit()
-        log("✅ Database updated successfully")
+
+        log("✅ Saved to DB")
+
     except Exception as e:
-        log(f"❌ DB storage error: {e}")
+        log(f"❌ DB error: {e}")
 
+# ---------------- ENTRY ---------------- #
 if __name__ == "__main__":
-    url = sys.argv[1] if len(sys.argv) > 1 else "https://www.youtube.com/watch?v=huW5sxhm3ow"
-    fetch_and_store(url)
+    CHANNEL_ID = "UChneGqGy_lmvfcR1v_avL6g"   # 🔴 PUT SKMC CHANNEL ID
 
+    videos = get_latest_videos(CHANNEL_ID, 3)
+
+    for url in videos:
+        fetch_and_store(url)

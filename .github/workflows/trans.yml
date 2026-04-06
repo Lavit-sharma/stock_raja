@@ -1,33 +1,42 @@
-name: Download YouTube Transcript
+name: Fetch Transcript
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Allows manual run
+  push:
+    branches:
+      - main
 
 jobs:
-  build:
+  run-script:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Code
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # ✅ INSTALL ALL REQUIRED PACKAGES
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4 selenium webdriver-manager pymysql
+          pip install selenium webdriver-manager requests pymysql
 
-      - name: Run Script (Latest Videos)
-        run: python my.py
+      - name: Run Scraper and Update DB
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+        run: python my.py "https://www.youtube.com/watch?v=huW5sxhm3ow"
 
-      - name: Upload Transcripts
+      - name: Upload Transcript Artifact
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: transcripts
-          path: |
-            transcript*.txt
-            downloads/*.txt
+          name: youtube-transcript
+          path: transcript.txt
+
+
+
+

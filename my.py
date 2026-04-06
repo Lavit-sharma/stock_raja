@@ -4,6 +4,7 @@ import os
 import requests
 import pymysql
 import urllib.parse
+from bs4 import BeautifulSoup
 from datetime import datetime
 from contextlib import closing
 
@@ -40,13 +41,54 @@ def extract_video_id(url):
         return query.get("v", [None])[0]
     return None
 
+def get_latest_videos_via_rss(channel_url, count=3):
+    """
+    Scrapes the Channel's RSS feed or Main Page using BeautifulSoup.
+    This is much more reliable than Selenium for finding URLs.
+    """
+    video_links = []
+    try:
+        log(f"📺 Fetching videos from: {channel_url}")
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(channel_url, headers=headers)
+        
+        # If it's a standard handle URL, we try to find the Channel ID for the RSS feed
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # Look for the canonical link which contains the channel ID
+        canonical = soup.find("link", rel="canonical")
+        if canonical:
+            channel_id = canonical['href'].split('/')[-1]
+            rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+            rss_resp = requests.get(rss_url)
+            rss_soup = BeautifulSoup(rss_resp.content, "xml")
+            
+            entries = rss_soup.find_all("entry")
+            for entry in entries[:count]:
+                video_links.append(entry.link['href'])
+                
+        if not video_links:
+            # Fallback: Scrape links directly from page if RSS fails
+            links = soup.find_all("a", href=True)
+            for link in links:
+                href = link['href']
+                if "/watch?v=" in href:
+                    full_url = f"https://www.youtube.com{href}" if href.startswith("/") else href
+                    if full_url not in video_links:
+                        video_links.append(full_url)
+                if len(video_links) >= count: break
+
+    except Exception as e:
+        log(f"❌ Error fetching video list: {e}")
+    
+    return video_links
+
 def create_driver():
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument("--lang=en-US") # Force English to handle buttons easily
     
     prefs = {
         "download.default_directory": DOWNLOAD_DIR,
@@ -62,66 +104,21 @@ def create_driver():
     driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": DOWNLOAD_DIR})
     return driver
 
-def get_latest_videos_from_channel(channel_url, count=3):
-    driver = create_driver()
-    video_links = []
-    try:
-        log(f"📺 Accessing channel: {channel_url}")
-        target_url = f"{channel_url.rstrip('/')}/videos"
-        driver.get(target_url)
-        
-        wait = WebDriverWait(driver, 15)
-
-        # 1. Handle potential Cookie Consent Popups
-        try:
-            consent_button = driver.find_elements(By.XPATH, "//button[contains(@aria-label, 'Accept') or contains(@aria-label, 'Agree')]")
-            if consent_button:
-                consent_button[0].click()
-                time.sleep(2)
-        except:
-            pass
-
-        # 2. Scroll a bit to trigger lazy loading
-        driver.execute_script("window.scrollBy(0, 500);")
-        time.sleep(3)
-
-        # 3. Find video links using a more generic CSS Selector
-        # This targets standard YouTube thumbnail links
-        elements = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "a#video-title-link, a[href*='/watch?v=']")))
-        
-        seen_urls = set()
-        for el in elements:
-            url = el.get_attribute("href")
-            if url and "/watch?v=" in url and url not in seen_urls:
-                video_links.append(url)
-                seen_urls.add(url)
-                if len(video_links) >= count:
-                    break
-        
-        log(f"✅ Found {len(video_links)} recent videos.")
-    except Exception as e:
-        log(f"❌ Error finding videos: {str(e)[:100]}") # Print first 100 chars of error
-    finally:
-        driver.quit()
-    return video_links
-
 def download_transcript(youtube_url):
+    """Uses Selenium to get transcript from DownSub"""
     driver = create_driver()
     try:
         downsub_url = f"https://downsub.com/?url={urllib.parse.quote(youtube_url)}"
         driver.get(downsub_url)
-        wait = WebDriverWait(driver, 45)
+        wait = WebDriverWait(driver, 30)
         
+        # Clean folder
         for f in os.listdir(DOWNLOAD_DIR): os.remove(os.path.join(DOWNLOAD_DIR, f))
 
-        # Wait for any "TXT" button to appear
-        txt_xpath = "//button[contains(., 'TXT')]"
-        txt_button = wait.until(EC.element_to_be_clickable((By.XPATH, txt_xpath)))
-        
-        log(f"🚀 Found TXT button for {youtube_url[:40]}...")
+        txt_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'TXT')]")))
         driver.execute_script("arguments[0].click();", txt_button)
         
-        timeout = 30
+        timeout = 20
         start_time = time.time()
         while time.time() - start_time < timeout:
             files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.txt')]
@@ -130,10 +127,9 @@ def download_transcript(youtube_url):
                 with open(file_path, "r", encoding="utf-8") as f:
                     content = f.read()
                 return content
-            time.sleep(2)
-        return None
+            time.sleep(1)
     except Exception as e:
-        log(f"⚠️ Transcript skip: {youtube_url[:40]}...")
+        log(f"⚠️ Transcript skip for {youtube_url[:30]}")
         return None
     finally:
         driver.quit()
@@ -146,29 +142,28 @@ def save_to_db(video_id, url, content):
                 sql = "INSERT INTO wp_transcript (video_id, video_url, content) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE content = VALUES(content)"
                 cursor.execute(sql, (video_id, url, content))
             conn.commit()
-        log(f"✅ DB Updated: {video_id}")
+        log(f"✅ DB Updated for {video_id}")
     except Exception as e:
         log(f"❌ DB Error: {e}")
 
 if __name__ == "__main__":
     target = sys.argv[1] if len(sys.argv) > 1 else "https://www.youtube.com/@SMKC"
     
+    # 1. Fetch latest 3 videos using BeautifulSoup (Reliable)
     if "channel" in target or "/@" in target:
-        urls_to_process = get_latest_videos_from_channel(target, count=3)
+        urls_to_process = get_latest_videos_via_rss(target, count=3)
     else:
         urls_to_process = [target]
 
     if not urls_to_process:
-        log("❌ No videos found to process.")
+        log("❌ Could not find any videos.")
         sys.exit(1)
 
+    # 2. Process each video using Selenium (For DownSub)
     for video_url in urls_to_process:
         log(f"🎬 Processing: {video_url}")
         vid_id = extract_video_id(video_url)
         text = download_transcript(video_url)
         if text:
             save_to_db(vid_id, video_url, text)
-        else:
-            log(f"⏭️ Skipping {vid_id} (No transcript found)")
-        time.sleep(3)
-        
+        time.sleep(2)

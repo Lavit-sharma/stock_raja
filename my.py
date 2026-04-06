@@ -4,6 +4,7 @@ import os
 import requests
 import pymysql
 import urllib.parse
+import re
 from bs4 import BeautifulSoup
 from datetime import datetime
 from contextlib import closing
@@ -42,45 +43,39 @@ def extract_video_id(url):
     return None
 
 def get_latest_videos_via_rss(channel_url, count=3):
-    """
-    Scrapes the Channel's RSS feed or Main Page using BeautifulSoup.
-    This is much more reliable than Selenium for finding URLs.
-    """
     video_links = []
     try:
         log(f"📺 Fetching videos from: {channel_url}")
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         response = requests.get(channel_url, headers=headers)
         
-        # If it's a standard handle URL, we try to find the Channel ID for the RSS feed
-        soup = BeautifulSoup(response.text, "html.parser")
+        # Extract Channel ID using Regex from the page source
+        # This is the most reliable way to find the ID for @stockmarketcommando
+        channel_id_match = re.search(r'channelId":"(UC[^"]+)"', response.text)
         
-        # Look for the canonical link which contains the channel ID
-        canonical = soup.find("link", rel="canonical")
-        if canonical:
-            channel_id = canonical['href'].split('/')[-1]
+        if channel_id_match:
+            channel_id = channel_id_match.group(1)
+            log(f"✅ Found Channel ID: {channel_id}")
             rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
             rss_resp = requests.get(rss_url)
             rss_soup = BeautifulSoup(rss_resp.content, "xml")
-            
             entries = rss_soup.find_all("entry")
+            
             for entry in entries[:count]:
                 video_links.append(entry.link['href'])
-                
-        if not video_links:
-            # Fallback: Scrape links directly from page if RSS fails
+        else:
+            log("⚠️ Could not find Channel ID, trying fallback scrape...")
+            soup = BeautifulSoup(response.text, "html.parser")
             links = soup.find_all("a", href=True)
             for link in links:
                 href = link['href']
-                if "/watch?v=" in href:
+                if "/watch?v=" in href and "index=" not in href:
                     full_url = f"https://www.youtube.com{href}" if href.startswith("/") else href
                     if full_url not in video_links:
                         video_links.append(full_url)
                 if len(video_links) >= count: break
-
     except Exception as e:
-        log(f"❌ Error fetching video list: {e}")
-    
+        log(f"❌ Error fetching videos: {e}")
     return video_links
 
 def create_driver():
@@ -105,31 +100,30 @@ def create_driver():
     return driver
 
 def download_transcript(youtube_url):
-    """Uses Selenium to get transcript from DownSub"""
     driver = create_driver()
     try:
         downsub_url = f"https://downsub.com/?url={urllib.parse.quote(youtube_url)}"
         driver.get(downsub_url)
-        wait = WebDriverWait(driver, 30)
+        wait = WebDriverWait(driver, 45)
         
-        # Clean folder
+        # Clear folder
         for f in os.listdir(DOWNLOAD_DIR): os.remove(os.path.join(DOWNLOAD_DIR, f))
 
         txt_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'TXT')]")))
         driver.execute_script("arguments[0].click();", txt_button)
         
-        timeout = 20
+        timeout = 30
         start_time = time.time()
         while time.time() - start_time < timeout:
             files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.txt')]
             if files:
                 file_path = os.path.join(DOWNLOAD_DIR, files[0])
                 with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                return content
-            time.sleep(1)
+                    return f.read()
+            time.sleep(2)
+        return None
     except Exception as e:
-        log(f"⚠️ Transcript skip for {youtube_url[:30]}")
+        log(f"⚠️ Transcript download failed for {youtube_url[:40]}")
         return None
     finally:
         driver.quit()
@@ -142,28 +136,27 @@ def save_to_db(video_id, url, content):
                 sql = "INSERT INTO wp_transcript (video_id, video_url, content) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE content = VALUES(content)"
                 cursor.execute(sql, (video_id, url, content))
             conn.commit()
-        log(f"✅ DB Updated for {video_id}")
+        log(f"✅ DB Updated: {video_id}")
     except Exception as e:
         log(f"❌ DB Error: {e}")
 
 if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else "https://www.youtube.com/@SMKC"
+    # Updated default to Stock Market Commando
+    target = sys.argv[1] if len(sys.argv) > 1 else "https://www.youtube.com/@stockmarketcommando"
     
-    # 1. Fetch latest 3 videos using BeautifulSoup (Reliable)
     if "channel" in target or "/@" in target:
         urls_to_process = get_latest_videos_via_rss(target, count=3)
     else:
         urls_to_process = [target]
 
     if not urls_to_process:
-        log("❌ Could not find any videos.")
+        log("❌ No videos found. Check the channel URL.")
         sys.exit(1)
 
-    # 2. Process each video using Selenium (For DownSub)
     for video_url in urls_to_process:
         log(f"🎬 Processing: {video_url}")
         vid_id = extract_video_id(video_url)
         text = download_transcript(video_url)
         if text:
             save_to_db(vid_id, video_url, text)
-        time.sleep(2)
+        time.sleep(3)

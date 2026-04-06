@@ -16,20 +16,15 @@ DB_CONFIG = {
     'charset': 'utf8mb4'
 }
 
-# 🔥 FIX: strip spaces + safe fallback
-CHANNEL_ID = os.getenv("YOUTUBE_CHANNEL_ID", "").strip()
+# ✅ HARDCODED CHANNEL ID
+CHANNEL_ID = "UChneGqGy_lmvfcR1v_avL6g"
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 # ---------------- GET LATEST VIDEOS ---------------- #
 def get_latest_videos(max_results=3):
-    if not CHANNEL_ID:
-        log("❌ YOUTUBE_CHANNEL_ID is missing")
-        return []
-
-    # 🔍 DEBUG (remove later if you want)
-    log(f"📡 CHANNEL_ID RAW: {repr(CHANNEL_ID)}")
+    log(f"📡 Using CHANNEL_ID: {CHANNEL_ID}")
 
     url = f"https://www.youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}"
 
@@ -94,8 +89,7 @@ def is_processed(video_id):
                     (video_id,)
                 )
                 return cursor.fetchone() is not None
-    except Exception as e:
-        log(f"⚠️ DB check error: {e}")
+    except:
         return False
 
 def extract_video_id(url):
@@ -140,7 +134,7 @@ if __name__ == "__main__":
     videos = get_latest_videos(3)
 
     if not videos:
-        log("⚠️ No videos found. Check CHANNEL_ID.")
+        log("⚠️ No videos found.")
         exit(0)
 
     for v in videos:

@@ -14,23 +14,35 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install Dependencies
+      - name: Install Chrome and Dependencies
         run: |
-          pip install selenium webdriver-manager pymysql requests
+          # Install System Chrome
+          sudo apt-get update
           sudo apt-get install -y google-chrome-stable
+          
+          # Install Python Libraries (Added beautifulsoup4 and lxml)
+          pip install selenium webdriver-manager pymysql requests beautifulsoup4 lxml
 
-      - name: Run Script
+      - name: Run Scraper
         env:
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
         run: |
-          # Use manual input if available, otherwise use default channel
           python my.py "${{ github.event.inputs.target_url || 'https://www.youtube.com/@SMKC' }}"
+
+      - name: Upload Logs if Failed
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: error-logs
+          path: transcript.txt

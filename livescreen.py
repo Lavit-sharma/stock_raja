@@ -6,6 +6,9 @@ import gspread
 import pandas as pd
 import mysql.connector
 from mysql.connector import errorcode
+from datetime import datetime
+import pytz
+import sys
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -14,6 +17,23 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
+
+# ---------------- TIME CONTROL (IST) ---------------- #
+def is_allowed_time():
+    ist = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(ist)
+
+    print(f"[TIME] Current IST: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    if 9 <= now.hour <= 16:
+        print("✅ Within allowed time (9 AM – 4 PM IST)")
+        return True
+    else:
+        print("⛔ Outside allowed time. Exiting...")
+        return False
+
+if not is_allowed_time():
+    sys.exit()
 
 # ---------------- CONFIG ---------------- #
 STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
@@ -39,52 +59,46 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 def get_hash(symbol, change_val):
-    data = f"{symbol}_day_{change_val}"
-    return hashlib.sha256(data.encode()).hexdigest()
+    return hashlib.sha256(f"{symbol}_day_{change_val}".encode()).hexdigest()
 
+# ---------------- DB MANAGER ---------------- #
 class DBManager:
     def __init__(self, config):
         self.config = config
         self.conn = None
-        self.retry_limit = 3
 
     def connect(self):
-        for attempt in range(1, self.retry_limit + 1):
+        for i in range(3):
             try:
-                log(f"🔗 Attempting DB Connection (Attempt {attempt}/{self.retry_limit})...")
-                if self.conn: 
-                    try: self.conn.close()
-                    except: pass
+                log(f"🔗 Connecting DB (Attempt {i+1})")
                 self.conn = mysql.connector.connect(**self.config)
-                log("✅ Database Connected Successfully.")
+                log("✅ DB Connected")
                 return
-            except mysql.connector.Error as err:
-                log(f"⚠️ Connection Attempt {attempt} failed: {err}")
-                if attempt == self.retry_limit:
-                    log("❌ Max retries reached. Check your 'Remote MySQL' settings in your hosting panel and ensure '%' is whitelisted.")
-                    raise
+            except Exception as e:
+                log(f"⚠️ DB Error: {e}")
                 time.sleep(5)
+        raise Exception("❌ DB Connection Failed")
 
     def get_conn(self):
-        try:
-            if not self.conn or not self.conn.is_connected():
-                self.connect()
-            else:
-                self.conn.ping(reconnect=True, attempts=3, delay=2)
-        except:
+        if not self.conn or not self.conn.is_connected():
             self.connect()
         return self.conn
 
+# ---------------- DRIVER ---------------- #
 def get_driver():
-    log("🌐 Setting up Browser...")
+    log("🌐 Launching Browser...")
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
 
+    return webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=opts
+    )
+
+# ---------------- MAIN ---------------- #
 def main():
     db = DBManager(DB_CONFIG)
     driver = None
@@ -92,101 +106,106 @@ def main():
     try:
         db.connect()
 
-        log("📄 Accessing Google Sheets...")
+        # 📄 Google Sheet
+        log("📄 Loading Google Sheet...")
         creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
         gc = gspread.service_account_from_dict(creds)
         ws = gc.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
-        
-        sheet_data = ws.get_all_values()
-        log(f"📊 Sheet Loaded: {len(sheet_data)} rows found.")
-        df_sheet = pd.DataFrame(sheet_data[1:])
-        url_map = dict(zip(df_sheet[0].str.strip().str.upper(), df_sheet[3]))
 
+        data = ws.get_all_values()
+        df = pd.DataFrame(data[1:])
+        url_map = dict(zip(df[0].str.upper().str.strip(), df[3]))
+
+        log(f"📊 Loaded {len(df)} rows")
+
+        # 🔍 DB Query
         conn = db.get_conn()
         cur = conn.cursor(dictionary=True)
-        log(f"🔍 Querying `{SOURCE_TABLE}` for stocks >= {CHANGE_THRESHOLD}%...")
-        query = f"SELECT Symbol, real_close, real_change FROM `{SOURCE_TABLE}` WHERE CAST(real_change AS DECIMAL(10,2)) >= %s"
-        cur.execute(query, (CHANGE_THRESHOLD,))
-        triggered_stocks = cur.fetchall()
+
+        cur.execute(f"""
+            SELECT Symbol, real_close, real_change 
+            FROM `{SOURCE_TABLE}` 
+            WHERE CAST(real_change AS DECIMAL(10,2)) >= %s
+        """, (CHANGE_THRESHOLD,))
+
+        stocks = cur.fetchall()
         cur.close()
 
-        if not triggered_stocks:
-            log("😴 No stocks meet the 7% threshold today.")
+        if not stocks:
+            log("😴 No stocks found")
             return
 
-        log(f"🚀 Found {len(triggered_stocks)} target stocks.")
+        log(f"🚀 {len(stocks)} stocks found")
 
-        # 🧹 TRUNCATE TABLE BEFORE INSERTING NEW DATA
+        # 🧹 Clean table
         conn = db.get_conn()
         cur = conn.cursor()
-        log(f"🧹 Truncating `{TARGET_TABLE}` before inserting new data...")
         cur.execute(f"TRUNCATE TABLE `{TARGET_TABLE}`")
         cur.close()
 
+        # 🌐 Browser
         driver = get_driver()
         driver.get("https://www.tradingview.com/")
         time.sleep(2)
-        
-        log("🍪 Injecting TradingView Cookies...")
+
+        # 🍪 Cookies
         cookies = json.loads(os.getenv("TRADINGVIEW_COOKIES"))
         for c in cookies:
-            driver.add_cookie({"name": c["name"], "value": c["value"], "domain": ".tradingview.com", "path": "/"})
+            driver.add_cookie({
+                "name": c["name"],
+                "value": c["value"],
+                "domain": ".tradingview.com",
+                "path": "/"
+            })
         driver.refresh()
-        log("✅ Session Authenticated.")
 
-        success_count = 0
-        for stock in triggered_stocks:
-            symbol = str(stock['Symbol']).strip().upper()
-            change_val = stock['real_change']
-            day_url = url_map.get(symbol)
+        success = 0
 
-            if not day_url or "tradingview.com" not in day_url:
-                continue
+        for stock in stocks:
+            symbol = stock["Symbol"].upper().strip()
+            change_val = stock["real_change"]
+            url = url_map.get(symbol)
 
-            new_hash = get_hash(symbol, change_val)
-            conn = db.get_conn()
-            cur = conn.cursor()
-            cur.execute(f"SELECT id FROM `{TARGET_TABLE}` WHERE change_hash = %s", (new_hash,))
-            already_exists = cur.fetchone()
-            cur.close()
-
-            if already_exists:
-                log(f"⏭️  Skipping {symbol}: Already captured at {change_val}%")
+            if not url:
                 continue
 
             try:
-                log(f"📸 Processing: {symbol} at {change_val}%")
-                driver.get(day_url)
-                
+                log(f"📸 {symbol} ({change_val}%)")
+
+                driver.get(url)
+
                 WebDriverWait(driver, CHART_WAIT_SEC).until(
-                    EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
+                    EC.presence_of_element_located((By.CLASS_NAME, "chart-container"))
                 )
+
                 time.sleep(POST_LOAD_SLEEP)
-                
-                img_data = driver.get_screenshot_as_png()
+
+                img = driver.get_screenshot_as_png()
 
                 conn = db.get_conn()
                 cur = conn.cursor()
-                sql = f"""INSERT INTO `{TARGET_TABLE}` 
-                          (symbol, timeframe, real_change, real_close, change_hash, screenshot) 
-                          VALUES (%s, %s, %s, %s, %s, %s)"""
-                cur.execute(sql, (symbol, 'day', change_val, stock['real_close'], new_hash, img_data))
-                cur.close()
-                success_count += 1
-                log(f"✅ Saved {symbol}")
-                
-            except Exception as e:
-                log(f"⚠️ Error capturing {symbol}: {e}")
 
-        log(f"🏁 Batch Complete. Total New Screenshots: {success_count}")
+                cur.execute(f"""
+                    INSERT INTO `{TARGET_TABLE}`
+                    (symbol, timeframe, real_change, real_close, screenshot)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (symbol, "day", change_val, stock["real_close"], img))
+
+                cur.close()
+                success += 1
+
+            except Exception as e:
+                log(f"⚠️ Error {symbol}: {e}")
+
+        log(f"🏁 Done. Saved: {success}")
 
     except Exception as e:
-        log(f"🚨 FATAL ERROR: {e}")
+        log(f"🚨 ERROR: {e}")
+
     finally:
-        if driver: 
+        if driver:
             driver.quit()
-            log("🛑 Browser Closed.")
-        log("🛰️ Script Finished.")
+        log("🛑 Finished")
 
 if __name__ == "__main__":
     main()

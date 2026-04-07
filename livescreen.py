@@ -1,11 +1,9 @@
 import os
 import time
 import json
-import hashlib
 import gspread
 import pandas as pd
 import mysql.connector
-from mysql.connector import errorcode
 from datetime import datetime
 import pytz
 import sys
@@ -18,194 +16,124 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
-# ---------------- TIME CONTROL (IST) ---------------- #
-def is_allowed_time():
-    ist = pytz.timezone("Asia/Kolkata")
-    now = datetime.now(ist)
-
-    print(f"[TIME] Current IST: {now.strftime('%Y-%m-%d %H:%M:%S')}")
-
-    if 9 <= now.hour <= 16:
-        print("✅ Within allowed time (9 AM – 4 PM IST)")
-        return True
-    else:
-        print("⛔ Outside allowed time. Exiting...")
-        return False
-
-if not is_allowed_time():
-    sys.exit()
-
-# ---------------- CONFIG ---------------- #
+# ---------------- CONFIG & TIME ---------------- #
 STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
 STOCK_LIST_GID = 1400370843
-
 SOURCE_TABLE = "wp_live_close"
 TARGET_TABLE = "live_screen"
 CHANGE_THRESHOLD = 7.0 
 
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD"),
-    "database": os.getenv("DB_NAME"),
-    "connect_timeout": 20,
-    "autocommit": True
-}
+def get_now_ist():
+    return datetime.now(pytz.timezone("Asia/Kolkata"))
 
-CHART_WAIT_SEC = 25
-POST_LOAD_SLEEP = 4
+# Exit if not during market/processing hours
+now = get_now_ist()
+if not (9 <= now.hour <= 16):
+    print(f"⛔ Outside allowed time ({now.strftime('%H:%M')}). Exiting...")
+    sys.exit()
 
-def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
-
-def get_hash(symbol, change_val):
-    return hashlib.sha256(f"{symbol}_day_{change_val}".encode()).hexdigest()
-
-# ---------------- DB MANAGER ---------------- #
-class DBManager:
-    def __init__(self, config):
-        self.config = config
-        self.conn = None
-
-    def connect(self):
-        for i in range(3):
-            try:
-                log(f"🔗 Connecting DB (Attempt {i+1})")
-                self.conn = mysql.connector.connect(**self.config)
-                log("✅ DB Connected")
-                return
-            except Exception as e:
-                log(f"⚠️ DB Error: {e}")
-                time.sleep(5)
-        raise Exception("❌ DB Connection Failed")
-
-    def get_conn(self):
-        if not self.conn or not self.conn.is_connected():
-            self.connect()
-        return self.conn
-
-# ---------------- DRIVER ---------------- #
-def get_driver():
-    log("🌐 Launching Browser...")
+# ---------------- OPTIMIZED DRIVER ---------------- #
+def get_optimized_driver():
+    print("🌐 Launching Optimized Browser...")
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-
-    return webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=opts
-    )
+    # OPTIMIZATION: Disable images (optional) or just ads to speed up load
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
+    return driver
 
 # ---------------- MAIN ---------------- #
 def main():
-    db = DBManager(DB_CONFIG)
+    conn = None
     driver = None
-
+    
     try:
-        db.connect()
+        # 1. Database Connection
+        conn = mysql.connector.connect(
+            host=os.getenv("DB_HOST"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            database=os.getenv("DB_NAME"),
+            autocommit=True
+        )
+        cur = conn.cursor(dictionary=True)
 
-        # 📄 Google Sheet
-        log("📄 Loading Google Sheet...")
+        # 2. Fetch Signals (Filtered by Threshold)
+        cur.execute(f"SELECT Symbol, real_close, real_change FROM `{SOURCE_TABLE}` WHERE CAST(real_change AS DECIMAL(10,2)) >= %s", (CHANGE_THRESHOLD,))
+        stocks = cur.fetchall()
+        
+        if not stocks:
+            print("😴 No high-growth stocks found. Sleeping.")
+            return
+
+        # 3. Load URL Map from Google Sheets
         creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
         gc = gspread.service_account_from_dict(creds)
         ws = gc.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
-
-        data = ws.get_all_values()
-        df = pd.DataFrame(data[1:])
+        df = pd.DataFrame(ws.get_all_values()[1:])
         url_map = dict(zip(df[0].str.upper().str.strip(), df[3]))
 
-        log(f"📊 Loaded {len(df)} rows")
+        # 4. Check what we ALREADY processed today (To avoid re-doing work if stuck)
+        today_str = get_now_ist().strftime('%Y-%m-%d')
+        cur.execute(f"SELECT symbol FROM `{TARGET_TABLE}` WHERE DATE(created_at) = %s", (today_str,))
+        processed_today = {row['symbol'] for row in cur.fetchall()}
 
-        # 🔍 DB Query
-        conn = db.get_conn()
-        cur = conn.cursor(dictionary=True)
-
-        cur.execute(f"""
-            SELECT Symbol, real_close, real_change 
-            FROM `{SOURCE_TABLE}` 
-            WHERE CAST(real_change AS DECIMAL(10,2)) >= %s
-        """, (CHANGE_THRESHOLD,))
-
-        stocks = cur.fetchall()
-        cur.close()
-
-        if not stocks:
-            log("😴 No stocks found")
-            return
-
-        log(f"🚀 {len(stocks)} stocks found")
-
-        # 🧹 Clean table
-        conn = db.get_conn()
-        cur = conn.cursor()
-        cur.execute(f"TRUNCATE TABLE `{TARGET_TABLE}`")
-        cur.close()
-
-        # 🌐 Browser
-        driver = get_driver()
+        # 5. Setup Browser with TradingView Session
+        driver = get_optimized_driver()
         driver.get("https://www.tradingview.com/")
-        time.sleep(2)
-
-        # 🍪 Cookies
+        
         cookies = json.loads(os.getenv("TRADINGVIEW_COOKIES"))
         for c in cookies:
-            driver.add_cookie({
-                "name": c["name"],
-                "value": c["value"],
-                "domain": ".tradingview.com",
-                "path": "/"
-            })
+            driver.add_cookie({"name": c["name"], "value": c["value"], "domain": ".tradingview.com", "path": "/"})
         driver.refresh()
 
-        success = 0
-
+        success_count = 0
         for stock in stocks:
             symbol = stock["Symbol"].upper().strip()
-            change_val = stock["real_change"]
-            url = url_map.get(symbol)
-
-            if not url:
+            if symbol in processed_today:
+                print(f"⏩ Skipping {symbol} (Already captured today)")
                 continue
+                
+            url = url_map.get(symbol)
+            if not url: continue
 
             try:
-                log(f"📸 {symbol} ({change_val}%)")
-
+                print(f"📸 Capturing {symbol}...", end=" ", flush=True)
                 driver.get(url)
 
-                WebDriverWait(driver, CHART_WAIT_SEC).until(
-                    EC.presence_of_element_located((By.CLASS_NAME, "chart-container"))
-                )
+                # OPTIMIZATION: Wait for the specific chart layout, not just the container
+                WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container-border')]")))
+                
+                # Shorter sleep, just enough for candles to render
+                time.sleep(3) 
 
-                time.sleep(POST_LOAD_SLEEP)
+                img_data = driver.get_screenshot_as_png()
+                ist_now = get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
 
-                img = driver.get_screenshot_as_png()
-
-                conn = db.get_conn()
-                cur = conn.cursor()
-
+                # Use the same cursor to insert
                 cur.execute(f"""
-                    INSERT INTO `{TARGET_TABLE}`
-                    (symbol, timeframe, real_change, real_close, screenshot)
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (symbol, "day", change_val, stock["real_close"], img))
-
-                cur.close()
-                success += 1
+                    INSERT INTO `{TARGET_TABLE}` (symbol, timeframe, real_change, real_close, screenshot, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE screenshot=%s, created_at=%s
+                """, (symbol, "day", stock["real_change"], stock["real_close"], img_data, ist_now, img_data, ist_now))
+                
+                print("✅")
+                success_count += 1
 
             except Exception as e:
-                log(f"⚠️ Error {symbol}: {e}")
+                print(f"❌ Failed: {str(e)[:50]}")
 
-        log(f"🏁 Done. Saved: {success}")
+        print(f"🏁 Finished. New captures: {success_count}")
 
     except Exception as e:
-        log(f"🚨 ERROR: {e}")
-
+        print(f"🚨 CRITICAL ERROR: {e}")
     finally:
-        if driver:
-            driver.quit()
-        log("🛑 Finished")
+        if conn: conn.close()
+        if driver: driver.quit()
 
 if __name__ == "__main__":
     main()

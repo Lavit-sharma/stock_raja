@@ -16,7 +16,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
-# ---------------- CONFIG & TIME ---------------- #
+# ---------------- CONFIG ---------------- #
 STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
 STOCK_LIST_GID = 1400370843
 SOURCE_TABLE = "wp_live_close"
@@ -26,63 +26,55 @@ CHANGE_THRESHOLD = 7.0
 def get_now_ist():
     return datetime.now(pytz.timezone("Asia/Kolkata"))
 
-# Exit if not during market/processing hours
-now = get_now_ist()
-if not (9 <= now.hour <= 16):
-    print(f"⛔ Outside allowed time ({now.strftime('%H:%M')}). Exiting...")
-    sys.exit()
-
 # ---------------- OPTIMIZED DRIVER ---------------- #
 def get_optimized_driver():
-    print("🌐 Launching Optimized Browser...")
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-    # OPTIMIZATION: Disable images (optional) or just ads to speed up load
-    opts.add_argument("--disable-blink-features=AutomationControlled")
+    # Speed up loading by ignoring unnecessary syncs
+    opts.add_argument("--proxy-server='direct://'")
+    opts.add_argument("--proxy-bypass-list=*")
     
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
     return driver
 
 # ---------------- MAIN ---------------- #
 def main():
-    conn = None
     driver = None
+    db_conn = None
     
     try:
-        # 1. Database Connection
-        conn = mysql.connector.connect(
+        # 1. Database Connection (Established once)
+        print("🔗 Connecting to Database...")
+        db_conn = mysql.connector.connect(
             host=os.getenv("DB_HOST"),
             user=os.getenv("DB_USER"),
             password=os.getenv("DB_PASSWORD"),
             database=os.getenv("DB_NAME"),
-            autocommit=True
+            autocommit=True,
+            connection_timeout=30 # Increased timeout
         )
-        cur = conn.cursor(dictionary=True)
+        cur = db_conn.cursor(dictionary=True)
 
-        # 2. Fetch Signals (Filtered by Threshold)
+        # 2. Fetch Signals
         cur.execute(f"SELECT Symbol, real_close, real_change FROM `{SOURCE_TABLE}` WHERE CAST(real_change AS DECIMAL(10,2)) >= %s", (CHANGE_THRESHOLD,))
         stocks = cur.fetchall()
         
         if not stocks:
-            print("😴 No high-growth stocks found. Sleeping.")
+            print("😴 No signals found.")
             return
 
-        # 3. Load URL Map from Google Sheets
+        # 3. Load URL Map
         creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
         gc = gspread.service_account_from_dict(creds)
         ws = gc.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
         df = pd.DataFrame(ws.get_all_values()[1:])
         url_map = dict(zip(df[0].str.upper().str.strip(), df[3]))
 
-        # 4. Check what we ALREADY processed today (To avoid re-doing work if stuck)
-        today_str = get_now_ist().strftime('%Y-%m-%d')
-        cur.execute(f"SELECT symbol FROM `{TARGET_TABLE}` WHERE DATE(created_at) = %s", (today_str,))
-        processed_today = {row['symbol'] for row in cur.fetchall()}
-
-        # 5. Setup Browser with TradingView Session
+        # 4. Setup Browser
+        print(f"🚀 Processing {len(stocks)} stocks...")
         driver = get_optimized_driver()
         driver.get("https://www.tradingview.com/")
         
@@ -94,46 +86,49 @@ def main():
         success_count = 0
         for stock in stocks:
             symbol = stock["Symbol"].upper().strip()
-            if symbol in processed_today:
-                print(f"⏩ Skipping {symbol} (Already captured today)")
-                continue
-                
             url = url_map.get(symbol)
             if not url: continue
 
             try:
-                print(f"📸 Capturing {symbol}...", end=" ", flush=True)
+                # 🛡️ CHECK DB CONNECTION BEFORE EACH UPLOAD
+                try:
+                    db_conn.ping(reconnect=True, attempts=3, delay=2)
+                except:
+                    print("🔄 Reconnecting DB...")
+                    db_conn = mysql.connector.connect(host=os.getenv("DB_HOST"), user=os.getenv("DB_USER"), password=os.getenv("DB_PASSWORD"), database=os.getenv("DB_NAME"), autocommit=True)
+                    cur = db_conn.cursor(dictionary=True)
+
+                print(f"📸 {symbol}...", end=" ", flush=True)
                 driver.get(url)
 
-                # OPTIMIZATION: Wait for the specific chart layout, not just the container
-                WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'chart-container-border')]")))
-                
-                # Shorter sleep, just enough for candles to render
-                time.sleep(3) 
+                # Wait for chart specifically
+                WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CLASS_NAME, "chart-container")))
+                time.sleep(3) # Small buffer for candles
 
                 img_data = driver.get_screenshot_as_png()
                 ist_now = get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
 
-                # Use the same cursor to insert
-                cur.execute(f"""
+                # UPSERT: Update if exists, insert if not
+                sql = f"""
                     INSERT INTO `{TARGET_TABLE}` (symbol, timeframe, real_change, real_close, screenshot, created_at)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                    ON DUPLICATE KEY UPDATE screenshot=%s, created_at=%s
-                """, (symbol, "day", stock["real_change"], stock["real_close"], img_data, ist_now, img_data, ist_now))
+                    ON DUPLICATE KEY UPDATE screenshot=%s, created_at=%s, real_change=%s, real_close=%s
+                """
+                cur.execute(sql, (symbol, "day", stock["real_change"], stock["real_close"], img_data, ist_now, img_data, ist_now, stock["real_change"], stock["real_close"]))
                 
                 print("✅")
                 success_count += 1
 
             except Exception as e:
-                print(f"❌ Failed: {str(e)[:50]}")
+                print(f"❌ Error: {str(e)[:40]}")
 
-        print(f"🏁 Finished. New captures: {success_count}")
+        print(f"🏁 Done. Total: {success_count}")
 
     except Exception as e:
-        print(f"🚨 CRITICAL ERROR: {e}")
+        print(f"🚨 CRITICAL: {e}")
     finally:
-        if conn: conn.close()
         if driver: driver.quit()
+        if db_conn: db_conn.close()
 
 if __name__ == "__main__":
     main()

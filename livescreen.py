@@ -5,7 +5,6 @@ import gspread
 import pandas as pd
 import mysql.connector
 from datetime import datetime
-import pytz
 import sys
 
 from selenium import webdriver
@@ -23,10 +22,6 @@ SOURCE_TABLE = "wp_live_close"
 TARGET_TABLE = "live_screen"
 CHANGE_THRESHOLD = 7.0 
 
-# ---------------- TIME ---------------- #
-def get_now_ist():
-    return datetime.now(pytz.timezone("Asia/Kolkata"))
-
 # ---------------- DRIVER ---------------- #
 def get_optimized_driver():
     opts = Options()
@@ -34,8 +29,6 @@ def get_optimized_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-    opts.add_argument("--proxy-server='direct://'")
-    opts.add_argument("--proxy-bypass-list=*")
     
     driver = webdriver.Chrome(
         service=Service(ChromeDriverManager().install()),
@@ -49,13 +42,8 @@ def main():
     db_conn = None
 
     try:
-        # ✅ STRICT IST TIME CHECK
-        now = get_now_ist()
-        if not (9 <= now.hour < 16):
-            print(f"⏰ Outside IST time: {now}. Skipping run.")
-            sys.exit()
-
-        print(f"🕒 Running at IST: {now}")
+        # Use UTC for logging
+        print(f"🕒 Execution Started at UTC: {datetime.utcnow()}")
 
         # ---------------- DB CONNECTION ---------------- #
         print("🔗 Connecting to Database...")
@@ -64,8 +52,7 @@ def main():
             user=os.getenv("DB_USER"),
             password=os.getenv("DB_PASSWORD"),
             database=os.getenv("DB_NAME"),
-            autocommit=True,
-            connection_timeout=30
+            autocommit=True
         )
         cur = db_conn.cursor(dictionary=True)
 
@@ -83,7 +70,7 @@ def main():
         stocks = cur.fetchall()
 
         if not stocks:
-            print("😴 No signals found.")
+            print("😴 No signals found. Terminating.")
             return
 
         # ---------------- LOAD GOOGLE SHEET ---------------- #
@@ -99,6 +86,7 @@ def main():
         driver = get_optimized_driver()
         driver.get("https://www.tradingview.com/")
 
+        # Apply Cookies
         cookies = json.loads(os.getenv("TRADINGVIEW_COOKIES"))
         for c in cookies:
             driver.add_cookie({
@@ -119,35 +107,19 @@ def main():
                 continue
 
             try:
-                # 🔄 Ensure DB alive
-                try:
-                    db_conn.ping(reconnect=True, attempts=3, delay=2)
-                except:
-                    print("🔄 Reconnecting DB...")
-                    db_conn = mysql.connector.connect(
-                        host=os.getenv("DB_HOST"),
-                        user=os.getenv("DB_USER"),
-                        password=os.getenv("DB_PASSWORD"),
-                        database=os.getenv("DB_NAME"),
-                        autocommit=True
-                    )
-                    cur = db_conn.cursor(dictionary=True)
-
-                print(f"📸 {symbol}...", end=" ", flush=True)
+                db_conn.ping(reconnect=True, attempts=3, delay=2)
+                print(f"📸 Capturing {symbol}...", end=" ", flush=True)
 
                 driver.get(url)
 
-                WebDriverWait(driver, 20).until(
+                WebDriverWait(driver, 25).until(
                     EC.presence_of_element_located((By.CLASS_NAME, "chart-container"))
                 )
-                time.sleep(3)
+                time.sleep(5) 
 
                 img_data = driver.get_screenshot_as_png()
 
-                # ✅ ALWAYS CORRECT IST TIME
-                ist_now = get_now_ist()
-
-                # ---------------- INSERT ---------------- #
+                # ---------------- INSERT (UTC TIME) ---------------- #
                 sql = f"""
                     INSERT INTO `{TARGET_TABLE}` 
                     (symbol, timeframe, real_change, real_close, screenshot, created_at)
@@ -160,16 +132,16 @@ def main():
                     stock["real_change"],
                     stock["real_close"],
                     img_data,
-                    ist_now
+                    datetime.utcnow() # Storing in UTC
                 ))
 
                 print("✅")
                 success_count += 1
 
             except Exception as e:
-                print(f"❌ Error: {str(e)[:60]}")
+                print(f"❌ Error: {str(e)[:50]}")
 
-        print(f"🏁 Done. Total success: {success_count}")
+        print(f"🏁 Done. Total successful screenshots: {success_count}")
 
     except Exception as e:
         print(f"🚨 CRITICAL ERROR: {e}")
@@ -180,6 +152,5 @@ def main():
         if db_conn:
             db_conn.close()
 
-# ---------------- RUN ---------------- #
 if __name__ == "__main__":
     main()

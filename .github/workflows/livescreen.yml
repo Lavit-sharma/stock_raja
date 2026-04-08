@@ -3,11 +3,14 @@ name: Live Screen Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 4-10 * * 1-5"   # 9:30 AM – 3:30 PM IST approx
+    # 3:30 AM UTC is 9:00 AM IST
+    # 9:30 AM UTC is 3:00 PM IST
+    # Runs Monday to Friday (1-5)
+    - cron: "30 3-9 * * 1-5"
 
 jobs:
   run-bot:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
@@ -19,8 +22,7 @@ jobs:
           python-version: "3.10"
 
       - name: Install Dependencies
-        run: |
-          pip install selenium webdriver-manager mysql-connector-python gspread pandas pytz
+        run: pip install selenium webdriver-manager mysql-connector-python gspread pandas pytz
 
       - name: Run Script
         env:

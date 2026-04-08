@@ -3,7 +3,7 @@ name: Live Screen Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * 1-5"  # every hour UTC
+    - cron: "0 4-10 * * 1-5"   # 9:30 AM – 3:30 PM IST approx
 
 jobs:
   run-bot:
@@ -30,5 +30,4 @@ jobs:
           DB_NAME: ${{ secrets.DB_NAME }}
           GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
           TRADINGVIEW_COOKIES: ${{ secrets.TRADINGVIEW_COOKIES }}
-
         run: python livescreen.py

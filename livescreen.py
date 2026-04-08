@@ -52,7 +52,7 @@ def main():
             user=os.getenv("DB_USER"),
             password=os.getenv("DB_PASSWORD"),
             database=os.getenv("DB_NAME"),
-            autocommit=True
+            autocommit=True # Keep this, but we will call commit explicitly to be safe
         )
         cur = db_conn.cursor(dictionary=True)
 
@@ -78,8 +78,11 @@ def main():
         gc = gspread.service_account_from_dict(creds)
         ws = gc.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
 
-        df = pd.DataFrame(ws.get_all_values()[1:])
-        url_map = dict(zip(df[0].str.upper().str.strip(), df[3]))
+        # Ensure we handle the dataframe indexing safely
+        data = ws.get_all_values()
+        df = pd.DataFrame(data[1:], columns=data[0]) 
+        # Mapping Symbol (Col A) to URL (Col D)
+        url_map = dict(zip(df.iloc[:, 0].str.upper().str.strip(), df.iloc[:, 3]))
 
         # ---------------- BROWSER ---------------- #
         print(f"🚀 Processing {len(stocks)} stocks...")
@@ -104,6 +107,7 @@ def main():
             symbol = stock["Symbol"].upper().strip()
             url = url_map.get(symbol)
             if not url:
+                print(f"⚠️ No URL for {symbol}")
                 continue
 
             try:
@@ -132,8 +136,11 @@ def main():
                     stock["real_change"],
                     stock["real_close"],
                     img_data,
-                    datetime.utcnow() # Storing in UTC
+                    datetime.utcnow()
                 ))
+                
+                # Explicitly commit each record to ensure it is written immediately
+                db_conn.commit()
 
                 print("✅")
                 success_count += 1
@@ -147,10 +154,13 @@ def main():
         print(f"🚨 CRITICAL ERROR: {e}")
 
     finally:
+        if db_conn and db_conn.is_connected():
+            db_conn.commit() # Final safety commit
+            cur.close()
+            db_conn.close()
+            print("🔌 Database connection closed.")
         if driver:
             driver.quit()
-        if db_conn:
-            db_conn.close()
 
 if __name__ == "__main__":
     main()

@@ -1,8 +1,8 @@
 name: NSE Delivery Scraper
 
 on:
-  schedule:
-    - cron: '30 11 * * 1-5' # 5:00 PM IST (11:30 AM UTC) Mon-Fri
+
+     # 5:00 PM IST (11:30 AM UTC) Mon-Fri
   workflow_dispatch:      # Allows manual trigger
 
 jobs:

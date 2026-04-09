@@ -2,11 +2,7 @@ name: Live Screen Bot
 
 on:
   workflow_dispatch:
-  schedule:
-    # 3:30 AM UTC is 9:00 AM IST
-    # 9:30 AM UTC is 3:00 PM IST
-    # Runs Monday to Friday (1-5)
-    - cron: "30 3-9 * * 1-5"
+  
 
 jobs:
   run-bot:

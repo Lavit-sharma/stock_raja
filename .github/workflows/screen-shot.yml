@@ -32,6 +32,6 @@ jobs:
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
           # TradingView & Google Secrets
-          TRADINGVIEW_COOKIES: ${{ secrets.TRADINGVIEW_COOKIES }}
+          TRADINGVIEW_COOKIES: ${{ secrets.TRADINGVIEW_COOKIES2 }}
           GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
         run: python screen.py

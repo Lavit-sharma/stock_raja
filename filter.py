@@ -354,16 +354,14 @@ def main():
         d_trigger_s_col = get_column_case_insensitive(df_mv2, "D_Trigger_S")
         w_trigger_col = get_column_case_insensitive(df_mv2, "W_Trigger")
         w_trigger_s_col = get_column_case_insensitive(df_mv2, "W_Trigger_S")
-        cr1_col = get_column_case_insensitive(df_mv2, "CR1")
-        cr2_col = get_column_case_insensitive(df_mv2, "CR2")
+       
 
         required_map = {
             "D_Trigger": d_trigger_col,
             "D_Trigger_S": d_trigger_s_col,
             "W_Trigger": w_trigger_col,
             "W_Trigger_S": w_trigger_s_col,
-            "CR1": cr1_col,
-            "CR2": cr2_col,
+         
         }
 
         for expected_name, actual_name in required_map.items():
@@ -376,8 +374,7 @@ def main():
         df_mv2["D_Trigger_S_num"] = df_mv2[d_trigger_s_col].apply(safe_int)
         df_mv2["W_Trigger_num"] = df_mv2[w_trigger_col].apply(safe_int)
         df_mv2["W_Trigger_S_num"] = df_mv2[w_trigger_s_col].apply(safe_int)
-        df_mv2["CR1_num"] = df_mv2[cr1_col].apply(safe_int)
-        df_mv2["CR2_num"] = df_mv2[cr2_col].apply(safe_int)
+        
 
         # -------------------------
         # PART 1: D_Trigger
@@ -449,43 +446,9 @@ def main():
             "🔍 Scanning W_Trigger_S for value 0 with W_Trigger_S != W_Trigger"
         )
 
-        # -------------------------
-        # PART 5: CR1
-        # Condition: CR1 == 1
-        # Same logic as D_Trigger / W_Trigger
-        # -------------------------
-        cr1_rows = df_mv2[df_mv2["CR1_num"] == 1]
-        process_trigger_rows(
-            driver,
-            db,
-            cr1_rows,
-            day_urls,
-            week_urls,
-            "CR1",
-            "🔍 Scanning CR1 for value 1"
-        )
+       
 
-        # -------------------------
-        # PART 6: CR2
-        # Condition:
-        # CR2 == 1
-        # AND CR2 != CR1
-        # Same logic as D_Trigger_S / W_Trigger_S
-        # -------------------------
-        cr2_rows = df_mv2[
-            (df_mv2["CR2_num"] == 1) &
-            (df_mv2["CR2_num"] != df_mv2["CR1_num"])
-        ]
-        process_trigger_rows(
-            driver,
-            db,
-            cr2_rows,
-            day_urls,
-            week_urls,
-            "CR2",
-            "🔍 Scanning CR2 for value 1 with CR2 != CR1"
-        )
-
+      
         log("🏁 All triggers processed successfully.")
 
     except Exception as e:

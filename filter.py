@@ -335,7 +335,6 @@ def main():
         df_stocks = load_stock_sheet(client)
 
         # Step 4: symbol -> urls
-        # Column 0 = Symbol, Column 2 = Week URL, Column 3 = Day URL
         symbol_series = df_stocks.iloc[:, 0].astype(str).str.strip()
         week_series = df_stocks.iloc[:, 2].astype(str).str.strip()
         day_series = df_stocks.iloc[:, 3].astype(str).str.strip()
@@ -354,14 +353,20 @@ def main():
         d_trigger_s_col = get_column_case_insensitive(df_mv2, "D_Trigger_S")
         w_trigger_col = get_column_case_insensitive(df_mv2, "W_Trigger")
         w_trigger_s_col = get_column_case_insensitive(df_mv2, "W_Trigger_S")
-       
+        
+        # New Filter Columns
+        mxmn_low_col = get_column_case_insensitive(df_mv2, "MXMN_low")
+        mxmn_col = get_column_case_insensitive(df_mv2, "MXMN")
+        d_clabove_col = get_column_case_insensitive(df_mv2, "D_CLABOVE")
 
         required_map = {
             "D_Trigger": d_trigger_col,
             "D_Trigger_S": d_trigger_s_col,
             "W_Trigger": w_trigger_col,
             "W_Trigger_S": w_trigger_s_col,
-         
+            "MXMN_low": mxmn_low_col,
+            "MXMN": mxmn_col,
+            "D_CLABOVE": d_clabove_col
         }
 
         for expected_name, actual_name in required_map.items():
@@ -375,81 +380,48 @@ def main():
         df_mv2["W_Trigger_num"] = df_mv2[w_trigger_col].apply(safe_int)
         df_mv2["W_Trigger_S_num"] = df_mv2[w_trigger_s_col].apply(safe_int)
         
+        # New Numeric Conversions
+        df_mv2["MXMN_low_num"] = df_mv2[mxmn_low_col].apply(safe_int)
+        df_mv2["MXMN_num"] = df_mv2[mxmn_col].apply(safe_int)
+        df_mv2["D_CLABOVE_num"] = df_mv2[d_clabove_col].apply(safe_int)
 
         # -------------------------
-        # PART 1: D_Trigger
-        # Condition: D_Trigger == 0
+        # EXISTING TRIGGERS
         # -------------------------
+        
+        # D_Trigger == 0
         dtrigger_rows = df_mv2[df_mv2["D_Trigger_num"] == 0]
-        process_trigger_rows(
-            driver,
-            db,
-            dtrigger_rows,
-            day_urls,
-            week_urls,
-            "D_Trigger",
-            "🔍 Scanning D_Trigger for value 0"
-        )
+        process_trigger_rows(driver, db, dtrigger_rows, day_urls, week_urls, "D_Trigger", "🔍 Scanning D_Trigger for value 0")
 
-        # -------------------------
-        # PART 2: D_Trigger_S
-        # Condition:
-        # D_Trigger_S == 0
-        # AND D_Trigger_S != D_Trigger
-        # -------------------------
-        dtrigger_s_rows = df_mv2[
-            (df_mv2["D_Trigger_S_num"] == 0) &
-            (df_mv2["D_Trigger_S_num"] != df_mv2["D_Trigger_num"])
-        ]
-        process_trigger_rows(
-            driver,
-            db,
-            dtrigger_s_rows,
-            day_urls,
-            week_urls,
-            "D_Trigger_S",
-            "🔍 Scanning D_Trigger_S for value 0 with D_Trigger_S != D_Trigger"
-        )
+        # D_Trigger_S == 0 AND != D_Trigger
+        dtrigger_s_rows = df_mv2[(df_mv2["D_Trigger_S_num"] == 0) & (df_mv2["D_Trigger_S_num"] != df_mv2["D_Trigger_num"])]
+        process_trigger_rows(driver, db, dtrigger_s_rows, day_urls, week_urls, "D_Trigger_S", "🔍 Scanning D_Trigger_S")
 
-        # -------------------------
-        # PART 3: W_Trigger
-        # Condition: W_Trigger == 0
-        # -------------------------
+        # W_Trigger == 1
         wtrigger_rows = df_mv2[df_mv2["W_Trigger_num"] == 1]
-        process_trigger_rows(
-            driver,
-            db,
-            wtrigger_rows,
-            day_urls,
-            week_urls,
-            "W_Trigger",
-            "🔍 Scanning W_Trigger for value 1"
-        )
+        process_trigger_rows(driver, db, wtrigger_rows, day_urls, week_urls, "W_Trigger", "🔍 Scanning W_Trigger for value 1")
+
+        # W_Trigger_S == 0 AND != W_Trigger
+        wtrigger_s_rows = df_mv2[(df_mv2["W_Trigger_S_num"] == 0) & (df_mv2["W_Trigger_S_num"] != df_mv2["W_Trigger_num"])]
+        process_trigger_rows(driver, db, wtrigger_s_rows, day_urls, week_urls, "W_Trigger_S", "🔍 Scanning W_Trigger_S")
 
         # -------------------------
-        # PART 4: W_Trigger_S
-        # Condition:
-        # W_Trigger_S == 0
-        # AND W_Trigger_S != W_Trigger
+        # NEW FILTERS
         # -------------------------
-        wtrigger_s_rows = df_mv2[
-            (df_mv2["W_Trigger_S_num"] == 0) &
-            (df_mv2["W_Trigger_S_num"] != df_mv2["W_Trigger_num"])
-        ]
-        process_trigger_rows(
-            driver,
-            db,
-            wtrigger_s_rows,
-            day_urls,
-            week_urls,
-            "W_Trigger_S",
-            "🔍 Scanning W_Trigger_S for value 0 with W_Trigger_S != W_Trigger"
-        )
+        
+        # PART 5: Moment Filter (MXMN_low < 10)
+        moment_rows = df_mv2[(df_mv2["MXMN_low_num"] != -1) & (df_mv2["MXMN_low_num"] < 10)]
+        process_trigger_rows(driver, db, moment_rows, day_urls, week_urls, "Moment Filter", "🔍 Scanning Moment Filter (MXMN_low < 10)")
 
-       
+        # PART 6: Conso Filter (MXMN < 15)
+        conso_rows = df_mv2[(df_mv2["MXMN_num"] != -1) & (df_mv2["MXMN_num"] < 15)]
+        process_trigger_rows(driver, db, conso_rows, day_urls, week_urls, "Conso Filter", "🔍 Scanning Conso Filter (MXMN < 15)")
 
-      
-        log("🏁 All triggers processed successfully.")
+        # PART 7: Jump Filter (D_CLABOVE > 4)
+        jump_rows = df_mv2[df_mv2["D_CLABOVE_num"] > 4]
+        process_trigger_rows(driver, db, jump_rows, day_urls, week_urls, "Jump Filter", "🔍 Scanning Jump Filter (D_CLABOVE > 4)")
+
+        log("🏁 All triggers and filters processed successfully.")
 
     except Exception as e:
         log(f"❌ Fatal error: {e}")

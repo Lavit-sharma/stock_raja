@@ -124,7 +124,7 @@ def roll_days_forward(db: DB):
     Shifts day values and deletes only rows older than day 4
     where review_status = 'rejected'.
     """
-    update_query = f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 0"
+    update_query = f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 1"
     delete_query = f"""
         DELETE FROM `{TARGET_TABLE}`
         WHERE `day` > %s

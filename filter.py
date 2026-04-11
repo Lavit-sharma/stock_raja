@@ -31,423 +31,180 @@ DB_CONFIG = {
 CHART_WAIT_SEC = 30
 POST_LOAD_SLEEP = 6
 DB_RETRY = 3
-MAX_DAY_TO_KEEP = 4  # keep day 0 to day 4 = total 5 days
+MAX_DAY_TO_KEEP = 4  
 
-# webdriver-manager installs chrome driver automatically
 CHROME_DRIVER_PATH = ChromeDriverManager().install()
-
 
 # ---------------- HELPERS ---------------- #
 def log(msg):
     print(msg, flush=True)
 
 def safe_str(v):
-    if v is None:
-        return ""
+    if v is None: return ""
     return str(v).strip()
 
-def safe_int(v):
+def safe_float(v):
     try:
         val = safe_str(v)
-        if not val:
-            return -1
-        return int(float(val))
+        if not val: return -1.0
+        return float(val)
     except (ValueError, TypeError):
-        return -1
+        return -1.0
 
 def clean_headers(header_list):
     return [safe_str(col) for col in header_list]
 
-def deduplicate_columns(df, df_name="DataFrame"):
-    """
-    Removes duplicate column names, keeping first occurrence.
-    """
-    counts = Counter(df.columns)
-    duplicates = {k: v for k, v in counts.items() if v > 1 and k != ""}
-
-    if duplicates:
-        log(f"⚠️ Duplicate headers found in {df_name}: {duplicates}")
-        log(f"⚠️ Keeping first occurrence only in {df_name}.")
-
-    blank_cols = [i for i, c in enumerate(df.columns) if safe_str(c) == ""]
-    if blank_cols:
-        log(f"⚠️ Blank header columns found in {df_name} at positions: {blank_cols}")
-
-    df = df.loc[:, ~df.columns.duplicated()]
-    return df
-
-def get_column_case_insensitive(df, target_name):
-    """
-    Finds actual column name ignoring case and spaces.
-    """
-    target = safe_str(target_name).lower()
-    for col in df.columns:
-        if safe_str(col).lower() == target:
-            return col
-    return None
-
-
-# ---------------- DB CLASS ---------------- #
-class DB:
-    def __init__(self, config):
-        self.config = config
-        self.conn = None
-        self.connect()
-
-    def connect(self):
-        if self.conn:
-            try:
-                self.conn.close()
-            except:
-                pass
-        self.conn = mysql.connector.connect(**self.config)
-        self.conn.autocommit = True
-        return self.conn
-
-    def ensure(self):
-        if not self.conn or not self.conn.is_connected():
-            return self.connect()
-        return self.conn
-
-    def close(self):
-        try:
-            if self.conn:
-                self.conn.close()
-        except:
-            pass
-
-
-# ---------------- DAILY ROLLOVER ---------------- #
-def roll_days_forward(db: DB):
-    """
-    Runs once per script execution.
-    Shifts day values and deletes only rows older than day 4
-    where review_status = 'rejected'.
-    """
-    update_query = f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 0"
-    delete_query = f"""
-        DELETE FROM `{TARGET_TABLE}`
-        WHERE `day` > %s
-          AND LOWER(TRIM(COALESCE(`review_status`, ''))) = 'rejected'
-    """
-
-    for attempt in range(DB_RETRY):
-        try:
-            conn = db.ensure()
-            cur = conn.cursor()
-
-            cur.execute(update_query)
-            cur.execute(delete_query, (MAX_DAY_TO_KEEP,))
-
-            deleted_rows = cur.rowcount
-            cur.close()
-
-            log(f"✅ Day rollover completed. Deleted rejected rows older than day {MAX_DAY_TO_KEEP}: {deleted_rows}")
-            return
-        except Exception as e:
-            log(f"⚠️ Rollover error (attempt {attempt + 1}/{DB_RETRY}): {e}")
-            db.connect()
-            time.sleep(1)
-
-    raise Exception("Failed to complete day rollover after retries.")
-
-
-# ---------------- SAVE SCREENSHOT ---------------- #
-
-def save_screenshot(db: DB, symbol, timeframe, filter_type, image):
-    query = f"""
-        INSERT INTO `{TARGET_TABLE}` 
-        (`symbol`, `timeframe`, `filter_type`, `day`, `screenshot`)
-        VALUES (%s, %s, %s, 0, %s)
-        ON DUPLICATE KEY UPDATE
-            screenshot = VALUES(screenshot),
-            day = 0
-    """
-
-    for attempt in range(DB_RETRY):
-        try:
-            conn = db.ensure()
-            cur = conn.cursor()
-
-            cur.execute(query, (symbol, timeframe, filter_type, image))
-
-            # Smart logging
-            if cur.rowcount == 1:
-                log(f"✅ Inserted: {symbol} | {filter_type} | {timeframe}")
-            else:
-                log(f"🔄 Updated (duplicate prevented): {symbol} | {filter_type} | {timeframe}")
-
-            cur.close()
-            return
-
-        except Exception as e:
-            log(f"⚠️ DB save error for {symbol} {timeframe} {filter_type} (attempt {attempt + 1}/{DB_RETRY}): {e}")
-            db.connect()
-            time.sleep(1)
-
-    log(f"❌ Failed to save after retries: {symbol} | {timeframe} | {filter_type}")
-
-
-# ---------------- SELENIUM ---------------- #
-def get_driver():
-    opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1920,1080")
-    service = Service(CHROME_DRIVER_PATH)
-    return webdriver.Chrome(service=service, options=opts)
-
-def inject_tv_cookies(driver):
-    try:
-        cookie_data = os.getenv("TRADINGVIEW_COOKIES")
-        if not cookie_data:
-            log("⚠️ TRADINGVIEW_COOKIES env variable missing.")
-            return False
-
-        cookies = json.loads(cookie_data)
-        if not isinstance(cookies, list) or len(cookies) == 0:
-            log("⚠️ TRADINGVIEW_COOKIES is empty or invalid.")
-            return False
-
-        driver.get("https://www.tradingview.com/")
-        time.sleep(2)
-
-        for c in cookies:
-            name = c.get("name")
-            value = c.get("value")
-            if not name or value is None:
-                continue
-
-            try:
-                driver.add_cookie({
-                    "name": name,
-                    "value": value,
-                    "domain": ".tradingview.com",
-                    "path": "/"
-                })
-            except Exception as cookie_err:
-                log(f"⚠️ Skipping cookie {name}: {cookie_err}")
-
-        driver.refresh()
-        time.sleep(2)
-        log("✅ TradingView cookies injected.")
-        return True
-
-    except Exception as e:
-        log(f"❌ Cookie injection failed: {e}")
-        return False
-
-
-# ---------------- SHEET LOADERS ---------------- #
-def load_mv2_sheet(client):
-    mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
-
-    if not mv2_raw or len(mv2_raw) < 2:
-        raise Exception("MV2 sheet is empty or invalid.")
-
-    headers = clean_headers(mv2_raw[0])
-    df_mv2 = pd.DataFrame(mv2_raw[1:], columns=headers)
-    df_mv2.columns = clean_headers(df_mv2.columns)
-    df_mv2 = deduplicate_columns(df_mv2, "MV2 sheet")
-
-    log("✅ MV2 columns loaded:")
-    log(list(df_mv2.columns))
-
-    return df_mv2
-
-def load_stock_sheet(client):
-    stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
-    stock_raw = stock_ws.get_all_values()
-
-    if not stock_raw or len(stock_raw) < 2:
-        raise Exception("Stock list sheet is empty or invalid.")
-
-    headers = clean_headers(stock_raw[0])
-    df_stocks = pd.DataFrame(stock_raw[1:], columns=headers)
-    df_stocks.columns = clean_headers(df_stocks.columns)
-    df_stocks = deduplicate_columns(df_stocks, "stock list sheet")
-
-    if df_stocks.shape[1] < 4:
-        raise Exception("Stock list sheet must have at least 4 columns: Symbol, ?, Week URL, Day URL")
-
-    log("✅ Stock sheet columns loaded:")
-    log(list(df_stocks.columns))
-
-    return df_stocks
-
-
-# ---------------- SCREENSHOT PROCESSOR ---------------- #
-def process_trigger_rows(driver, db, rows_df, day_urls, week_urls, filter_type, log_message):
-    log(log_message)
-
-    if rows_df.empty:
-        log(f"ℹ️ No rows matched for {filter_type}")
-        return
-
-    for _, row in rows_df.iterrows():
-        symbol = safe_str(row.iloc[0])
-        if not symbol:
-            continue
-
-        log(f"🚀 Triggered: {symbol} ({filter_type})")
-
-        tasks = [
-            ("day", day_urls.get(symbol)),
-            ("week", week_urls.get(symbol))
-        ]
-
-        for tf_name, url in tasks:
-            if not url:
-                log(f"⚠️ Missing URL for {symbol} | {tf_name}")
-                continue
-
-            if "tradingview.com" not in url:
-                log(f"⚠️ Invalid TradingView URL for {symbol} | {tf_name}: {url}")
-                continue
-
-            try:
-                driver.get(url)
-
-                chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
-                    EC.visibility_of_element_located(
-                        (By.XPATH, "//div[contains(@class,'chart-container')]")
-                    )
-                )
-
-                time.sleep(POST_LOAD_SLEEP)
-                image_data = chart.screenshot_as_png
-
-                if not image_data:
-                    log(f"⚠️ Empty screenshot for {symbol} | {tf_name}")
-                    continue
-
-                save_screenshot(db, symbol, tf_name, filter_type, image_data)
-
-            except Exception as e:
-                log(f"❌ Screenshot failed for {symbol} | {tf_name} | {filter_type}: {e}")
-
-
 # ---------------- MAIN ---------------- #
 def main():
-    db = DB(DB_CONFIG)
+    # Database Connection
+    db_conn = mysql.connector.connect(**DB_CONFIG)
+    db_conn.autocommit = True
+    
     driver = None
-
+    
     try:
-        # Step 1: shift old records
-        roll_days_forward(db)
-
-        # Step 2: Google auth
-        creds = os.getenv("GSPREAD_CREDENTIALS")
-        if not creds:
+        # 1. Google Auth & Load Sheets
+        creds_json = os.getenv("GSPREAD_CREDENTIALS")
+        if not creds_json:
             raise Exception("GSPREAD_CREDENTIALS env variable missing.")
+            
+        client = gspread.service_account_from_dict(json.loads(creds_json))
 
-        client = gspread.service_account_from_dict(json.loads(creds))
-
-        # Step 3: load sheets
-        df_mv2 = load_mv2_sheet(client)
-        df_stocks = load_stock_sheet(client)
-
-        # Step 4: symbol -> urls
-        symbol_series = df_stocks.iloc[:, 0].astype(str).str.strip()
-        week_series = df_stocks.iloc[:, 2].astype(str).str.strip()
-        day_series = df_stocks.iloc[:, 3].astype(str).str.strip()
-
-        week_urls = dict(zip(symbol_series, week_series))
-        day_urls = dict(zip(symbol_series, day_series))
-
-        # Step 5: selenium + cookies
-        driver = get_driver()
-        if not inject_tv_cookies(driver):
-            log("❌ Stopping because TradingView cookie injection failed.")
-            return
-
-        # Step 6: find required columns safely
-        d_trigger_col = get_column_case_insensitive(df_mv2, "D_Trigger")
-        d_trigger_s_col = get_column_case_insensitive(df_mv2, "D_Trigger_S")
-        w_trigger_col = get_column_case_insensitive(df_mv2, "W_Trigger")
-        w_trigger_s_col = get_column_case_insensitive(df_mv2, "W_Trigger_S")
+        # Load MV2 Sheet
+        mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
+        df_mv2 = pd.DataFrame(mv2_raw[1:], columns=clean_headers(mv2_raw[0]))
+        df_mv2 = df_mv2.loc[:, ~df_mv2.columns.duplicated()]
         
-        # New Filter Columns
-        mxmn_low_col = get_column_case_insensitive(df_mv2, "MXMN_low")
-        mxmn_col = get_column_case_insensitive(df_mv2, "MXMN")
-        d_clabove_col = get_column_case_insensitive(df_mv2, "D_CLABOVE")
+        # Load Stock List Sheet
+        stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
+        stock_raw = stock_ws.get_all_values()
+        df_stocks = pd.DataFrame(stock_raw[1:], columns=clean_headers(stock_raw[0]))
 
-        required_map = {
-            "D_Trigger": d_trigger_col,
-            "D_Trigger_S": d_trigger_s_col,
-            "W_Trigger": w_trigger_col,
-            "W_Trigger_S": w_trigger_s_col,
-            "MXMN_low": mxmn_low_col,
-            "MXMN": mxmn_col,
-            "D_CLABOVE": d_clabove_col
-        }
+        # Map URLs to Symbols
+        symbol_col = df_stocks.columns[0]
+        week_url_col = df_stocks.columns[2]
+        day_url_col = df_stocks.columns[3]
+        week_urls = dict(zip(df_stocks[symbol_col].str.strip(), df_stocks[week_url_col].str.strip()))
+        day_urls = dict(zip(df_stocks[symbol_col].str.strip(), df_stocks[day_url_col].str.strip()))
 
-        for expected_name, actual_name in required_map.items():
-            if not actual_name:
-                log(f"⚠️ Header '{expected_name}' not found in Google Sheet.")
-                return
+        # 2. Map Column Names (Case-Insensitive)
+        def find_col(name):
+            for c in df_mv2.columns:
+                if c.lower() == name.lower(): return c
+            return None
 
-        # Step 7: convert to numeric helper columns
-        df_mv2["D_Trigger_num"] = df_mv2[d_trigger_col].apply(safe_int)
-        df_mv2["D_Trigger_S_num"] = df_mv2[d_trigger_s_col].apply(safe_int)
-        df_mv2["W_Trigger_num"] = df_mv2[w_trigger_col].apply(safe_int)
-        df_mv2["W_Trigger_S_num"] = df_mv2[w_trigger_s_col].apply(safe_int)
+        c_mxmn_low = find_col("MXMN_low")
+        c_trigger = find_col("D_Trigger")
+        c_ef1 = find_col("D_EF1")
+        c_ef2 = find_col("D_EF2")
+        c_mxmn = find_col("MXMN")
+        c_clabove = find_col("D_CLABOVE")
+
+        # 3. Apply Moment Filter Logic
+        def check_moment(row):
+            mxmn_low_val = safe_float(row.get(c_mxmn_low))
+            trigger_val = safe_float(row.get(c_trigger))
+            ef1_val = safe_float(row.get(c_ef1))
+            ef2_val = safe_float(row.get(c_ef2))
+
+            # Condition: MXMN_low < 10
+            if mxmn_low_val == -1.0 or mxmn_low_val >= 10:
+                return False
+
+            # Prevent Division by Zero: if trigger is 0, we assume ratio condition is met
+            if trigger_val <= 0:
+                return True
+
+            # Calculate Ratios
+            ratio1 = ef1_val / trigger_val
+            ratio2 = ef2_val / trigger_val
+
+            # Final Logic: (MXMN_low < 10 AND Ratio1 < 2) OR (MXMN_low < 10 AND Ratio2 < 2)
+            return ratio1 < 2 or ratio2 < 2
+
+        df_mv2["is_moment"] = df_mv2.apply(check_moment, axis=1)
         
-        # New Numeric Conversions
-        df_mv2["MXMN_low_num"] = df_mv2[mxmn_low_col].apply(safe_int)
-        df_mv2["MXMN_num"] = df_mv2[mxmn_col].apply(safe_int)
-        df_mv2["D_CLABOVE_num"] = df_mv2[d_clabove_col].apply(safe_int)
+        # Other Filter Logic
+        df_mv2["is_conso"] = df_mv2[c_mxmn].apply(lambda x: safe_float(x) != -1.0 and safe_float(x) < 15)
+        df_mv2["is_jump"] = df_mv2[c_clabove].apply(lambda x: safe_float(x) > 3)
 
-        # -------------------------
-        # EXISTING TRIGGERS
-        # -------------------------
+        # 4. Selenium Setup
+        opts = Options()
+        opts.add_argument("--headless=new")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--window-size=1920,1080")
         
-        # D_Trigger == 0
-        dtrigger_rows = df_mv2[df_mv2["D_Trigger_num"] == 0]
-        process_trigger_rows(driver, db, dtrigger_rows, day_urls, week_urls, "D_Trigger", "🔍 Scanning D_Trigger for value 0")
-
-        # D_Trigger_S == 0 AND != D_Trigger
-        dtrigger_s_rows = df_mv2[(df_mv2["D_Trigger_S_num"] == 0) & (df_mv2["D_Trigger_S_num"] != df_mv2["D_Trigger_num"])]
-        process_trigger_rows(driver, db, dtrigger_s_rows, day_urls, week_urls, "D_Trigger_S", "🔍 Scanning D_Trigger_S")
-
-        # W_Trigger == 1
-        wtrigger_rows = df_mv2[df_mv2["W_Trigger_num"] == 1]
-        process_trigger_rows(driver, db, wtrigger_rows, day_urls, week_urls, "W_Trigger", "🔍 Scanning W_Trigger for value 1")
-
-        # W_Trigger_S == 0 AND != W_Trigger
-        wtrigger_s_rows = df_mv2[(df_mv2["W_Trigger_S_num"] == 0) & (df_mv2["W_Trigger_S_num"] != df_mv2["W_Trigger_num"])]
-        process_trigger_rows(driver, db, wtrigger_s_rows, day_urls, week_urls, "W_Trigger_S", "🔍 Scanning W_Trigger_S")
-
-        # -------------------------
-        # NEW FILTERS
-        # -------------------------
+        driver = webdriver.Chrome(service=Service(CHROME_DRIVER_PATH), options=opts)
         
-        # PART 5: Moment Filter (MXMN_low < 10)
-        moment_rows = df_mv2[(df_mv2["MXMN_low_num"] != -1) & (df_mv2["MXMN_low_num"] < 10)]
-        process_trigger_rows(driver, db, moment_rows, day_urls, week_urls, "Moment Filter", "🔍 Scanning Moment Filter (MXMN_low < 10)")
+        # TradingView Cookie Injection
+        cookie_data = os.getenv("TRADINGVIEW_COOKIES")
+        if cookie_data:
+            driver.get("https://www.tradingview.com/")
+            time.sleep(2)
+            for c in json.loads(cookie_data):
+                try:
+                    driver.add_cookie({
+                        "name": c["name"], 
+                        "value": c["value"], 
+                        "domain": ".tradingview.com",
+                        "path": "/"
+                    })
+                except: continue
+            driver.refresh()
+            log("✅ Cookies injected.")
 
-        # PART 6: Conso Filter (MXMN < 15)
-        conso_rows = df_mv2[(df_mv2["MXMN_num"] != -1) & (df_mv2["MXMN_num"] < 15)]
-        process_trigger_rows(driver, db, conso_rows, day_urls, week_urls, "Conso Filter", "🔍 Scanning Conso Filter (MXMN < 15)")
+        # 5. Execute Scans and Screenshots
+        filters = [
+            ("is_moment", "Moment Filter"),
+            ("is_conso", "Conso Filter"),
+            ("is_jump", "Jump Filter")
+        ]
 
-        # PART 7: Jump Filter (D_CLABOVE > 4)
-        jump_rows = df_mv2[df_mv2["D_CLABOVE_num"] > 4]
-        process_trigger_rows(driver, db, jump_rows, day_urls, week_urls, "Jump Filter", "🔍 Scanning Jump Filter (D_CLABOVE > 4)")
+        for bool_col, filter_label in filters:
+            targets = df_mv2[df_mv2[bool_col] == True]
+            log(f"🔍 Scanning {filter_label}: {len(targets)} matches found.")
+            
+            for _, row in targets.iterrows():
+                symbol = safe_str(row.iloc[0])
+                for tf, url_map in [("day", day_urls), ("week", week_urls)]:
+                    url = url_map.get(symbol)
+                    if not url or "tradingview.com" not in url:
+                        continue
+                    
+                    try:
+                        driver.get(url)
+                        chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
+                            EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
+                        )
+                        time.sleep(POST_LOAD_SLEEP)
+                        img_data = chart.screenshot_as_png
+                        
+                        # Save to Database
+                        cur = db_conn.cursor()
+                        sql = f"""
+                            INSERT INTO `{TARGET_TABLE}` 
+                            (symbol, timeframe, filter_type, day, screenshot) 
+                            VALUES (%s, %s, %s, 0, %s) 
+                            ON DUPLICATE KEY UPDATE screenshot=VALUES(screenshot), day=0
+                        """
+                        cur.execute(sql, (symbol, tf, filter_label, img_data))
+                        cur.close()
+                        log(f"✅ Saved {symbol} | {tf} | {filter_label}")
+                        
+                    except Exception as e:
+                        log(f"❌ Screenshot Error {symbol} ({tf}): {e}")
 
-        log("🏁 All triggers and filters processed successfully.")
+        log("🏁 All processing finished successfully.")
 
     except Exception as e:
-        log(f"❌ Fatal error: {e}")
+        log(f"❌ Fatal Error: {e}")
 
     finally:
         if driver:
-            try:
-                driver.quit()
-            except:
-                pass
-        db.close()
-
+            driver.quit()
+        if db_conn:
+            db_conn.close()
 
 if __name__ == "__main__":
     main()

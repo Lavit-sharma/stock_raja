@@ -153,19 +153,33 @@ def roll_days_forward(db: DB):
 
 
 # ---------------- SAVE SCREENSHOT ---------------- #
+
 def save_screenshot(db: DB, symbol, timeframe, filter_type, image):
     query = f"""
-        INSERT INTO `{TARGET_TABLE}` (`symbol`, `timeframe`, `filter_type`, `day`, `screenshot`)
+        INSERT INTO `{TARGET_TABLE}` 
+        (`symbol`, `timeframe`, `filter_type`, `day`, `screenshot`)
         VALUES (%s, %s, %s, 0, %s)
+        ON DUPLICATE KEY UPDATE
+            screenshot = VALUES(screenshot),
+            day = 0
     """
+
     for attempt in range(DB_RETRY):
         try:
             conn = db.ensure()
             cur = conn.cursor()
+
             cur.execute(query, (symbol, timeframe, filter_type, image))
+
+            # Smart logging
+            if cur.rowcount == 1:
+                log(f"✅ Inserted: {symbol} | {filter_type} | {timeframe}")
+            else:
+                log(f"🔄 Updated (duplicate prevented): {symbol} | {filter_type} | {timeframe}")
+
             cur.close()
-            log(f"✅ Saved: {symbol} | {filter_type} | {timeframe} | day=0")
             return
+
         except Exception as e:
             log(f"⚠️ DB save error for {symbol} {timeframe} {filter_type} (attempt {attempt + 1}/{DB_RETRY}): {e}")
             db.connect()

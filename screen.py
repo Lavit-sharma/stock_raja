@@ -71,17 +71,22 @@ class DB:
         for attempt in range(1, DB_CONNECT_RETRY + 1):
             try:
                 log(f"📡 Connecting to MySQL... attempt {attempt}/{DB_CONNECT_RETRY}")
+                # Removed "connection_timeout" to use default or handled by provider
                 self.conn = mysql.connector.connect(
                     **self.config,
-                    connection_timeout=20,
                     autocommit=True
                 )
-                # Increase session limits to prevent "Connection Lost"
+                
+                # Removed GLOBAL max_allowed_packet (requires SUPER)
+                # Using SESSION variables only (usually allowed)
                 cur = self.conn.cursor()
-                cur.execute("SET SESSION wait_timeout = 28800")
-                cur.execute("SET SESSION interactive_timeout = 28800")
-                cur.execute("SET GLOBAL max_allowed_packet = 1073741824")
+                try:
+                    cur.execute("SET SESSION wait_timeout = 28800")
+                    cur.execute("SET SESSION interactive_timeout = 28800")
+                except:
+                    log("⚠️ Could not set session timeouts, continuing anyway...")
                 cur.close()
+                
                 log("✅ MySQL connected.")
                 return self.conn
             except Exception as e:
@@ -150,6 +155,7 @@ def save_to_mysql(db: DB, symbol, timeframe, image, mv2_n_al_json):
 
 # ---------------- SELENIUM ---------------- #
 def get_driver():
+    log("🌐 Installing ChromeDriver...")
     chrome_driver_path = ChromeDriverManager().install()
     opts = Options()
     opts.add_argument("--headless=new")
@@ -202,27 +208,36 @@ def main():
     db = None
     driver = None
     try:
+        log("STEP 1: DB Init...")
         db = DB(DB_CONFIG)
         clear_db_before_run(db)
 
+        log("STEP 2: GSheets Init...")
         creds = os.getenv("GSPREAD_CREDENTIALS")
-        if not creds: return
+        if not creds: 
+            log("❌ Missing GSPREAD_CREDENTIALS")
+            return
         client = gspread.service_account_from_dict(json.loads(creds))
 
         mv2_raw = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
         df_mv2 = pd.DataFrame(mv2_raw[1:], columns=mv2_raw[0])
 
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID)
-        df_stocks = pd.DataFrame(stock_ws.get_all_values()[1:])
+        stock_data = stock_ws.get_all_values()
+        df_stocks = pd.DataFrame(stock_data[1:])
         
-        week_url_map = dict(zip(df_stocks.iloc[:, 0].str.strip(), df_stocks.iloc[:, 2].str.strip()))
-        day_url_map = dict(zip(df_stocks.iloc[:, 0].str.strip(), df_stocks.iloc[:, 3].str.strip()))
+        week_url_map = dict(zip(df_stocks.iloc[:, 0].astype(str).str.strip(), df_stocks.iloc[:, 2].astype(str).str.strip()))
+        day_url_map = dict(zip(df_stocks.iloc[:, 0].astype(str).str.strip(), df_stocks.iloc[:, 3].astype(str).str.strip()))
 
+        log("STEP 3: Browser Init...")
         driver = get_driver()
-        if not inject_tv_cookies(driver): return
+        if not inject_tv_cookies(driver):
+            log("❌ Cookie injection failed")
+            return
 
         mv2_headers = list(df_mv2.columns)
 
+        log("STEP 4: Processing Monthly Triggers...")
         for _, row in df_mv2.iterrows():
             symbol = safe_str(row.iloc[0])
             sector = safe_str(row.iloc[1]).upper()
@@ -237,8 +252,10 @@ def main():
                 n_al_map = {safe_str(mv2_headers[i]): safe_str(row.iloc[i]) for i in range(13, min(37, len(mv2_headers)))}
                 mv2_json = json.dumps(n_al_map, ensure_ascii=False)
 
-                urls = [("daily-month", day_url_map.get(symbol)), ("week-month", week_url_map.get(symbol))]
-                for label, url in urls:
+                # Timeframes to capture for monthly trigger
+                targets = [("daily-month", day_url_map.get(symbol)), ("week-month", week_url_map.get(symbol))]
+                
+                for label, url in targets:
                     if url and "tradingview.com" in url:
                         if open_with_retry(driver, url, retries=PAGE_RETRY):
                             chart = wait_chart(driver)
@@ -250,8 +267,11 @@ def main():
         log(f"❌ FATAL ERROR: {e}")
         sys.exit(1)
     finally:
-        if driver: driver.quit()
-        if db: db.close()
+        if driver: 
+            driver.quit()
+            log("🛑 Browser closed.")
+        if db: 
+            db.close()
 
 if __name__ == "__main__":
     main()

@@ -43,6 +43,16 @@ def safe_int(v):
     except (ValueError, TypeError):
         return -1
 
+def fix_duplicate_columns(df):
+    """Renames duplicate columns to ensure unique indexing."""
+    cols = pd.Series(df.columns)
+    for dup in cols[cols.duplicated()].unique(): 
+        cols[cols[cols == dup].index.values.tolist()] = [
+            f"{dup}_{i}" if i != 0 else dup for i in range(sum(cols == dup))
+        ]
+    df.columns = cols
+    return df
+
 # ---------------- DB CLASS ---------------- #
 class DB:
     def __init__(self, config):
@@ -103,31 +113,32 @@ def main():
         # Load MV2 and Stock Sheet
         mv2_sheet = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
         df_mv2 = pd.DataFrame(mv2_sheet[1:], columns=[c.strip() for c in mv2_sheet[0]])
+        df_mv2 = fix_duplicate_columns(df_mv2)
         
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID).get_all_values()
         df_stocks = pd.DataFrame(stock_ws[1:], columns=[c.strip() for c in stock_ws[0]])
+        df_stocks = fix_duplicate_columns(df_stocks)
 
         # Create URL Map (Symbol -> {day: url, week: url})
         url_map = {row[0].strip(): {'week': row[2].strip(), 'day': row[3].strip()} for row in stock_ws[1:] if row[0]}
 
         # 2. Process Filters
-        # Pre-convert required columns to numeric for speed
         cols_to_fix = ["D_Trigger", "D_Trigger_S", "W_Trigger", "W_Trigger_S", "MXMN", "D_CLABOVE"]
         for col in cols_to_fix:
-            df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
+            if col in df_mv2.columns:
+                df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
 
-        # Define Filter Conditions
+        # Define Filter Conditions with safety checks
         triggers = {
-            "D_Trigger": df_mv2[df_mv2["D_Trigger_n"] == 0],
-            "D_Trigger_S": df_mv2[(df_mv2["D_Trigger_S_n"] == 0) & (df_mv2["D_Trigger_S_n"] != df_mv2["D_Trigger_n"])],
-            "W_Trigger": df_mv2[df_mv2["W_Trigger_n"] == 1],
-            "W_Trigger_S": df_mv2[(df_mv2["W_Trigger_S_n"] == 0) & (df_mv2["W_Trigger_S_n"] != df_mv2["W_Trigger_n"])],
-            "CONSO COUNT": df_mv2[(df_mv2["MXMN_n"] < 20) & (df_mv2["D_CLABOVE_n"] > 3)]
+            "D_Trigger": df_mv2[df_mv2.get("D_Trigger_n", pd.Series([-1]*len(df_mv2))) == 0],
+            "D_Trigger_S": df_mv2[(df_mv2.get("D_Trigger_S_n", -1) == 0) & (df_mv2.get("D_Trigger_S_n", -1) != df_mv2.get("D_Trigger_n", -1))],
+            "W_Trigger": df_mv2[df_mv2.get("W_Trigger_n", -1) == 1],
+            "W_Trigger_S": df_mv2[(df_mv2.get("W_Trigger_S_n", -1) == 0) & (df_mv2.get("W_Trigger_S_n", -1) != df_mv2.get("W_Trigger_n", -1))],
+            "CONSO COUNT": df_mv2[(df_mv2.get("MXMN_n", 999) < 20) & (df_mv2.get("D_CLABOVE_n", -1) > 3)]
         }
 
         # 3. Setup Browser
         driver = get_driver()
-        # Cookie injection
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
         if cookie_data:
             driver.get("https://www.tradingview.com/")

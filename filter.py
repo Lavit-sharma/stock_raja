@@ -5,7 +5,7 @@ import gspread
 import pandas as pd
 import mysql.connector
 
-from collections import Counter
+from collections import Counter, defaultdict
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -136,26 +136,6 @@ def inject_tv_cookies(driver):
         return True
     except: return False
 
-def process_trigger_rows(driver, db, rows_df, day_urls, week_urls, filter_label):
-    if rows_df.empty:
-        return
-    
-    log(f"🔍 Processing {len(rows_df)} hits for {filter_label}")
-    for _, row in rows_df.iterrows():
-        symbol = safe_str(row.iloc[0])
-        for tf_name, url_dict in [("day", day_urls), ("week", week_urls)]:
-            url = url_dict.get(symbol)
-            if url and "tradingview.com" in url:
-                try:
-                    driver.get(url)
-                    chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
-                        EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
-                    )
-                    time.sleep(POST_LOAD_SLEEP)
-                    save_screenshot(db, symbol, tf_name, filter_label, chart.screenshot_as_png)
-                except Exception as e:
-                    log(f"❌ Screenshot failed for {symbol}: {e}")
-
 # ---------------- MAIN ---------------- #
 def main():
     db = DB(DB_CONFIG)
@@ -194,23 +174,56 @@ def main():
         df_mv2["ef2_v"] = df_mv2[ef2_col].apply(safe_float)
         df_mv2["dcl_v"] = df_mv2[dcl_col].apply(safe_float)
 
+        # PRE-CALCULATE TRIGGERS (Stock -> List of Filters)
+        # This prevents opening the same URL multiple times
+        stock_to_filters = defaultdict(list)
+
+        # Logic for Conso Filter
+        conso_mask = ((df_mv2["mx_v"] < 15) & (df_mv2["dt_v"] > 0) & (df_mv2["ef1_v"]/df_mv2["dt_v"] < 2)) | \
+                     ((df_mv2["mx_v"] < 15) & (df_mv2["dt_v"] > 0) & (df_mv2["ef2_v"]/df_mv2["dt_v"] < 2))
+        for s in df_mv2[conso_mask].iloc[:, 0].astype(str).str.strip():
+            stock_to_filters[s].append("Conso Filter")
+
+        # Logic for Moment Filter
+        moment_mask = ((df_mv2["mxl_v"] < 10) & (df_mv2["dt_v"] > 0) & (df_mv2["ef1_v"]/df_mv2["dt_v"] < 2)) | \
+                      ((df_mv2["mxl_v"] < 10) & (df_mv2["dt_v"] > 0) & (df_mv2["ef2_v"]/df_mv2["dt_v"] < 2))
+        for s in df_mv2[moment_mask].iloc[:, 0].astype(str).str.strip():
+            stock_to_filters[s].append("Moment Filter")
+
+        # Logic for Jump Filter
+        jump_mask = ((df_mv2["dcl_v"] > 3) & (df_mv2["dt_v"] > 0) & (df_mv2["ef2_v"]/df_mv2["dt_v"] < 2)) | \
+                    ((df_mv2["dcl_v"] > 3) & (df_mv2["dt_v"] > 0) & (df_mv2["ef1_v"]/df_mv2["dt_v"] < 2))
+        for s in df_mv2[jump_mask].iloc[:, 0].astype(str).str.strip():
+            stock_to_filters[s].append("Jump Filter")
+
+        if not stock_to_filters:
+            log("ℹ️ No stocks matched any filters today.")
+            return
+
         driver = get_driver()
         if not inject_tv_cookies(driver): return
 
-        # 1. CONSO FILTER: (MXMN < 15 and EF1/DT < 2) OR (MXMN < 15 and EF2/DT < 2)
-        conso_cond = ((df_mv2["mx_v"] < 15) & (df_mv2["dt_v"] > 0) & (df_mv2["ef1_v"]/df_mv2["dt_v"] < 2)) | \
-                     ((df_mv2["mx_v"] < 15) & (df_mv2["dt_v"] > 0) & (df_mv2["ef2_v"]/df_mv2["dt_v"] < 2))
-        process_trigger_rows(driver, db, df_mv2[conso_cond], day_urls, week_urls, "Conso Filter")
+        log(f"🔍 Found {len(stock_to_filters)} unique stocks to capture.")
 
-        # 2. MOMENT FILTER: (MXMN_low < 10 and EF1/DT < 2) OR (MXMN_low < 10 and EF2/DT < 2)
-        moment_cond = ((df_mv2["mxl_v"] < 10) & (df_mv2["dt_v"] > 0) & (df_mv2["ef1_v"]/df_mv2["dt_v"] < 2)) | \
-                      ((df_mv2["mxl_v"] < 10) & (df_mv2["dt_v"] > 0) & (df_mv2["ef2_v"]/df_mv2["dt_v"] < 2))
-        process_trigger_rows(driver, db, df_mv2[moment_cond], day_urls, week_urls, "Moment Filter")
-
-        # 3. JUMP FILTER: (D_CLABOVE > 3 and EF2/DT < 2) OR (D_CLABOVE > 3 and EF1/DT < 2)
-        jump_cond = ((df_mv2["dcl_v"] > 3) & (df_mv2["dt_v"] > 0) & (df_mv2["ef2_v"]/df_mv2["dt_v"] < 2)) | \
-                    ((df_mv2["dcl_v"] > 3) & (df_mv2["dt_v"] > 0) & (df_mv2["ef1_v"]/df_mv2["dt_v"] < 2))
-        process_trigger_rows(driver, db, df_mv2[jump_cond], day_urls, week_urls, "Jump Filter")
+        # PROCESS EACH UNIQUE STOCK ONCE
+        for symbol, filters in stock_to_filters.items():
+            for tf_name, url_dict in [("day", day_urls), ("week", week_urls)]:
+                url = url_dict.get(symbol)
+                if url and "tradingview.com" in url:
+                    try:
+                        driver.get(url)
+                        chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
+                            EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
+                        )
+                        time.sleep(POST_LOAD_SLEEP)
+                        screenshot = chart.screenshot_as_png
+                        
+                        # Save the single screenshot for all applicable filters
+                        for filter_label in filters:
+                            save_screenshot(db, symbol, tf_name, filter_label, screenshot)
+                            
+                    except Exception as e:
+                        log(f"❌ Screenshot failed for {symbol} ({tf_name}): {e}")
 
         log("🏁 All triggers processed.")
 

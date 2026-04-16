@@ -1,9 +1,12 @@
 {
-  "name": "stock-raja-transcript",
-  "version": "1.1.0",
-  "main": "yt_transcript_job.js",
+  "name": "naukri-scraper",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
-    "mysql2": "^3.9.2",
-    "youtube-transcript-api": "^1.1.1"
+    "puppeteer": "^22.0.0",
+    "googleapis": "^133.0.0"
   }
 }

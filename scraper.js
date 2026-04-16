@@ -1,6 +1,6 @@
 const puppeteer = require("puppeteer");
 
-async function scrapeJobs(keyword, location, pages = 3) {
+async function scrapeJobs(keyword, location, pages = 5) {
   const browser = await puppeteer.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox"]
@@ -15,7 +15,8 @@ async function scrapeJobs(keyword, location, pages = 3) {
   let allJobs = [];
 
   for (let p = 1; p <= pages; p++) {
-    const url = `https://www.naukri.com/${keyword}-jobs-in-${location}-${p}`;
+    const url = `https://www.naukri.com/${keyword}-jobs-in-${location}-${p}?jobAge=3`;
+
     console.log("Opening:", url);
 
     try {
@@ -23,11 +24,22 @@ async function scrapeJobs(keyword, location, pages = 3) {
 
       await page.waitForSelector(".srp-jobtuple-wrapper", { timeout: 15000 });
 
+      // ✅ Scroll to load more jobs
+      await page.evaluate(async () => {
+        window.scrollBy(0, 1000);
+        await new Promise(r => setTimeout(r, 1000));
+        window.scrollBy(0, 2000);
+      });
+
       const jobs = await page.evaluate(() => {
         return Array.from(document.querySelectorAll(".srp-jobtuple-wrapper")).map(job => ({
           title: job.querySelector(".title")?.innerText || "",
           company: job.querySelector(".comp-name")?.innerText || "",
           location: job.querySelector(".locWdth")?.innerText || "",
+          experience: job.querySelector(".expwdth")?.innerText || "",
+          salary: job.querySelector(".sal-wrap")?.innerText || "",
+          posted: job.querySelector(".job-post-day")?.innerText || "",
+          description: job.querySelector(".job-desc")?.innerText || "",
           link: job.querySelector("a.title")?.href || ""
         }));
       });

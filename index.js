@@ -1,8 +1,26 @@
 const scrapeJobs = require("./scraper");
 const writeToSheet = require("./sheets");
 
-const keywords = ["developer", "engineer", "analyst"];
-const locations = ["delhi", "mumbai", "bangalore"];
+const keywords = [
+  "developer",
+  "engineer",
+  "software",
+  "data analyst",
+  "java",
+  "python",
+  "frontend",
+  "backend"
+];
+
+const locations = [
+  "delhi",
+  "mumbai",
+  "bangalore",
+  "hyderabad",
+  "pune",
+  "chennai",
+  "remote"
+];
 
 (async () => {
   let finalJobs = [];
@@ -10,7 +28,7 @@ const locations = ["delhi", "mumbai", "bangalore"];
 
   for (let keyword of keywords) {
     for (let location of locations) {
-      const jobs = await scrapeJobs(keyword, location, 3);
+      const jobs = await scrapeJobs(keyword, location, 5); // more pages
 
       const enriched = jobs.map(j => ({
         ...j,
@@ -19,7 +37,7 @@ const locations = ["delhi", "mumbai", "bangalore"];
       }));
 
       const unique = enriched.filter(j => {
-        if (seen.has(j.link)) return false;
+        if (!j.link || seen.has(j.link)) return false;
         seen.add(j.link);
         return true;
       });

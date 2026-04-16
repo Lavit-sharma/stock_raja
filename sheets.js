@@ -1,26 +1,12 @@
 const { google } = require("googleapis");
 
-async function addHeaders(sheets, spreadsheetId) {
-  const headers = [[
-    "Title",
-    "Company",
-    "Location",
-    "Experience",
-    "Salary",
-    "Posted",
-    "Description",
-    "Link",
-    "Keyword",
-    "Search Location",
-    "Date"
-  ]];
-
-  await sheets.spreadsheets.values.update({
+async function getExistingLinks(sheets, spreadsheetId) {
+  const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: "Sheet2!A1",
-    valueInputOption: "RAW",
-    resource: { values: headers }
+    range: "Sheet2!H:H" // link column
   });
+
+  return new Set((res.data.values || []).flat());
 }
 
 async function writeToSheet(jobs) {
@@ -32,22 +18,26 @@ async function writeToSheet(jobs) {
   const sheets = google.sheets({ version: "v4", auth });
   const spreadsheetId = process.env.SHEET_ID;
 
-  // ✅ Add headers
-  await addHeaders(sheets, spreadsheetId);
+  const existingLinks = await getExistingLinks(sheets, spreadsheetId);
 
-  const values = jobs.map(job => [
+  const newJobs = jobs.filter(j => j.link && !existingLinks.has(j.link));
+
+  console.log(`✅ New jobs found: ${newJobs.length}`);
+
+  const values = newJobs.map(job => [
     job.title,
     job.company,
     job.location,
     job.experience,
-    job.salary,
-    job.posted,
-    job.description,
+    job.companyProfile,
+    job.fullDesc,
     job.link,
     job.keyword,
     job.searchLocation,
     new Date().toLocaleDateString()
   ]);
+
+  if (values.length === 0) return;
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
@@ -56,7 +46,7 @@ async function writeToSheet(jobs) {
     resource: { values }
   });
 
-  console.log("✅ Data pushed with headers");
+  console.log("✅ Only NEW jobs inserted");
 }
 
 module.exports = writeToSheet;

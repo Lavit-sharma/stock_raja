@@ -4,25 +4,8 @@ const pLimit = require("p-limit");
 
 const limit = pLimit(2); // keyword parallel
 
-const keywords = [
-  "developer",
-  "engineer",
-  "software",
-  "data analyst",
-  "java",
-  "python",
-  "frontend",
-  "backend"
-];
-const locations = [
-  "delhi",
-  "mumbai",
-  "bangalore",
-  "hyderabad",
-  "pune",
-  "chennai",
-  "remote"
-];
+const keywords = ["developer", "engineer", "python", "java"];
+const locations = ["delhi", "bangalore", "remote"];
 
 (async () => {
   const tasks = [];

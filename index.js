@@ -4,7 +4,7 @@ const pLimit = require("p-limit");
 
 const limit = pLimit(2); // keep LOW for GitHub Actions
 
-const keywords = ["Product Manager", "Program Manager"];
+const keywords = ["Product-Manager", "Program-Manager"];
 const locations = ["delhi", "bangalore", "remote"];
 
 (async () => {

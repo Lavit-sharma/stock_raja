@@ -1,12 +1,12 @@
 const { google } = require("googleapis");
 
-async function getExistingLinks(sheets, spreadsheetId) {
-  const res = await sheets.spreadsheets.values.get({
+async function clearSheet(sheets, spreadsheetId) {
+  await sheets.spreadsheets.values.clear({
     spreadsheetId,
-    range: "Sheet2!H:H" // link column
+    range: "Sheet2!A2:Z", // keep header row safe
   });
 
-  return new Set((res.data.values || []).flat());
+  console.log("🧹 Old data cleared");
 }
 
 async function writeToSheet(jobs) {
@@ -18,13 +18,12 @@ async function writeToSheet(jobs) {
   const sheets = google.sheets({ version: "v4", auth });
   const spreadsheetId = process.env.SHEET_ID;
 
-  const existingLinks = await getExistingLinks(sheets, spreadsheetId);
+  // ✅ STEP 1: clear old entries
+  await clearSheet(sheets, spreadsheetId);
 
-  const newJobs = jobs.filter(j => j.link && !existingLinks.has(j.link));
+  console.log(`📦 Total jobs to insert: ${jobs.length}`);
 
-  console.log(`✅ New jobs found: ${newJobs.length}`);
-
-  const values = newJobs.map(job => [
+  const values = jobs.map(job => [
     job.title,
     job.company,
     job.location,
@@ -39,6 +38,7 @@ async function writeToSheet(jobs) {
 
   if (values.length === 0) return;
 
+  // ✅ STEP 2: insert fresh data
   await sheets.spreadsheets.values.append({
     spreadsheetId,
     range: "Sheet2!A2",
@@ -46,7 +46,7 @@ async function writeToSheet(jobs) {
     resource: { values }
   });
 
-  console.log("✅ Only NEW jobs inserted");
+  console.log("✅ Fresh jobs inserted");
 }
 
 module.exports = writeToSheet;

@@ -4,6 +4,7 @@ import json
 import gspread
 import pandas as pd
 import mysql.connector
+from datetime import datetime
 
 from collections import Counter
 from selenium import webdriver
@@ -110,7 +111,6 @@ def main():
         creds = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds))
         
-        # Load MV2 and Stock Sheet
         mv2_sheet = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
         df_mv2 = pd.DataFrame(mv2_sheet[1:], columns=[c.strip() for c in mv2_sheet[0]])
         df_mv2 = fix_duplicate_columns(df_mv2)
@@ -119,7 +119,6 @@ def main():
         df_stocks = pd.DataFrame(stock_ws[1:], columns=[c.strip() for c in stock_ws[0]])
         df_stocks = fix_duplicate_columns(df_stocks)
 
-        # Create URL Map (Symbol -> {day: url, week: url})
         url_map = {row[0].strip(): {'week': row[2].strip(), 'day': row[3].strip()} for row in stock_ws[1:] if row[0]}
 
         # 2. Process Filters
@@ -128,13 +127,22 @@ def main():
             if col in df_mv2.columns:
                 df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
 
-        # Define Filter Conditions with safety checks
+        # --- DELIVERY MAX LOGIC START ---
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        delivery_max_mask = pd.Series([False] * len(df_mv2))
+        
+        for date_col in ["DATE1", "DATE2", "DATE3"]:
+            if date_col in df_mv2.columns:
+                # Matches if the column value (trimmed) equals today's date string
+                delivery_max_mask |= (df_mv2[date_col].astype(str).str.strip() == today_str)
+        # --- DELIVERY MAX LOGIC END ---
+
         triggers = {
             "D_Trigger": df_mv2[df_mv2.get("D_Trigger_n", pd.Series([-1]*len(df_mv2))) == 0],
             "D_Trigger_S": df_mv2[(df_mv2.get("D_Trigger_S_n", -1) == 0) & (df_mv2.get("D_Trigger_S_n", -1) != df_mv2.get("D_Trigger_n", -1))],
             "W_Trigger": df_mv2[df_mv2.get("W_Trigger_n", -1) == 1],
             "W_Trigger_S": df_mv2[(df_mv2.get("W_Trigger_S_n", -1) == 0) & (df_mv2.get("W_Trigger_S_n", -1) != df_mv2.get("W_Trigger_n", -1))],
-           
+            "Delivery_Max": df_mv2[delivery_max_mask]
         }
 
         # 3. Setup Browser

@@ -123,7 +123,7 @@ def main():
         url_map = {row[0].strip(): {'week': row[2].strip(), 'day': row[3].strip()} for row in stock_ws[1:] if row[0]}
 
         # 2. Process Filters
-        cols_to_fix = ["D_Trigger", "D_Trigger_S", "W_Trigger", "W_Trigger_S", "MXMN", "D_CLABOVE"]
+        cols_to_fix = ["D_Trigger", "D_Trigger_S", "W_Trigger", "W_Trigger_S"]
         for col in cols_to_fix:
             if col in df_mv2.columns:
                 df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
@@ -134,7 +134,7 @@ def main():
             "D_Trigger_S": df_mv2[(df_mv2.get("D_Trigger_S_n", -1) == 0) & (df_mv2.get("D_Trigger_S_n", -1) != df_mv2.get("D_Trigger_n", -1))],
             "W_Trigger": df_mv2[df_mv2.get("W_Trigger_n", -1) == 1],
             "W_Trigger_S": df_mv2[(df_mv2.get("W_Trigger_S_n", -1) == 0) & (df_mv2.get("W_Trigger_S_n", -1) != df_mv2.get("W_Trigger_n", -1))],
-            "CONSO COUNT": df_mv2[(df_mv2.get("MXMN_n", 999) < 20) & (df_mv2.get("D_CLABOVE_n", -1) > 3)]
+           
         }
 
         # 3. Setup Browser

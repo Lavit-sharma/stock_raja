@@ -44,6 +44,13 @@ def safe_int(v):
     except (ValueError, TypeError):
         return -1
 
+def safe_float(v):
+    try:
+        if v is None or str(v).strip() == "": return 0.0
+        return float(str(v).strip())
+    except (ValueError, TypeError):
+        return 0.0
+
 def fix_duplicate_columns(df):
     """Renames duplicate columns to ensure unique indexing."""
     cols = pd.Series(df.columns)
@@ -122,27 +129,33 @@ def main():
         url_map = {row[0].strip(): {'week': row[2].strip(), 'day': row[3].strip()} for row in stock_ws[1:] if row[0]}
 
         # 2. Process Filters
-        cols_to_fix = ["D_Trigger", "D_Trigger_S", "W_Trigger", "W_Trigger_S"]
+        cols_to_fix = ["D_Trigger", "D_Trigger_S", "W_Trigger", "W_Trigger_S", "DG", "D_EF1"]
         for col in cols_to_fix:
             if col in df_mv2.columns:
+                if col in ["DG", "D_EF1", "D_Trigger"]:
+                    df_mv2[f"{col}_f"] = df_mv2[col].apply(safe_float)
                 df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
 
-        # --- DELIVERY MAX LOGIC START ---
+        # --- DELIVERY MAX LOGIC ---
         today_str = datetime.now().strftime('%Y-%m-%d')
         delivery_max_mask = pd.Series([False] * len(df_mv2))
-        
         for date_col in ["DATE1", "DATE2", "DATE3"]:
             if date_col in df_mv2.columns:
-                # Matches if the column value (trimmed) equals today's date string
                 delivery_max_mask |= (df_mv2[date_col].astype(str).str.strip() == today_str)
-        # --- DELIVERY MAX LOGIC END ---
+
+        # --- DOUBLE GREEN LOGIC ---
+        dg_mask = (
+            (df_mv2.get("DG_f", pd.Series([0]*len(df_mv2))) == 1) & 
+            (df_mv2.get("D_Trigger_f", 0) > (df_mv2.get("D_EF1_f", 0) / 2))
+        )
 
         triggers = {
             "D_Trigger": df_mv2[df_mv2.get("D_Trigger_n", pd.Series([-1]*len(df_mv2))) == 0],
             "D_Trigger_S": df_mv2[(df_mv2.get("D_Trigger_S_n", -1) == 0) & (df_mv2.get("D_Trigger_S_n", -1) != df_mv2.get("D_Trigger_n", -1))],
             "W_Trigger": df_mv2[df_mv2.get("W_Trigger_n", -1) == 1],
             "W_Trigger_S": df_mv2[(df_mv2.get("W_Trigger_S_n", -1) == 0) & (df_mv2.get("W_Trigger_S_n", -1) != df_mv2.get("W_Trigger_n", -1))],
-            "Delivery_Max": df_mv2[delivery_max_mask]
+            "Delivery_Max": df_mv2[delivery_max_mask],
+            "Double_Green": df_mv2[dg_mask]
         }
 
         # 3. Setup Browser

@@ -20,10 +20,17 @@ jobs:
           python-version: "3.10"
           cache: "pip"
 
+      # ✅ Install Chrome (IMPORTANT for Selenium)
+      - name: Install Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+
       - name: Install Dependencies
         run: |
           pip install pandas selenium webdriver-manager gspread mysql-connector-python requests
 
+      # ✅ Market check (NON-BLOCKING)
       - name: Check if market is open
         env:
           TZ: Asia/Kolkata
@@ -35,12 +42,11 @@ jobs:
           from datetime import datetime
 
           today = datetime.now().date()
-          weekday = today.weekday()   # Mon=0 ... Sun=6
+          weekday = today.weekday()
 
-          # Skip Saturday and Sunday
-          if weekday >= 6:
-              print(f"⏭️ Market closed today ({today}) - weekend.")
-              sys.exit(0)
+          # 👉 DO NOT BLOCK (for testing)
+          if weekday >= 5:
+              print(f"⚠️ Weekend detected ({today}) - continuing for testing")
 
           headers = {
               "User-Agent": "Mozilla/5.0",
@@ -52,34 +58,30 @@ jobs:
 
           try:
               session = requests.Session()
-
-              # Warm up session for NSE
               session.get("https://www.nseindia.com", headers=headers, timeout=30)
 
               response = session.get(holiday_url, headers=headers, timeout=30)
-              response.raise_for_status()
               html = response.text
 
-              # Extract dates like 26-Jan-2026
               raw_dates = re.findall(r'\b\d{1,2}-[A-Za-z]{3}-\d{4}\b', html)
 
               holiday_dates = set()
-              for date_str in raw_dates:
+              for d in raw_dates:
                   try:
-                      holiday_dates.add(datetime.strptime(date_str, "%d-%b-%Y").date())
-                  except Exception:
+                      holiday_dates.add(datetime.strptime(d, "%d-%b-%Y").date())
+                  except:
                       pass
 
               if today in holiday_dates:
-                   print(f"⚠️ NSE holiday detected ({today}) - but continuing for testing")
+                  print(f"⚠️ NSE holiday detected ({today}) - continuing")
 
-              print(f"✅ Market open today ({today}) - continuing workflow.")
+              print(f"✅ Market check complete")
 
           except Exception as e:
-               print(f"⚠️ Holiday check failed: {e}")
-               print("⚠️ Continuing workflow anyway")
+              print(f"⚠️ Holiday check failed: {e}")
           PY
 
+      # ✅ MAIN SCRIPT (ALWAYS RUN)
       - name: Run Filter Script
         env:
           DB_HOST: ${{ secrets.DB_HOST }}
@@ -88,5 +90,8 @@ jobs:
           DB_NAME: ${{ secrets.DB_NAME }}
           GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
           TRADINGVIEW_COOKIES: ${{ secrets.TRADINGVIEW_COOKIES }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
         run: |
           python filter.py

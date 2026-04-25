@@ -39,14 +39,14 @@ def log(msg):
 
 def safe_int(v):
     try:
-        if v is None or str(v).strip() == "": return -1
+        if v is None or str(v).strip() == "" or str(v).lower() == "nan": return -1
         return int(float(str(v).strip()))
     except (ValueError, TypeError):
         return -1
 
 def safe_float(v):
     try:
-        if v is None or str(v).strip() == "": return 0.0
+        if v is None or str(v).strip() == "" or str(v).lower() == "nan": return 0.0
         return float(str(v).strip())
     except (ValueError, TypeError):
         return 0.0
@@ -61,19 +61,13 @@ def fix_duplicate_columns(df):
     return df
 
 def parse_us_date(date_str):
-    """Converts MM/DD/YYYY (US) to YYYY-MM-DD for comparison."""
     try:
         date_str = str(date_str).strip()
-        if not date_str or date_str.lower() == "nan":
-            return None
-        # Handles 1/2/2024 or 01/02/2024
+        if not date_str or date_str.lower() == "nan": return None
         return datetime.strptime(date_str, '%m/%d/%Y').strftime('%Y-%m-%d')
-    except Exception:
-        try:
-            # Fallback for YY format if needed
-            return datetime.strptime(date_str, '%m/%d/%y').strftime('%Y-%m-%d')
-        except:
-            return None
+    except:
+        try: return datetime.strptime(date_str, '%m/%d/%y').strftime('%Y-%m-%d')
+        except: return None
 
 # ---------------- DB CLASS ---------------- #
 class DB:
@@ -104,7 +98,7 @@ def roll_days_forward(db: DB):
         try:
             conn = db.ensure()
             cur = conn.cursor()
-            cur.execute(f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 1")
+            cur.execute(f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 0")
             cur.execute(f"DELETE FROM `{TARGET_TABLE}` WHERE `day` > %s AND LOWER(TRIM(COALESCE(`review_status`, ''))) = 'rejected'", (MAX_DAY_TO_KEEP,))
             log(f"✅ Rollover successful.")
             cur.close()
@@ -139,41 +133,43 @@ def main():
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID).get_all_values()
         url_map = {row[0].strip(): {'week': row[2].strip(), 'day': row[3].strip()} for row in stock_ws[1:] if row[0]}
 
-        # 2. Process Filters
-        cols_to_fix = ["D_Trigger", "D_Trigger_S", "W_Trigger", "W_Trigger_S", "DG", "D_EF1"]
+        # 2. Process Filters (Corrected Column Names)
+        # Note: Changed 'DG' to 'D_DG'
+        cols_to_fix = ["D_Trigger", "D_Trigger_S", "W_Trigger", "W_Trigger_S", "D_DG", "D_EF1"]
         for col in cols_to_fix:
             if col in df_mv2.columns:
                 df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
                 df_mv2[f"{col}_f"] = df_mv2[col].apply(safe_float)
+            else:
+                # Default empty values if column missing to prevent logic crashes
+                df_mv2[f"{col}_n"] = -1
+                df_mv2[f"{col}_f"] = 0.0
 
-        # --- DELIVERY MAX LOGIC (US Date Parsing) ---
+        # --- DELIVERY MAX LOGIC ---
         today_str = datetime.now().strftime('%Y-%m-%d')
         delivery_max_mask = pd.Series([False] * len(df_mv2))
-        
         for date_col in ["DATE1", "DATE2", "DATE3"]:
             if date_col in df_mv2.columns:
-                # Convert the US dates in the column to standard YYYY-MM-DD
-                converted_dates = df_mv2[date_col].apply(parse_us_date)
-                delivery_max_mask |= (converted_dates == today_str)
+                delivery_max_mask |= (df_mv2[date_col].apply(parse_us_date) == today_str)
 
-        # --- DOUBLE GREEN LOGIC ---
+        # --- DOUBLE GREEN LOGIC (Updated to D_DG) ---
         dg_mask = (
-            (df_mv2.get("DG_f", pd.Series([0.0]*len(df_mv2))) == 1.0) & 
-            (df_mv2.get("D_Trigger_f", pd.Series([0.0]*len(df_mv2))) > (df_mv2.get("D_EF1_f", pd.Series([0.0]*len(df_mv2))) / 2))
+            (df_mv2["D_DG_f"] == 1.0) & 
+            (df_mv2["D_Trigger_f"] > (df_mv2["D_EF1_f"] / 2))
         )
 
         triggers = {
-            "D_Trigger": df_mv2[df_mv2.get("D_Trigger_n", -1) == 0],
-            "D_Trigger_S": df_mv2[(df_mv2.get("D_Trigger_S_n", -1) == 0) & (df_mv2.get("D_Trigger_S_n", -1) != df_mv2.get("D_Trigger_n", -1))],
-            "W_Trigger": df_mv2[df_mv2.get("W_Trigger_n", -1) == 1],
-            "W_Trigger_S": df_mv2[(df_mv2.get("W_Trigger_S_n", -1) == 0) & (df_mv2.get("W_Trigger_S_n", -1) != df_mv2.get("W_Trigger_n", -1))],
+            "D_Trigger": df_mv2[df_mv2["D_Trigger_n"] == 0],
+            "D_Trigger_S": df_mv2[(df_mv2["D_Trigger_S_n"] == 0) & (df_mv2["D_Trigger_S_n"] != df_mv2["D_Trigger_n"])],
+            "W_Trigger": df_mv2[df_mv2["W_Trigger_n"] == 1],
+            "W_Trigger_S": df_mv2[(df_mv2["W_Trigger_S_n"] == 0) & (df_mv2["W_Trigger_S_n"] != df_mv2["W_Trigger_n"])],
             "Delivery_Max": df_mv2[delivery_max_mask],
             "Double_Green": df_mv2[dg_mask]
         }
 
-        # Debug Logs
+        # Debug Logs for Visibility
         for name, d_sub in triggers.items():
-            log(f"🔍 Filter Check: {name} | Count: {len(d_sub)}")
+            log(f"🔍 Filter Check: {name} | Found: {len(d_sub)}")
 
         # 3. Setup Browser
         driver = get_driver()

@@ -133,15 +133,14 @@ def main():
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID).get_all_values()
         url_map = {row[0].strip(): {'week': row[2].strip(), 'day': row[3].strip()} for row in stock_ws[1:] if row[0]}
 
-        # 2. Process Filters (Corrected Column Names)
-        # Note: Changed 'DG' to 'D_DG'
-        cols_to_fix = ["D_Trigger", "D_Trigger_S", "W_Trigger", "W_Trigger_S", "D_DG", "D_EF1"]
+        # 2. Process Filters
+        # Added D_Today to numeric conversion list
+        cols_to_fix = ["D_Trigger", "D_Trigger_S", "W_Trigger", "W_Trigger_S", "D_DG", "D_EF1", "D_Today"]
         for col in cols_to_fix:
             if col in df_mv2.columns:
                 df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
                 df_mv2[f"{col}_f"] = df_mv2[col].apply(safe_float)
             else:
-                # Default empty values if column missing to prevent logic crashes
                 df_mv2[f"{col}_n"] = -1
                 df_mv2[f"{col}_f"] = 0.0
 
@@ -152,11 +151,11 @@ def main():
             if date_col in df_mv2.columns:
                 delivery_max_mask |= (df_mv2[date_col].apply(parse_us_date) == today_str)
 
-        # --- DOUBLE GREEN LOGIC (Updated to D_DG) ---
+        # --- DOUBLE GREEN LOGIC (Updated to use D_Today) ---
         dg_mask = (
-    (df_mv2["D_DG_f"] == 1.0) &
-    (df_mv2["D_Trigger_2_f"] > (0.5 * df_mv2["D_EF1_f"]))
-)
+            (df_mv2["D_DG_f"] == 1.0) & 
+            (df_mv2["D_Today_f"] > (0.5 * df_mv2["D_EF1_f"]))
+        )
 
         triggers = {
             "D_Trigger": df_mv2[df_mv2["D_Trigger_n"] == 0],
@@ -167,7 +166,6 @@ def main():
             "Double_Green": df_mv2[dg_mask]
         }
 
-        # Debug Logs for Visibility
         for name, d_sub in triggers.items():
             log(f"🔍 Filter Check: {name} | Found: {len(d_sub)}")
 

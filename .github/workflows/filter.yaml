@@ -71,15 +71,13 @@ jobs:
                       pass
 
               if today in holiday_dates:
-                  print(f"⏭️ Market closed today ({today}) - NSE holiday.")
-                  sys.exit(0)
+                   print(f"⚠️ NSE holiday detected ({today}) - but continuing for testing")
 
               print(f"✅ Market open today ({today}) - continuing workflow.")
 
           except Exception as e:
-              print(f"⚠️ Could not verify NSE holiday status: {e}")
-              print("⏭️ Stopping workflow for safety.")
-              sys.exit(0)
+               print(f"⚠️ Holiday check failed: {e}")
+               print("⚠️ Continuing workflow anyway")
           PY
 
       - name: Run Filter Script

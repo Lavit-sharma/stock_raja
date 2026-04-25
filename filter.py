@@ -32,6 +32,7 @@ CHART_WAIT_SEC = 30
 POST_LOAD_SLEEP = 6
 DB_RETRY = 3
 MAX_DAY_TO_KEEP = 4
+SCREENSHOT_FOLDER = "screenshots"
 
 # ---------------- HELPERS ---------------- #
 def log(msg):
@@ -52,7 +53,6 @@ def safe_float(v):
         return 0.0
 
 def fix_duplicate_columns(df):
-    """Renames duplicate columns to ensure unique indexing."""
     cols = pd.Series(df.columns)
     for dup in cols[cols.duplicated()].unique(): 
         cols[cols[cols == dup].index.values.tolist()] = [
@@ -113,6 +113,7 @@ def main():
     driver = None
     try:
         roll_days_forward(db)
+        os.makedirs(SCREENSHOT_FOLDER, exist_ok=True)
         
         # 1. Load Data
         creds = os.getenv("GSPREAD_CREDENTIALS")
@@ -123,9 +124,6 @@ def main():
         df_mv2 = fix_duplicate_columns(df_mv2)
         
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID).get_all_values()
-        df_stocks = pd.DataFrame(stock_ws[1:], columns=[c.strip() for c in stock_ws[0]])
-        df_stocks = fix_duplicate_columns(df_stocks)
-
         url_map = {row[0].strip(): {'week': row[2].strip(), 'day': row[3].strip()} for row in stock_ws[1:] if row[0]}
 
         # 2. Process Filters
@@ -136,17 +134,15 @@ def main():
                     df_mv2[f"{col}_f"] = df_mv2[col].apply(safe_float)
                 df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
 
-        # --- DELIVERY MAX LOGIC ---
         today_str = datetime.now().strftime('%Y-%m-%d')
         delivery_max_mask = pd.Series([False] * len(df_mv2))
         for date_col in ["DATE1", "DATE2", "DATE3"]:
             if date_col in df_mv2.columns:
                 delivery_max_mask |= (df_mv2[date_col].astype(str).str.strip() == today_str)
 
-        # --- DOUBLE GREEN LOGIC ---
         dg_mask = (
-            (df_mv2.get("DG_f", pd.Series([0]*len(df_mv2))) == 1) & 
-            (df_mv2.get("D_Trigger_f", 0) > (df_mv2.get("D_EF1_f", 0) / 2))
+            (df_mv2.get("DG_f", pd.Series([0.0]*len(df_mv2))) == 1.0) & 
+            (df_mv2.get("D_Trigger_f", 0.0) > (df_mv2.get("D_EF1_f", 0.0) / 2.0))
         )
 
         triggers = {
@@ -188,36 +184,32 @@ def main():
                             EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
                         )
                         time.sleep(POST_LOAD_SLEEP)
-                        # 📁 Step 3.1: Create folder (auto if not exists)
-folder = "screenshots"
-os.makedirs(folder, exist_ok=True)
+                        
+                        # Create unique filename and save
+                        filename = f"{symbol}_{tf}_{int(time.time())}.png"
+                        filepath = os.path.join(SCREENSHOT_FOLDER, filename)
+                        
+                        with open(filepath, "wb") as f:
+                            f.write(chart.screenshot_as_png)
 
-# 📁 Step 3.2: Create unique filename
-filename = f"{symbol}_{tf}_{int(time.time())}.png"
-filepath = os.path.join(folder, filename)
-
-# 📁 Step 3.3: Save screenshot as file
-with open(filepath, "wb") as f:
-    f.write(chart.screenshot_as_png)
-
-# 💾 Step 3.4: Save path in DB instead of blob
-conn = db.ensure()
-cur = conn.cursor()
-
-cur.execute(f"""
-INSERT INTO `{TARGET_TABLE}` 
-(symbol, timeframe, filter_type, day, screenshot_path) 
-VALUES (%s, %s, %s, 0, %s)
-""", (symbol, tf, filter_name, filepath))
-
-cur.close()
-                        log(f"   ✅ Saved {symbol} ({tf})")
+                        # DB Update
+                        conn = db.ensure()
+                        cur = conn.cursor()
+                        cur.execute(f"""
+                            INSERT INTO `{TARGET_TABLE}` 
+                            (symbol, timeframe, filter_type, day, screenshot_path) 
+                            VALUES (%s, %s, %s, 0, %s)
+                        """, (symbol, tf, filter_name, filepath))
+                        cur.close()
+                        
+                        log(f"   ✅ Saved {symbol} ({tf}) to {filepath}")
                     except Exception as e:
                         log(f"   ❌ Error {symbol} {tf}: {e}")
 
         log("🏁 Execution Finished.")
 
-    except Exception as e: log(f"❌ Fatal: {e}")
+    except Exception as e: 
+        log(f"❌ Fatal: {e}")
     finally:
         if driver: driver.quit()
         db.close()

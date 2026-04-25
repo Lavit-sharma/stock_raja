@@ -1,64 +1,10 @@
 import os
 import sys
-import re
 import json
-import requests
 import pandas as pd
 import mysql.connector
-from io import StringIO
-from datetime import datetime
-
-# -------------------------------
-# Market day check
-# -------------------------------
-def is_market_open_today():
-    today = datetime.now().date()
-    weekday = today.weekday()  # Mon=0 ... Sun=6
-
-    if weekday >= 5:
-        print(f"⏭️ Market closed today ({today}) - weekend.")
-        return False
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9"
-    }
-
-    holiday_url = "https://www.nseindia.com/resources/exchange-communication-holidays"
-
-    try:
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=30)
-        response = session.get(holiday_url, headers=headers, timeout=30)
-        response.raise_for_status()
-        html = response.text
-
-        raw_dates = re.findall(r'\bd{1,2}-[A-Za-z]{3}-d{4}\b', html)
-
-        holiday_dates = set()
-        for date_str in raw_dates:
-            try:
-                holiday_dates.add(datetime.strptime(date_str, "%d-%b-%Y").date())
-            except Exception:
-                pass
-
-        if today in holiday_dates:
-            print(f"⏭️ Market closed today ({today}) - NSE holiday.")
-            return False
-
-        print(f"✅ Market open today ({today}) - continuing workflow.")
-        return True
-
-    except Exception as e:
-        print(f"⚠️ Could not verify NSE holiday status: {e}")
-        print("⏭️ Stopping workflow for safety.")
-        return False
 
 
-# -------------------------------
-# Database connection
-# -------------------------------
 def get_db_connection():
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
@@ -68,9 +14,6 @@ def get_db_connection():
     )
 
 
-# -------------------------------
-# Load data
-# -------------------------------
 def load_data_from_mysql():
     conn = None
     try:
@@ -93,19 +36,16 @@ def load_data_from_mysql():
             conn.close()
 
 
-# -------------------------------
-# Normalize dataframe
-# -------------------------------
 def normalize_dataframe(df):
     if df is None or df.empty:
-        print("⚠️ DataFrame is empty. Stopping safely.")
+        print("⚠️ DataFrame is empty. Exiting safely.")
         sys.exit(0)
 
     df.columns = df.columns.astype(str).str.strip()
+
     print("Available columns:", df.columns.tolist())
     print("DataFrame shape:", df.shape)
 
-    # Backward compatibility for old code
     if 'D_Today_f' not in df.columns and 'D_Today' in df.columns:
         df['D_Today_f'] = df['D_Today']
 
@@ -119,9 +59,6 @@ def normalize_dataframe(df):
     return df
 
 
-# -------------------------------
-# Get safe working column
-# -------------------------------
 def get_today_column(df):
     if 'D_Today' in df.columns:
         return 'D_Today'
@@ -132,9 +69,6 @@ def get_today_column(df):
     sys.exit(0)
 
 
-# -------------------------------
-# Safe numeric conversion
-# -------------------------------
 def convert_numeric_columns(df, columns):
     for col in columns:
         if col in df.columns:
@@ -142,9 +76,13 @@ def convert_numeric_columns(df, columns):
     return df
 
 
-# -------------------------------
-# Main filtering logic
-# -------------------------------
+def rollover_if_needed():
+    try:
+        print("✅ Rollover successful.")
+    except Exception as e:
+        print(f"⚠️ Rollover failed: {e}")
+
+
 def process_data(df):
     df = normalize_dataframe(df)
     today_col = get_today_column(df)
@@ -159,9 +97,8 @@ def process_data(df):
     ]
     df = convert_numeric_columns(df, numeric_candidates)
 
-    df = df[df[today_col].notna()]
+    df = df[df[today_col].notna()].copy()
 
-    # Example filter: only positive D_Today values
     filtered_df = df[df[today_col] > 0].copy()
 
     if filtered_df.empty:
@@ -174,19 +111,6 @@ def process_data(df):
     return filtered_df
 
 
-# -------------------------------
-# Optional rollover placeholder
-# -------------------------------
-def rollover_if_needed():
-    try:
-        print("✅ Rollover successful.")
-    except Exception as e:
-        print(f"⚠️ Rollover failed: {e}")
-
-
-# -------------------------------
-# Save output
-# -------------------------------
 def save_output(df):
     if df.empty:
         print("⚠️ Nothing to save.")
@@ -197,13 +121,7 @@ def save_output(df):
     print(f"✅ Output saved: {output_file}")
 
 
-# -------------------------------
-# Main
-# -------------------------------
 def main():
-    if not is_market_open_today():
-        sys.exit(0)
-
     rollover_if_needed()
 
     df = load_data_from_mysql()

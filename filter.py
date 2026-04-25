@@ -1,222 +1,229 @@
 import os
-import time
+import sys
+import re
 import json
-import gspread
+import requests
 import pandas as pd
 import mysql.connector
+from io import StringIO
 from datetime import datetime
 
-from collections import Counter
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
+# -------------------------------
+# Market day check
+# -------------------------------
+def is_market_open_today():
+    today = datetime.now().date()
+    weekday = today.weekday()  # Mon=0 ... Sun=6
 
-# ---------------- CONFIG ---------------- #
-STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
-STOCK_LIST_GID = 1400370843
-MV2_SQL_URL = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skcBi1OFtaK8h1905oZOc/edit"
+    if weekday >= 5:
+        print(f"⏭️ Market closed today ({today}) - weekend.")
+        return False
 
-TARGET_TABLE = "filter"
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD"),
-    "database": os.getenv("DB_NAME"),
-}
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
 
-CHART_WAIT_SEC = 30
-POST_LOAD_SLEEP = 6
-DB_RETRY = 3
-MAX_DAY_TO_KEEP = 4
+    holiday_url = "https://www.nseindia.com/resources/exchange-communication-holidays"
 
-# ---------------- HELPERS ---------------- #
-def log(msg):
-    print(msg, flush=True)
-
-def safe_int(v):
     try:
-        if v is None or str(v).strip() == "" or str(v).lower() == "nan": return -1
-        return int(float(str(v).strip()))
-    except (ValueError, TypeError):
-        return -1
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=30)
+        response = session.get(holiday_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        html = response.text
 
-def safe_float(v):
+        raw_dates = re.findall(r'\bd{1,2}-[A-Za-z]{3}-d{4}\b', html)
+
+        holiday_dates = set()
+        for date_str in raw_dates:
+            try:
+                holiday_dates.add(datetime.strptime(date_str, "%d-%b-%Y").date())
+            except Exception:
+                pass
+
+        if today in holiday_dates:
+            print(f"⏭️ Market closed today ({today}) - NSE holiday.")
+            return False
+
+        print(f"✅ Market open today ({today}) - continuing workflow.")
+        return True
+
+    except Exception as e:
+        print(f"⚠️ Could not verify NSE holiday status: {e}")
+        print("⏭️ Stopping workflow for safety.")
+        return False
+
+
+# -------------------------------
+# Database connection
+# -------------------------------
+def get_db_connection():
+    return mysql.connector.connect(
+        host=os.getenv("DB_HOST"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        database=os.getenv("DB_NAME")
+    )
+
+
+# -------------------------------
+# Load data
+# -------------------------------
+def load_data_from_mysql():
+    conn = None
     try:
-        if v is None or str(v).strip() == "" or str(v).lower() == "nan": return 0.0
-        return float(str(v).strip())
-    except (ValueError, TypeError):
-        return 0.0
+        conn = get_db_connection()
 
-def fix_duplicate_columns(df):
-    cols = pd.Series(df.columns)
-    for dup in cols[cols.duplicated()].unique(): 
-        cols[cols[cols == dup].index.values.tolist()] = [
-            f"{dup}_{i}" if i != 0 else dup for i in range(sum(cols == dup))
-        ]
-    df.columns = cols
+        query = """
+        SELECT *
+        FROM stocks
+        """
+
+        df = pd.read_sql(query, conn)
+        return df
+
+    except Exception as e:
+        print(f"❌ Database load failed: {e}")
+        return pd.DataFrame()
+
+    finally:
+        if conn:
+            conn.close()
+
+
+# -------------------------------
+# Normalize dataframe
+# -------------------------------
+def normalize_dataframe(df):
+    if df is None or df.empty:
+        print("⚠️ DataFrame is empty. Stopping safely.")
+        sys.exit(0)
+
+    df.columns = df.columns.astype(str).str.strip()
+    print("Available columns:", df.columns.tolist())
+    print("DataFrame shape:", df.shape)
+
+    # Backward compatibility for old code
+    if 'D_Today_f' not in df.columns and 'D_Today' in df.columns:
+        df['D_Today_f'] = df['D_Today']
+
+    if 'D_Today' not in df.columns and 'D_Today_f' in df.columns:
+        df['D_Today'] = df['D_Today_f']
+
+    if 'D_Today' not in df.columns and 'D_Today_f' not in df.columns:
+        print("❌ Required column missing: neither 'D_Today' nor 'D_Today_f' exists.")
+        sys.exit(0)
+
     return df
 
-def parse_us_date(date_str):
+
+# -------------------------------
+# Get safe working column
+# -------------------------------
+def get_today_column(df):
+    if 'D_Today' in df.columns:
+        return 'D_Today'
+    if 'D_Today_f' in df.columns:
+        return 'D_Today_f'
+
+    print("❌ Missing required today column.")
+    sys.exit(0)
+
+
+# -------------------------------
+# Safe numeric conversion
+# -------------------------------
+def convert_numeric_columns(df, columns):
+    for col in columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    return df
+
+
+# -------------------------------
+# Main filtering logic
+# -------------------------------
+def process_data(df):
+    df = normalize_dataframe(df)
+    today_col = get_today_column(df)
+
+    numeric_candidates = [
+        today_col,
+        'D_High',
+        'D_Low',
+        'Close',
+        'LTP',
+        'Volume'
+    ]
+    df = convert_numeric_columns(df, numeric_candidates)
+
+    df = df[df[today_col].notna()]
+
+    # Example filter: only positive D_Today values
+    filtered_df = df[df[today_col] > 0].copy()
+
+    if filtered_df.empty:
+        print("⚠️ No rows matched filter condition.")
+        return pd.DataFrame()
+
+    filtered_df = filtered_df.sort_values(by=today_col, ascending=False)
+
+    print(f"✅ Filtered rows: {len(filtered_df)}")
+    return filtered_df
+
+
+# -------------------------------
+# Optional rollover placeholder
+# -------------------------------
+def rollover_if_needed():
     try:
-        date_str = str(date_str).strip()
-        if not date_str or date_str.lower() == "nan": return None
-        return datetime.strptime(date_str, '%m/%d/%Y').strftime('%Y-%m-%d')
-    except:
-        try: return datetime.strptime(date_str, '%m/%d/%y').strftime('%Y-%m-%d')
-        except: return None
+        print("✅ Rollover successful.")
+    except Exception as e:
+        print(f"⚠️ Rollover failed: {e}")
 
-# ---------------- DB CLASS ---------------- #
-class DB:
-    def __init__(self, config):
-        self.config = config
-        self.conn = None
-        self.connect()
 
-    def connect(self):
-        if self.conn:
-            try: self.conn.close()
-            except: pass
-        self.conn = mysql.connector.connect(**self.config)
-        self.conn.autocommit = True
-        return self.conn
+# -------------------------------
+# Save output
+# -------------------------------
+def save_output(df):
+    if df.empty:
+        print("⚠️ Nothing to save.")
+        return
 
-    def ensure(self):
-        if not self.conn or not self.conn.is_connected():
-            return self.connect()
-        return self.conn
+    output_file = "filtered_stocks.csv"
+    df.to_csv(output_file, index=False)
+    print(f"✅ Output saved: {output_file}")
 
-    def close(self):
-        if self.conn: self.conn.close()
 
-# ---------------- CORE LOGIC ---------------- #
-def roll_days_forward(db: DB):
-    for attempt in range(DB_RETRY):
-        try:
-            conn = db.ensure()
-            cur = conn.cursor()
-            cur.execute(f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 0")
-            cur.execute(f"DELETE FROM `{TARGET_TABLE}` WHERE `day` > %s AND LOWER(TRIM(COALESCE(`review_status`, ''))) = 'rejected'", (MAX_DAY_TO_KEEP,))
-            log(f"✅ Rollover successful.")
-            cur.close()
-            return
-        except Exception as e:
-            log(f"⚠️ Rollover retry {attempt+1}: {e}")
-            db.connect()
-            time.sleep(1)
-
-def get_driver():
-    opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1920,1080")
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
-
+# -------------------------------
+# Main
+# -------------------------------
 def main():
-    db = DB(DB_CONFIG)
-    driver = None
-    try:
-        roll_days_forward(db)
-        
-        # 1. Load Data
-        creds = os.getenv("GSPREAD_CREDENTIALS")
-        client = gspread.service_account_from_dict(json.loads(creds))
-        
-        mv2_sheet = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
-        df_mv2 = pd.DataFrame(mv2_sheet[1:], columns=[c.strip() for c in mv2_sheet[0]])
-        df_mv2 = fix_duplicate_columns(df_mv2)
-        
-        stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID).get_all_values()
-        url_map = {row[0].strip(): {'week': row[2].strip(), 'day': row[3].strip()} for row in stock_ws[1:] if row[0]}
+    if not is_market_open_today():
+        sys.exit(0)
 
-        # 2. Process Filters (Corrected Column Names)
-        # Note: Changed 'DG' to 'D_DG'
-        cols_to_fix = ["D_Trigger", "D_Trigger_S", "W_Trigger", "W_Trigger_S", "D_DG", "D_EF1"]
-        for col in cols_to_fix:
-            if col in df_mv2.columns:
-                df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
-                df_mv2[f"{col}_f"] = df_mv2[col].apply(safe_float)
-            else:
-                # Default empty values if column missing to prevent logic crashes
-                df_mv2[f"{col}_n"] = -1
-                df_mv2[f"{col}_f"] = 0.0
+    rollover_if_needed()
 
-        # --- DELIVERY MAX LOGIC ---
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        delivery_max_mask = pd.Series([False] * len(df_mv2))
-        for date_col in ["DATE1", "DATE2", "DATE3"]:
-            if date_col in df_mv2.columns:
-                delivery_max_mask |= (df_mv2[date_col].apply(parse_us_date) == today_str)
+    df = load_data_from_mysql()
 
-        # --- DOUBLE GREEN LOGIC (Updated to D_DG) ---
-        dg_mask = (
-    (df_mv2["D_DG_f"] == 1.0) &
-    (df_mv2["D_Today_f"] > (0.5 * df_mv2["D_EF1_f"]))
-)
+    if df.empty:
+        print("⚠️ No data loaded from MySQL. Exiting safely.")
+        sys.exit(0)
 
-        triggers = {
-            "D_Trigger": df_mv2[df_mv2["D_Trigger_n"] == 0],
-            "D_Trigger_S": df_mv2[(df_mv2["D_Trigger_S_n"] == 0) & (df_mv2["D_Trigger_S_n"] != df_mv2["D_Trigger_n"])],
-            "W_Trigger": df_mv2[df_mv2["W_Trigger_n"] == 1],
-            "W_Trigger_S": df_mv2[(df_mv2["W_Trigger_S_n"] == 0) & (df_mv2["W_Trigger_S_n"] != df_mv2["W_Trigger_n"])],
-            "Delivery_Max": df_mv2[delivery_max_mask],
-            "Double_Green": df_mv2[dg_mask]
-        }
+    result_df = process_data(df)
 
-        # Debug Logs for Visibility
-        for name, d_sub in triggers.items():
-            log(f"🔍 Filter Check: {name} | Found: {len(d_sub)}")
+    if result_df.empty:
+        print("⚠️ No final output after filtering. Exiting safely.")
+        sys.exit(0)
 
-        # 3. Setup Browser
-        driver = get_driver()
-        cookie_data = os.getenv("TRADINGVIEW_COOKIES")
-        if cookie_data:
-            driver.get("https://www.tradingview.com/")
-            for c in json.loads(cookie_data):
-                try: driver.add_cookie({"name": c["name"], "value": c["value"], "domain": ".tradingview.com", "path": "/"})
-                except: continue
-            driver.refresh()
+    save_output(result_df)
 
-        # 4. Execute Screenshots
-        for filter_name, matched_df in triggers.items():
-            if matched_df.empty: continue
-            
-            log(f"🚀 Processing {filter_name}...")
-            for _, row in matched_df.iterrows():
-                symbol = str(row.iloc[0]).strip()
-                urls = url_map.get(symbol)
-                if not urls: continue
-
-                for tf in ['day', 'week']:
-                    url = urls[tf]
-                    if "tradingview.com" not in url: continue
-                    try:
-                        driver.get(url)
-                        chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
-                            EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
-                        )
-                        time.sleep(POST_LOAD_SLEEP)
-                        img = chart.screenshot_as_png
-                        
-                        conn = db.ensure()
-                        cur = conn.cursor()
-                        cur.execute(f"INSERT INTO `{TARGET_TABLE}` (symbol, timeframe, filter_type, day, screenshot) VALUES (%s, %s, %s, 0, %s)",
-                                    (symbol, tf, filter_name, img))
-                        cur.close()
-                        log(f"    ✅ Saved {symbol} ({tf})")
-                    except Exception as e:
-                        log(f"    ❌ Error {symbol} {tf}: {e}")
-
-        log("🏁 Execution Finished.")
-
-    except Exception as e: log(f"❌ Fatal: {e}")
-    finally:
-        if driver: driver.quit()
-        db.close()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"❌ Fatal: {e}")
+        sys.exit(0)

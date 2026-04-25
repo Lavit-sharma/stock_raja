@@ -52,7 +52,6 @@ def safe_float(v):
         return 0.0
 
 def fix_duplicate_columns(df):
-    """Renames duplicate columns to ensure unique indexing."""
     cols = pd.Series(df.columns)
     for dup in cols[cols.duplicated()].unique(): 
         cols[cols[cols == dup].index.values.tolist()] = [
@@ -92,7 +91,7 @@ def roll_days_forward(db: DB):
             cur = conn.cursor()
             cur.execute(f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 1")
             cur.execute(f"DELETE FROM `{TARGET_TABLE}` WHERE `day` > %s AND LOWER(TRIM(COALESCE(`review_status`, ''))) = 'rejected'", (MAX_DAY_TO_KEEP,))
-            log(f"✅ Rollover: {cur.rowcount} rows cleaned.")
+            log(f"✅ Rollover: {cur.rowcount} rows updated/cleaned.")
             cur.close()
             return
         except Exception as e:
@@ -123,20 +122,17 @@ def main():
         df_mv2 = fix_duplicate_columns(df_mv2)
         
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID).get_all_values()
-        df_stocks = pd.DataFrame(stock_ws[1:], columns=[c.strip() for c in stock_ws[0]])
-        df_stocks = fix_duplicate_columns(df_stocks)
-
         url_map = {row[0].strip(): {'week': row[2].strip(), 'day': row[3].strip()} for row in stock_ws[1:] if row[0]}
 
         # 2. Process Filters
         cols_to_fix = ["D_Trigger", "D_Trigger_S", "W_Trigger", "W_Trigger_S", "DG", "D_EF1"]
         for col in cols_to_fix:
             if col in df_mv2.columns:
-                if col in ["DG", "D_EF1", "D_Trigger"]:
-                    df_mv2[f"{col}_f"] = df_mv2[col].apply(safe_float)
                 df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
+                df_mv2[f"{col}_f"] = df_mv2[col].apply(safe_float)
 
         # --- DELIVERY MAX LOGIC ---
+        # Checks if today's date matches DATE1, DATE2, or DATE3
         today_str = datetime.now().strftime('%Y-%m-%d')
         delivery_max_mask = pd.Series([False] * len(df_mv2))
         for date_col in ["DATE1", "DATE2", "DATE3"]:
@@ -145,18 +141,22 @@ def main():
 
         # --- DOUBLE GREEN LOGIC ---
         dg_mask = (
-            (df_mv2.get("DG_f", pd.Series([0]*len(df_mv2))) == 1) & 
-            (df_mv2.get("D_Trigger_f", 0) > (df_mv2.get("D_EF1_f", 0) / 2))
+            (df_mv2.get("DG_f", pd.Series([0.0]*len(df_mv2))) == 1.0) & 
+            (df_mv2.get("D_Trigger_f", pd.Series([0.0]*len(df_mv2))) > (df_mv2.get("D_EF1_f", pd.Series([0.0]*len(df_mv2))) / 2))
         )
 
         triggers = {
-            "D_Trigger": df_mv2[df_mv2.get("D_Trigger_n", pd.Series([-1]*len(df_mv2))) == 0],
+            "D_Trigger": df_mv2[df_mv2.get("D_Trigger_n", -1) == 0],
             "D_Trigger_S": df_mv2[(df_mv2.get("D_Trigger_S_n", -1) == 0) & (df_mv2.get("D_Trigger_S_n", -1) != df_mv2.get("D_Trigger_n", -1))],
             "W_Trigger": df_mv2[df_mv2.get("W_Trigger_n", -1) == 1],
             "W_Trigger_S": df_mv2[(df_mv2.get("W_Trigger_S_n", -1) == 0) & (df_mv2.get("W_Trigger_S_n", -1) != df_mv2.get("W_Trigger_n", -1))],
             "Delivery_Max": df_mv2[delivery_max_mask],
             "Double_Green": df_mv2[dg_mask]
         }
+
+        # Debug: Log counts for all filters
+        for name, d_sub in triggers.items():
+            log(f"🔍 Filter Check: {name} found {len(d_sub)} matches.")
 
         # 3. Setup Browser
         driver = get_driver()
@@ -170,8 +170,10 @@ def main():
 
         # 4. Execute Screenshots
         for filter_name, matched_df in triggers.items():
-            if matched_df.empty: continue
-            log(f"🚀 Processing {filter_name}: {len(matched_df)} stocks found.")
+            if matched_df.empty:
+                continue
+            
+            log(f"🚀 Processing {filter_name}: {len(matched_df)} stocks.")
             
             for _, row in matched_df.iterrows():
                 symbol = str(row.iloc[0]).strip()
@@ -190,15 +192,14 @@ def main():
                         time.sleep(POST_LOAD_SLEEP)
                         img = chart.screenshot_as_png
                         
-                        # Direct DB Insert
                         conn = db.ensure()
                         cur = conn.cursor()
                         cur.execute(f"INSERT INTO `{TARGET_TABLE}` (symbol, timeframe, filter_type, day, screenshot) VALUES (%s, %s, %s, 0, %s)",
                                     (symbol, tf, filter_name, img))
                         cur.close()
-                        log(f"   ✅ Saved {symbol} ({tf})")
+                        log(f"    ✅ Saved {symbol} ({tf}) for {filter_name}")
                     except Exception as e:
-                        log(f"   ❌ Error {symbol} {tf}: {e}")
+                        log(f"    ❌ Error {symbol} {tf}: {e}")
 
         log("🏁 Execution Finished.")
 

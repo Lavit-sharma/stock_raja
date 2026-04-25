@@ -89,7 +89,7 @@ def roll_days_forward(db: DB):
         try:
             conn = db.ensure()
             cur = conn.cursor()
-            cur.execute(f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 1")
+            cur.execute(f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 0")
             cur.execute(f"DELETE FROM `{TARGET_TABLE}` WHERE `day` > %s AND LOWER(TRIM(COALESCE(`review_status`, ''))) = 'rejected'", (MAX_DAY_TO_KEEP,))
             log(f"✅ Rollover: {cur.rowcount} rows updated/cleaned.")
             cur.close()

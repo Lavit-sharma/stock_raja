@@ -113,17 +113,18 @@ def get_driver():
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
 
 def upload_via_ftp(local_path, filename):
-    ftp = FTP(FTP_HOST)
-    ftp.login(FTP_USER, FTP_PASS)
+    ftp = FTP(os.getenv("FTP_HOST"))
+    ftp.login(os.getenv("FTP_USER"), os.getenv("FTP_PASS"))
 
-    # Navigate to WordPress uploads folder
+    # Go to uploads folder
     ftp.cwd("public_html/wp-content/uploads")
 
-    # Ensure screenshots folder exists
+    # ✅ Create screenshots folder if not exists
     try:
         ftp.mkd("screenshots")
+        print("📁 Created screenshots folder")
     except:
-        pass
+        print("📁 Folder already exists")
 
     ftp.cwd("screenshots")
 
@@ -132,7 +133,6 @@ def upload_via_ftp(local_path, filename):
         ftp.storbinary(f"STOR {filename}", f)
 
     ftp.quit()
-
 def main():
     db = DB(DB_CONFIG)
     driver = None

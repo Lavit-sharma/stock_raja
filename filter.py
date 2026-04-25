@@ -4,7 +4,6 @@ import json
 import gspread
 import pandas as pd
 import mysql.connector
-from datetime import datetime
 from ftplib import FTP
 
 from selenium import webdriver
@@ -35,8 +34,6 @@ FTP_PASS = os.getenv("FTP_PASS")
 
 CHART_WAIT_SEC = 30
 POST_LOAD_SLEEP = 6
-DB_RETRY = 3
-MAX_DAY_TO_KEEP = 4
 
 # ---------------- HELPERS ---------------- #
 def log(msg):
@@ -54,7 +51,6 @@ def fix_duplicate_columns(df):
 # ---------------- DB ---------------- #
 class DB:
     def __init__(self, config):
-        self.config = config
         self.conn = mysql.connector.connect(**config)
         self.conn.autocommit = True
 
@@ -75,7 +71,6 @@ def upload_via_ftp(local_path, filename):
 
     try:
         ftp.mkd("screenshots")
-        print("📁 Created screenshots folder")
     except:
         pass
 
@@ -86,13 +81,28 @@ def upload_via_ftp(local_path, filename):
 
     ftp.quit()
 
+# ---------------- DRIVER ---------------- #
+def get_driver():
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--remote-debugging-port=9222")
+
+    return webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=opts
+    )
+
 # ---------------- MAIN ---------------- #
 def main():
     db = DB(DB_CONFIG)
     driver = None
 
     try:
-        # Load Sheets
+        # Load data
         creds = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds))
 
@@ -100,52 +110,46 @@ def main():
         df_mv2 = pd.DataFrame(mv2_sheet[1:], columns=[c.strip() for c in mv2_sheet[0]])
         df_mv2 = fix_duplicate_columns(df_mv2)
 
-        # ---------------- FIXED DATE LOGIC ---------------- #
-        today_str = datetime.now().strftime('%Y-%m-%d')
-
-        delivery_max_mask = pd.Series([False] * len(df_mv2))
-
-        for date_col in ["DATE1", "DATE2", "DATE3"]:
-            if date_col in df_mv2.columns:
-                parsed = pd.to_datetime(df_mv2[date_col], errors='coerce')
-                delivery_max_mask |= (parsed.dt.strftime('%Y-%m-%d') == today_str)
-
         print("TOTAL ROWS:", len(df_mv2))
-        print("MATCHED ROWS:", delivery_max_mask.sum())
+
+        # ✅ USE WORKING FILTERS (NO DATE)
+        df_mv2["D_Trigger_n"] = pd.to_numeric(df_mv2.get("D_Trigger"), errors="coerce")
+        df_mv2["W_Trigger_n"] = pd.to_numeric(df_mv2.get("W_Trigger"), errors="coerce")
 
         triggers = {
-            "Delivery_Max": df_mv2[delivery_max_mask]
+            "D_Trigger": df_mv2[df_mv2["D_Trigger_n"] == 0].head(10),
+            "W_Trigger": df_mv2[df_mv2["W_Trigger_n"] == 1].head(10)
         }
 
+        for name, df in triggers.items():
+            print(f"{name} MATCHED:", len(df))
+
         # Browser
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=Options())
+        driver = get_driver()
 
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID).get_all_values()
         url_map = {row[0].strip(): {'week': row[2].strip(), 'day': row[3].strip()} for row in stock_ws[1:] if row[0]}
 
         # Loop
         for filter_name, matched_df in triggers.items():
-            print(f"🚀 Processing {filter_name}: {len(matched_df)} stocks")
-
             if matched_df.empty:
-                print("⚠️ No matching stocks found")
                 continue
+
+            print(f"🚀 Processing {filter_name}")
 
             for _, row in matched_df.iterrows():
                 symbol = str(row.iloc[0]).strip()
                 urls = url_map.get(symbol)
 
                 if not urls:
-                    print("❌ No URL for", symbol)
                     continue
 
                 for tf in ['day', 'week']:
-                    url = urls[tf]
-
                     try:
-                        print(f"📊 Processing {symbol} {tf}")
+                        print(f"📊 {symbol} {tf}")
 
-                        driver.get(url)
+                        driver.get(urls[tf])
+
                         chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
                             EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
                         )
@@ -172,15 +176,16 @@ def main():
 
                         os.remove(local_path)
 
-                        print(f"✅ Uploaded {symbol} ({tf})")
+                        print(f"✅ Uploaded {symbol}")
 
                     except Exception as e:
-                        print(f"❌ Error {symbol} {tf}:", e)
+                        print(f"❌ Error {symbol}:", e)
 
         print("🏁 Finished")
 
     except Exception as e:
         print("❌ Fatal:", e)
+
     finally:
         if driver:
             driver.quit()

@@ -14,21 +14,58 @@ def get_db_connection():
     )
 
 
+def get_database_tables(conn):
+    """Discover all tables in the database"""
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SHOW TABLES")
+        tables = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        return tables
+    except Exception as e:
+        print(f"⚠️ Could not list tables: {e}")
+        return []
+
+
 def load_data_from_mysql():
     conn = None
     try:
         conn = get_db_connection()
-
-        query = """
-        SELECT *
-        FROM stocks
-        """
-
+        
+        # First, check what tables exist
+        tables = get_database_tables(conn)
+        print(f"📋 Available tables: {tables}")
+        
+        if not tables:
+            print("❌ No tables found in database")
+            return pd.DataFrame()
+        
+        # Try common stock table names first
+        common_stock_tables = ['stocks', 'stock_data', 'stock', 'nse_stocks', 'bse_stocks', 'daily_stocks']
+        table_to_use = None
+        
+        for table_name in common_stock_tables:
+            if table_name in tables:
+                table_to_use = table_name
+                break
+        
+        # If no common name found, use first table
+        if not table_to_use:
+            table_to_use = tables[0]
+            print(f"ℹ️ Using first available table: {table_to_use}")
+        
+        print(f"📊 Loading data from table: {table_to_use}")
+        
+        query = f"SELECT * FROM `{table_to_use}`"
         df = pd.read_sql(query, conn)
+        print(f"✅ Loaded {len(df)} rows from {table_to_use}")
         return df
 
     except Exception as e:
         print(f"❌ Database load failed: {e}")
+        if conn:
+            tables = get_database_tables(conn)
+            print(f"📋 Available tables: {tables}")
         return pd.DataFrame()
 
     finally:

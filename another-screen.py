@@ -28,6 +28,16 @@ END_ROW = int(os.getenv("END_ROW", "999999"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
 TRUNCATE_ON_START = os.getenv("TRUNCATE_ON_START", "0") == "1"
 
+# --- WORDPRESS FILE STORAGE CONFIG --- #
+# Path on the server where Python saves the file
+WP_UPLOAD_DIR = os.getenv("WP_UPLOAD_DIR", "/var/www/html/wp-content/uploads/trading_charts")
+# Public URL prefix that points to the folder above
+WP_BASE_URL = os.getenv("WP_BASE_URL", "https://yourdomain.com/wp-content/uploads/trading_charts")
+
+# Automatically create folder if missing
+if not os.path.exists(WP_UPLOAD_DIR):
+    os.makedirs(WP_UPLOAD_DIR, exist_ok=True)
+
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "user": os.getenv("DB_USER"),
@@ -67,6 +77,21 @@ def short_exc(e: Exception, max_len=220):
 
 # ---------------- HELPERS ---------------- #
 
+def save_image_to_disk(symbol, timeframe, image_bytes):
+    """Saves the screenshot as a PNG file and returns the public URL."""
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{symbol}_{timeframe}_{timestamp}.png".replace("/", "_")
+        file_path = os.path.join(WP_UPLOAD_DIR, filename)
+        
+        with open(file_path, "wb") as f:
+            f.write(image_bytes)
+            
+        return f"{WP_BASE_URL}/{filename}"
+    except Exception as e:
+        log(f"❌ Disk Save Error: {short_exc(e)}", symbol, timeframe)
+        return None
+
 def make_unique_headers(headers):
     seen = {}
     out = []
@@ -100,7 +125,7 @@ def get_db_connection():
         return None
     return db_pool.get_connection()
 
-def save_to_mysql(symbol, timeframe, image_data, chart_date, month_val):
+def save_to_mysql(symbol, timeframe, image_url, chart_date, month_val):
     conn = None
     cursor = None
     try:
@@ -109,16 +134,17 @@ def save_to_mysql(symbol, timeframe, image_data, chart_date, month_val):
             return False
 
         cursor = conn.cursor()
+        # Updating to use the new screenshot_path column
         query = """
-            INSERT INTO another_screenshot (symbol, timeframe, screenshot, chart_date, month_before)
+            INSERT INTO another_screenshot (symbol, timeframe, screenshot_path, chart_date, month_before)
             VALUES (%s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
-                screenshot = VALUES(screenshot),
+                screenshot_path = VALUES(screenshot_path),
                 chart_date = VALUES(chart_date),
                 month_before = VALUES(month_before),
                 created_at = CURRENT_TIMESTAMP
         """
-        cursor.execute(query, (symbol, timeframe, image_data, chart_date, month_val))
+        cursor.execute(query, (symbol, timeframe, image_url, chart_date, month_val))
         conn.commit()
         return True
 
@@ -203,11 +229,9 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
     try:
         log(f"🌐 Loading {timeframe}: {url}", symbol, timeframe)
         driver.get(url)
-
         time.sleep(8)
 
         chart = wait_for_chart_ready(driver)
-
         ActionChains(driver).move_to_element(chart).click().perform()
         time.sleep(1)
 
@@ -222,16 +246,23 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
         goto_input.send_keys(str(target_date))
         goto_input.send_keys(Keys.ENTER)
 
-        log("⏳ Waiting 10s for candles/indicators to render...", symbol, timeframe)
+        log("⏳ Waiting 10s for rendering...", symbol, timeframe)
         time.sleep(10)
 
         chart = wait_for_chart_ready(driver)
-        img = chart.screenshot_as_png
+        img_bytes = chart.screenshot_as_png
 
-        if save_to_mysql(symbol, timeframe, img, target_date, month_val):
-            log("✅ Saved to DB", symbol, timeframe)
+        # Save binary to file
+        image_url = save_image_to_disk(symbol, timeframe, img_bytes)
+
+        if image_url:
+            # Save path string to the new DB column
+            if save_to_mysql(symbol, timeframe, image_url, target_date, month_val):
+                log(f"✅ Path saved: {image_url}", symbol, timeframe)
+            else:
+                log("⚠️ File saved, but DB failed", symbol, timeframe)
         else:
-            log("⚠️ Captured but not saved", symbol, timeframe)
+            log("❌ File save failed", symbol, timeframe)
 
     except Exception as e:
         log(f"❌ Screenshot Error: {short_exc(e)}", symbol, timeframe)
@@ -248,9 +279,8 @@ def process_row(row, actual_index):
     driver = None
     try:
         driver = get_driver()
-
         if not inject_tv_cookies(driver, symbol):
-            log("⚠️ Could not inject TradingView cookies", symbol)
+            log("⚠️ Missing cookies", symbol)
             return
 
         month_name = get_month_name(target_date)
@@ -263,7 +293,7 @@ def process_row(row, actual_index):
             navigate_and_snap(driver, symbol, "week", week_url, target_date, month_name)
 
     except Exception as e:
-        log(f"❌ Row Error at actual row {actual_index}: {short_exc(e)}", symbol)
+        log(f"❌ Row Error: {short_exc(e)}", symbol)
     finally:
         if driver:
             try:
@@ -279,32 +309,16 @@ def truncate_table_if_needed():
     cursor = None
     try:
         conn = get_db_connection()
-        if not conn:
-            log("❌ Cannot truncate table: DB unavailable")
-            return
-
+        if not conn: return
         cursor = conn.cursor()
         cursor.execute("TRUNCATE TABLE another_screenshot")
         conn.commit()
         log("✅ Table Truncated.")
     except Exception as e:
-        if conn:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
         log(f"⚠️ Truncate failed: {short_exc(e)}")
     finally:
-        if cursor:
-            try:
-                cursor.close()
-            except Exception:
-                pass
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
+        if cursor: cursor.close()
+        if conn: conn.close()
 
 def load_rows():
     creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
@@ -317,10 +331,7 @@ def load_rows():
 
 def process_batch(batch_rows):
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        futures = []
-        for actual_index, row in batch_rows:
-            futures.append(executor.submit(process_row, row, actual_index))
-
+        futures = [executor.submit(process_row, row, idx) for idx, row in batch_rows]
         for future in concurrent.futures.as_completed(futures):
             try:
                 future.result()
@@ -329,42 +340,30 @@ def process_batch(batch_rows):
 
 def main():
     if not db_pool:
-        log("❌ Connection pool failed. Check DB config.")
+        log("❌ DB Pool failed.")
         return
 
     truncate_table_if_needed()
 
     try:
         all_rows = load_rows()
-        total_rows = len(all_rows)
-        log(f"✅ Loaded total rows: {total_rows}")
     except Exception as e:
-        log(f"❌ Google Sheet Error: {short_exc(e)}")
+        log(f"❌ GSheet Error: {short_exc(e)}")
         return
 
-    # Python slicing uses 0-based indexing, END_ROW excluded
     selected_rows = all_rows[START_ROW:END_ROW]
-    selected_count = len(selected_rows)
-
-    if selected_count == 0:
-        log("⚠️ No rows found in selected range.")
+    if not selected_rows:
+        log("⚠️ No rows selected.")
         return
 
-    log(f"✅ Selected rows: {selected_count} from range {START_ROW}-{END_ROW}")
-    log(f"✅ Processing in batches of {BATCH_SIZE}")
-
+    log(f"✅ Processing {len(selected_rows)} rows in batches of {BATCH_SIZE}")
     indexed_rows = list(enumerate(selected_rows, start=START_ROW + 1))
 
     for batch_start in range(0, len(indexed_rows), BATCH_SIZE):
         batch = indexed_rows[batch_start:batch_start + BATCH_SIZE]
-        batch_first = batch[0][0]
-        batch_last = batch[-1][0]
-
-        log(f"🚀 Starting batch {batch_first}-{batch_last}")
         process_batch(batch)
-        log(f"✅ Finished batch {batch_first}-{batch_last}")
 
-    log("🏁 Finished all selected rows.")
+    log("🏁 All rows finished.")
 
 if __name__ == "__main__":
     main()

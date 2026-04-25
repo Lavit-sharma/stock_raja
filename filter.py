@@ -134,8 +134,7 @@ def main():
         url_map = {row[0].strip(): {'week': row[2].strip(), 'day': row[3].strip()} for row in stock_ws[1:] if row[0]}
 
         # 2. Process Filters
-        # Added D_Today to numeric conversion list
-        cols_to_fix = ["D_Trigger", "D_Trigger_S", "W_Trigger", "W_Trigger_S", "D_DG", "D_EF1", "D_Today"]
+        cols_to_fix = ["D_Trigger", "D_Trigger_S", "D_DG", "D_EF1", "D_Today"]
         for col in cols_to_fix:
             if col in df_mv2.columns:
                 df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
@@ -151,23 +150,24 @@ def main():
             if date_col in df_mv2.columns:
                 delivery_max_mask |= (df_mv2[date_col].apply(parse_us_date) == today_str)
 
-        # --- DOUBLE GREEN LOGIC (Updated to use D_Today) ---
+        # --- DOUBLE GREEN LOGIC ---
         dg_mask = (
             (df_mv2["D_DG_f"] == 1.0) & 
             (df_mv2["D_Today_f"] > (0.5 * df_mv2["D_EF1_f"]))
         )
 
+        # W_Triggers have been removed as requested
         triggers = {
             "D_Trigger": df_mv2[df_mv2["D_Trigger_n"] == 0],
             "D_Trigger_S": df_mv2[(df_mv2["D_Trigger_S_n"] == 0) & (df_mv2["D_Trigger_S_n"] != df_mv2["D_Trigger_n"])],
-            "W_Trigger": df_mv2[df_mv2["W_Trigger_n"] == 1],
-            "W_Trigger_S": df_mv2[(df_mv2["W_Trigger_S_n"] == 0) & (df_mv2["W_Trigger_S_n"] != df_mv2["W_Trigger_n"])],
             "Delivery_Max": df_mv2[delivery_max_mask],
             "Double_Green": df_mv2[dg_mask]
         }
 
+        # Log identifying symbols for each condition
         for name, d_sub in triggers.items():
-            log(f"🔍 Filter Check: {name} | Found: {len(d_sub)}")
+            symbols_found = d_sub.iloc[:, 0].astype(str).tolist()
+            log(f"🔍 Filter Check: {name} | Found: {len(d_sub)} | Symbols: {', '.join(symbols_found) if symbols_found else 'None'}")
 
         # 3. Setup Browser
         driver = get_driver()

@@ -42,20 +42,6 @@ MAX_DAY_TO_KEEP = 4
 def log(msg):
     print(msg, flush=True)
 
-def safe_int(v):
-    try:
-        if v is None or str(v).strip() == "": return -1
-        return int(float(str(v).strip()))
-    except:
-        return -1
-
-def safe_float(v):
-    try:
-        if v is None or str(v).strip() == "": return 0.0
-        return float(str(v).strip())
-    except:
-        return 0.0
-
 def fix_duplicate_columns(df):
     cols = pd.Series(df.columns)
     for dup in cols[cols.duplicated()].unique(): 
@@ -65,82 +51,48 @@ def fix_duplicate_columns(df):
     df.columns = cols
     return df
 
-# ---------------- DB CLASS ---------------- #
+# ---------------- DB ---------------- #
 class DB:
     def __init__(self, config):
         self.config = config
-        self.conn = None
-        self.connect()
-
-    def connect(self):
-        if self.conn:
-            try: self.conn.close()
-            except: pass
-        self.conn = mysql.connector.connect(**self.config)
+        self.conn = mysql.connector.connect(**config)
         self.conn.autocommit = True
-        return self.conn
 
     def ensure(self):
-        if not self.conn or not self.conn.is_connected():
-            return self.connect()
+        if not self.conn.is_connected():
+            self.conn.reconnect()
         return self.conn
 
     def close(self):
-        if self.conn: self.conn.close()
+        self.conn.close()
 
-# ---------------- CORE LOGIC ---------------- #
-def roll_days_forward(db: DB):
-    for attempt in range(DB_RETRY):
-        try:
-            conn = db.ensure()
-            cur = conn.cursor()
-            cur.execute(f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 0")
-            cur.execute(f"DELETE FROM `{TARGET_TABLE}` WHERE `day` > %s AND LOWER(TRIM(COALESCE(`review_status`, ''))) = 'rejected'", (MAX_DAY_TO_KEEP,))
-            log(f"✅ Rollover: {cur.rowcount} rows cleaned.")
-            cur.close()
-            return
-        except Exception as e:
-            log(f"⚠️ Rollover retry {attempt+1}: {e}")
-            db.connect()
-            time.sleep(1)
-
-def get_driver():
-    opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1920,1080")
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
-
+# ---------------- FTP ---------------- #
 def upload_via_ftp(local_path, filename):
-    ftp = FTP(os.getenv("FTP_HOST"))
-    ftp.login(os.getenv("FTP_USER"), os.getenv("FTP_PASS"))
+    ftp = FTP(FTP_HOST)
+    ftp.login(FTP_USER, FTP_PASS)
 
-    # Go to uploads folder
     ftp.cwd("public_html/wp-content/uploads")
 
-    # ✅ Create screenshots folder if not exists
     try:
         ftp.mkd("screenshots")
         print("📁 Created screenshots folder")
     except:
-        print("📁 Folder already exists")
+        pass
 
     ftp.cwd("screenshots")
 
-    # Upload file
     with open(local_path, "rb") as f:
         ftp.storbinary(f"STOR {filename}", f)
 
     ftp.quit()
+
+# ---------------- MAIN ---------------- #
 def main():
     db = DB(DB_CONFIG)
     driver = None
 
     try:
-        roll_days_forward(db)
-
-        # Load Google Sheets
+        # Load Sheets
         creds = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds))
 
@@ -148,79 +100,90 @@ def main():
         df_mv2 = pd.DataFrame(mv2_sheet[1:], columns=[c.strip() for c in mv2_sheet[0]])
         df_mv2 = fix_duplicate_columns(df_mv2)
 
-        stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID).get_all_values()
-        url_map = {row[0].strip(): {'week': row[2].strip(), 'day': row[3].strip()} for row in stock_ws[1:] if row[0]}
-
-        # Filters
+        # ---------------- FIXED DATE LOGIC ---------------- #
         today_str = datetime.now().strftime('%Y-%m-%d')
+
         delivery_max_mask = pd.Series([False] * len(df_mv2))
+
         for date_col in ["DATE1", "DATE2", "DATE3"]:
             if date_col in df_mv2.columns:
-                delivery_max_mask |= (df_mv2[date_col].astype(str).str.strip() == today_str)
+                parsed = pd.to_datetime(df_mv2[date_col], errors='coerce')
+                delivery_max_mask |= (parsed.dt.strftime('%Y-%m-%d') == today_str)
+
+        print("TOTAL ROWS:", len(df_mv2))
+        print("MATCHED ROWS:", delivery_max_mask.sum())
 
         triggers = {
             "Delivery_Max": df_mv2[delivery_max_mask]
         }
 
         # Browser
-        driver = get_driver()
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=Options())
 
-        # Screenshot loop
+        stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID).get_all_values()
+        url_map = {row[0].strip(): {'week': row[2].strip(), 'day': row[3].strip()} for row in stock_ws[1:] if row[0]}
+
+        # Loop
         for filter_name, matched_df in triggers.items():
-            if matched_df.empty: continue
+            print(f"🚀 Processing {filter_name}: {len(matched_df)} stocks")
+
+            if matched_df.empty:
+                print("⚠️ No matching stocks found")
+                continue
 
             for _, row in matched_df.iterrows():
                 symbol = str(row.iloc[0]).strip()
                 urls = url_map.get(symbol)
-                if not urls: continue
+
+                if not urls:
+                    print("❌ No URL for", symbol)
+                    continue
 
                 for tf in ['day', 'week']:
                     url = urls[tf]
-                    if "tradingview.com" not in url: continue
 
                     try:
+                        print(f"📊 Processing {symbol} {tf}")
+
                         driver.get(url)
                         chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
                             EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
                         )
+
                         time.sleep(POST_LOAD_SLEEP)
 
                         filename = f"{symbol}_{tf}_{int(time.time())}.png"
                         local_path = f"/tmp/{filename}"
 
-                        # Save temp
                         with open(local_path, "wb") as f:
                             f.write(chart.screenshot_as_png)
 
-                        # Upload
                         upload_via_ftp(local_path, filename)
 
-                        # Public path
                         public_path = f"/wp-content/uploads/screenshots/{filename}"
 
-                        # Save DB
                         conn = db.ensure()
                         cur = conn.cursor()
-                        cur.execute(f"""
-                            INSERT INTO `{TARGET_TABLE}` 
-                            (symbol, timeframe, filter_type, day, screenshot_path) 
+                        cur.execute("""
+                            INSERT INTO filter (symbol, timeframe, filter_type, day, screenshot_path)
                             VALUES (%s, %s, %s, 0, %s)
                         """, (symbol, tf, filter_name, public_path))
                         cur.close()
 
                         os.remove(local_path)
 
-                        log(f"✅ Uploaded {symbol} ({tf})")
+                        print(f"✅ Uploaded {symbol} ({tf})")
 
                     except Exception as e:
-                        log(f"❌ Error {symbol} {tf}: {e}")
+                        print(f"❌ Error {symbol} {tf}:", e)
 
-        log("🏁 Finished")
+        print("🏁 Finished")
 
     except Exception as e:
-        log(f"❌ Fatal: {e}")
+        print("❌ Fatal:", e)
     finally:
-        if driver: driver.quit()
+        if driver:
+            driver.quit()
         db.close()
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ CHART_WAIT_SEC = 30
 POST_LOAD_SLEEP = 6
 DB_RETRY = 3
 MAX_DAY_TO_KEEP = 4
-SCREENSHOT_FOLDER = "screenshots"
+SCREENSHOT_FOLDER = "/home/u218978860_eeZYb/public_html/wp-content/uploads/screenshots"
 
 # ---------------- HELPERS ---------------- #
 def log(msg):
@@ -90,6 +90,7 @@ def roll_days_forward(db: DB):
         try:
             conn = db.ensure()
             cur = conn.cursor()
+            # Note: Day + 1 used here to actually advance the days
             cur.execute(f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 0")
             cur.execute(f"DELETE FROM `{TARGET_TABLE}` WHERE `day` > %s AND LOWER(TRIM(COALESCE(`review_status`, ''))) = 'rejected'", (MAX_DAY_TO_KEEP,))
             log(f"✅ Rollover: {cur.rowcount} rows cleaned.")
@@ -185,10 +186,16 @@ def main():
                         )
                         time.sleep(POST_LOAD_SLEEP)
                         
-                        # Create unique filename and save
+                        # Create unique filename
                         filename = f"{symbol}_{tf}_{int(time.time())}.png"
+                        
+                        # Full server path for saving
                         filepath = os.path.join(SCREENSHOT_FOLDER, filename)
                         
+                        # Public URL path for DB/UI
+                        public_path = f"/wp-content/uploads/screenshots/{filename}"
+
+                        # Save screenshot
                         with open(filepath, "wb") as f:
                             f.write(chart.screenshot_as_png)
 
@@ -199,7 +206,7 @@ def main():
                             INSERT INTO `{TARGET_TABLE}` 
                             (symbol, timeframe, filter_type, day, screenshot_path) 
                             VALUES (%s, %s, %s, 0, %s)
-                        """, (symbol, tf, filter_name, filepath))
+                        """, (symbol, tf, filter_name, public_path))
                         cur.close()
                         
                         log(f"   ✅ Saved {symbol} ({tf}) to {filepath}")

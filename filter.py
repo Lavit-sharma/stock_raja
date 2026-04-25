@@ -154,9 +154,9 @@ def main():
 
         # --- DOUBLE GREEN LOGIC (Updated to D_DG) ---
         dg_mask = (
-            (df_mv2["D_DG_f"] == 1.0) & 
-            (df_mv2["D_Trigger_f"] > (df_mv2["D_EF1_f"] / 2))
-        )
+    (df_mv2["D_DG_f"] == 1.0) &
+    (df_mv2["D_Today_f"] > (0.5 * df_mv2["D_EF1_f"]))
+)
 
         triggers = {
             "D_Trigger": df_mv2[df_mv2["D_Trigger_n"] == 0],

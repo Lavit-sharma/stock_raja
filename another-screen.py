@@ -19,6 +19,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from datetime import datetime
 
 # ---------------- CONFIG ---------------- #
+# ---------------- CONFIG ---------------- #
 SPREADSHEET_NAME = "Stock List"
 TAB_NAME = "Weekday"
 
@@ -28,16 +29,19 @@ END_ROW = int(os.getenv("END_ROW", "999999"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
 TRUNCATE_ON_START = os.getenv("TRUNCATE_ON_START", "0") == "1"
 
-# --- WORDPRESS FILE STORAGE CONFIG --- #
-# Path on the server where Python saves the file
-WP_UPLOAD_DIR = os.getenv("WP_UPLOAD_DIR", "/var/www/html/wp-content/uploads/trading_charts")
-# Public URL prefix that points to the folder above
+# --- SMART FOLDER PATH LOGIC --- #
+# We check if we are in GitHub Actions or a restricted environment
+if os.getenv("GITHUB_ACTIONS") == "true":
+    # Use a folder inside the current workspace for GitHub
+    WP_UPLOAD_DIR = os.path.join(os.getcwd(), "screenshots")
+else:
+    # Use your actual WordPress path on your real server
+    WP_UPLOAD_DIR = "/var/www/html/wp-content/uploads/trading_charts"
+
 WP_BASE_URL = os.getenv("WP_BASE_URL", "https://yourdomain.com/wp-content/uploads/trading_charts")
 
-# Automatically create folder if missing
-if not os.path.exists(WP_UPLOAD_DIR):
-    os.makedirs(WP_UPLOAD_DIR, exist_ok=True)
-
+# This will now succeed because it has permission to create folders in the local workspace
+os.makedirs(WP_UPLOAD_DIR, exist_ok=True)
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "user": os.getenv("DB_USER"),

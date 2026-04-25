@@ -38,7 +38,7 @@ jobs:
           weekday = today.weekday()   # Mon=0 ... Sun=6
 
           # Skip Saturday and Sunday
-          if weekday >= 5:
+          if weekday >= 6:
               print(f"⏭️ Market closed today ({today}) - weekend.")
               sys.exit(0)
 

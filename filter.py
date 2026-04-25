@@ -188,14 +188,29 @@ def main():
                             EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
                         )
                         time.sleep(POST_LOAD_SLEEP)
-                        img = chart.screenshot_as_png
-                        
-                        # Direct DB Insert
-                        conn = db.ensure()
-                        cur = conn.cursor()
-                        cur.execute(f"INSERT INTO `{TARGET_TABLE}` (symbol, timeframe, filter_type, day, screenshot) VALUES (%s, %s, %s, 0, %s)",
-                                    (symbol, tf, filter_name, img))
-                        cur.close()
+                        # 📁 Step 3.1: Create folder (auto if not exists)
+folder = "screenshots"
+os.makedirs(folder, exist_ok=True)
+
+# 📁 Step 3.2: Create unique filename
+filename = f"{symbol}_{tf}_{int(time.time())}.png"
+filepath = os.path.join(folder, filename)
+
+# 📁 Step 3.3: Save screenshot as file
+with open(filepath, "wb") as f:
+    f.write(chart.screenshot_as_png)
+
+# 💾 Step 3.4: Save path in DB instead of blob
+conn = db.ensure()
+cur = conn.cursor()
+
+cur.execute(f"""
+INSERT INTO `{TARGET_TABLE}` 
+(symbol, timeframe, filter_type, day, screenshot_path) 
+VALUES (%s, %s, %s, 0, %s)
+""", (symbol, tf, filter_name, filepath))
+
+cur.close()
                         log(f"   ✅ Saved {symbol} ({tf})")
                     except Exception as e:
                         log(f"   ❌ Error {symbol} {tf}: {e}")

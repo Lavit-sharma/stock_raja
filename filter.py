@@ -60,6 +60,21 @@ def fix_duplicate_columns(df):
     df.columns = cols
     return df
 
+def parse_us_date(date_str):
+    """Converts MM/DD/YYYY (US) to YYYY-MM-DD for comparison."""
+    try:
+        date_str = str(date_str).strip()
+        if not date_str or date_str.lower() == "nan":
+            return None
+        # Handles 1/2/2024 or 01/02/2024
+        return datetime.strptime(date_str, '%m/%d/%Y').strftime('%Y-%m-%d')
+    except Exception:
+        try:
+            # Fallback for YY format if needed
+            return datetime.strptime(date_str, '%m/%d/%y').strftime('%Y-%m-%d')
+        except:
+            return None
+
 # ---------------- DB CLASS ---------------- #
 class DB:
     def __init__(self, config):
@@ -89,9 +104,9 @@ def roll_days_forward(db: DB):
         try:
             conn = db.ensure()
             cur = conn.cursor()
-            cur.execute(f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 0")
+            cur.execute(f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 1")
             cur.execute(f"DELETE FROM `{TARGET_TABLE}` WHERE `day` > %s AND LOWER(TRIM(COALESCE(`review_status`, ''))) = 'rejected'", (MAX_DAY_TO_KEEP,))
-            log(f"✅ Rollover: {cur.rowcount} rows updated/cleaned.")
+            log(f"✅ Rollover successful.")
             cur.close()
             return
         except Exception as e:
@@ -131,13 +146,15 @@ def main():
                 df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
                 df_mv2[f"{col}_f"] = df_mv2[col].apply(safe_float)
 
-        # --- DELIVERY MAX LOGIC ---
-        # Checks if today's date matches DATE1, DATE2, or DATE3
+        # --- DELIVERY MAX LOGIC (US Date Parsing) ---
         today_str = datetime.now().strftime('%Y-%m-%d')
         delivery_max_mask = pd.Series([False] * len(df_mv2))
+        
         for date_col in ["DATE1", "DATE2", "DATE3"]:
             if date_col in df_mv2.columns:
-                delivery_max_mask |= (df_mv2[date_col].astype(str).str.strip() == today_str)
+                # Convert the US dates in the column to standard YYYY-MM-DD
+                converted_dates = df_mv2[date_col].apply(parse_us_date)
+                delivery_max_mask |= (converted_dates == today_str)
 
         # --- DOUBLE GREEN LOGIC ---
         dg_mask = (
@@ -154,9 +171,9 @@ def main():
             "Double_Green": df_mv2[dg_mask]
         }
 
-        # Debug: Log counts for all filters
+        # Debug Logs
         for name, d_sub in triggers.items():
-            log(f"🔍 Filter Check: {name} found {len(d_sub)} matches.")
+            log(f"🔍 Filter Check: {name} | Count: {len(d_sub)}")
 
         # 3. Setup Browser
         driver = get_driver()
@@ -170,11 +187,9 @@ def main():
 
         # 4. Execute Screenshots
         for filter_name, matched_df in triggers.items():
-            if matched_df.empty:
-                continue
+            if matched_df.empty: continue
             
-            log(f"🚀 Processing {filter_name}: {len(matched_df)} stocks.")
-            
+            log(f"🚀 Processing {filter_name}...")
             for _, row in matched_df.iterrows():
                 symbol = str(row.iloc[0]).strip()
                 urls = url_map.get(symbol)
@@ -183,7 +198,6 @@ def main():
                 for tf in ['day', 'week']:
                     url = urls[tf]
                     if "tradingview.com" not in url: continue
-                    
                     try:
                         driver.get(url)
                         chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
@@ -197,7 +211,7 @@ def main():
                         cur.execute(f"INSERT INTO `{TARGET_TABLE}` (symbol, timeframe, filter_type, day, screenshot) VALUES (%s, %s, %s, 0, %s)",
                                     (symbol, tf, filter_name, img))
                         cur.close()
-                        log(f"    ✅ Saved {symbol} ({tf}) for {filter_name}")
+                        log(f"    ✅ Saved {symbol} ({tf})")
                     except Exception as e:
                         log(f"    ❌ Error {symbol} {tf}: {e}")
 

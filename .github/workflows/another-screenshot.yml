@@ -3,7 +3,7 @@ name: Another Screenshot Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 13 * * *'   # 7:00 PM IST
+    - cron: '30 13 * * *'
 
 jobs:
   prepare:
@@ -19,11 +19,8 @@ jobs:
           python-version: '3.10'
           cache: 'pip'
 
-      - name: Install Chrome and Dependencies
+      - name: Install Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-          
           pip install --upgrade pip
           pip install pandas selenium webdriver-manager gspread mysql-connector-python requests Pillow
 
@@ -75,11 +72,8 @@ jobs:
           python-version: '3.10'
           cache: 'pip'
 
-      - name: Install Chrome and Dependencies
+      - name: Install Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-          
           pip install --upgrade pip
           pip install pandas selenium webdriver-manager gspread mysql-connector-python requests Pillow
 

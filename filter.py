@@ -114,6 +114,8 @@ def get_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
+    # Added to help bypass some basic bot detection that triggers popups
+    opts.add_argument("--disable-blink-features=AutomationControlled")
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
 
 def main():
@@ -156,7 +158,6 @@ def main():
             (df_mv2["D_Today_f"] > (0.5 * df_mv2["D_EF1_f"]))
         )
 
-        # W_Triggers have been removed as requested
         triggers = {
             "D_Trigger": df_mv2[df_mv2["D_Trigger_n"] == 0],
             "D_Trigger_S": df_mv2[(df_mv2["D_Trigger_S_n"] == 0) & (df_mv2["D_Trigger_S_n"] != df_mv2["D_Trigger_n"])],
@@ -164,7 +165,6 @@ def main():
             "Double_Green": df_mv2[dg_mask]
         }
 
-        # Log identifying symbols for each condition
         for name, d_sub in triggers.items():
             symbols_found = d_sub.iloc[:, 0].astype(str).tolist()
             log(f"🔍 Filter Check: {name} | Found: {len(d_sub)} | Symbols: {', '.join(symbols_found) if symbols_found else 'None'}")
@@ -197,6 +197,18 @@ def main():
                         chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
                             EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
                         )
+                        
+                        # --- REMOVE POPUPS ---
+                        # This script finds the modal container and deletes it from the DOM
+                        driver.execute_script("""
+                            var popups = document.querySelectorAll('[class*="overlap-manager-root"]');
+                            popups.forEach(function(p) { p.remove(); });
+                            
+                            // Also try clicking the close button if it exists specifically
+                            var closeBtn = document.querySelector('button[class*="close-"], [data-name="close"]');
+                            if(closeBtn) closeBtn.click();
+                        """)
+                        
                         time.sleep(POST_LOAD_SLEEP)
                         img = chart.screenshot_as_png
                         

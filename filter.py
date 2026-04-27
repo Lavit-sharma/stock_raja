@@ -114,7 +114,6 @@ def get_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-    # Added to help bypass some basic bot detection that triggers popups
     opts.add_argument("--disable-blink-features=AutomationControlled")
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
 
@@ -198,15 +197,19 @@ def main():
                             EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
                         )
                         
-                        # --- REMOVE POPUPS ---
-                        # This script finds the modal container and deletes it from the DOM
+                        # --- ENHANCED POPUP REMOVAL ---
                         driver.execute_script("""
-                            var popups = document.querySelectorAll('[class*="overlap-manager-root"]');
+                            // Remove all elements that contain 'overlap', 'modal', or 'dialog' in class names
+                            var popups = document.querySelectorAll('[class*="overlap-manager-root"], [class*="modal-"], [class*="dialog-"], [class*="backdrops-"]');
                             popups.forEach(function(p) { p.remove(); });
                             
-                            // Also try clicking the close button if it exists specifically
-                            var closeBtn = document.querySelector('button[class*="close-"], [data-name="close"]');
-                            if(closeBtn) closeBtn.click();
+                            // Re-enable scrolling on the body just in case it was locked by a modal
+                            document.body.style.overflow = 'auto';
+                            document.body.style.position = 'static';
+
+                            // Click the chart once to clear any active hover tooltips or menu focus
+                            var chartElem = document.querySelector('.chart-container-border');
+                            if(chartElem) chartElem.click();
                         """)
                         
                         time.sleep(POST_LOAD_SLEEP)

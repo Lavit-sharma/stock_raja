@@ -98,7 +98,7 @@ def roll_days_forward(db: DB):
         try:
             conn = db.ensure()
             cur = conn.cursor()
-            cur.execute(f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 1")
+            cur.execute(f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 0")
             cur.execute(f"DELETE FROM `{TARGET_TABLE}` WHERE `day` > %s AND LOWER(TRIM(COALESCE(`review_status`, ''))) = 'rejected'", (MAX_DAY_TO_KEEP,))
             log(f"✅ Rollover successful.")
             cur.close()
@@ -144,14 +144,12 @@ def main():
                 df_mv2[f"{col}_n"] = -1
                 df_mv2[f"{col}_f"] = 0.0
 
-        # --- DELIVERY MAX LOGIC ---
         today_str = datetime.now().strftime('%Y-%m-%d')
         delivery_max_mask = pd.Series([False] * len(df_mv2))
         for date_col in ["DATE1", "DATE2", "DATE3"]:
             if date_col in df_mv2.columns:
                 delivery_max_mask |= (df_mv2[date_col].apply(parse_us_date) == today_str)
 
-        # --- DOUBLE GREEN LOGIC ---
         dg_mask = (
             (df_mv2["D_DG_f"] == 1.0) & 
             (df_mv2["D_Today_f"] > (0.5 * df_mv2["D_EF1_f"]))
@@ -197,20 +195,25 @@ def main():
                             EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
                         )
                         
-                        # --- ENHANCED POPUP REMOVAL ---
-                        driver.execute_script("""
-                            // Remove all elements that contain 'overlap', 'modal', or 'dialog' in class names
+                        # --- REMOVE POPUPS WITH LOGGING ---
+                        was_removed = driver.execute_script("""
+                            var found = false;
                             var popups = document.querySelectorAll('[class*="overlap-manager-root"], [class*="modal-"], [class*="dialog-"], [class*="backdrops-"]');
-                            popups.forEach(function(p) { p.remove(); });
-                            
-                            // Re-enable scrolling on the body just in case it was locked by a modal
+                            if (popups.length > 0) {
+                                popups.forEach(function(p) { p.remove(); });
+                                found = true;
+                            }
                             document.body.style.overflow = 'auto';
                             document.body.style.position = 'static';
-
-                            // Click the chart once to clear any active hover tooltips or menu focus
                             var chartElem = document.querySelector('.chart-container-border');
                             if(chartElem) chartElem.click();
+                            return found;
                         """)
+                        
+                        if was_removed:
+                            log(f"    🧹 Popup detected and removed for {symbol} ({tf})")
+                        else:
+                            log(f"    ✨ No popups found for {symbol} ({tf})")
                         
                         time.sleep(POST_LOAD_SLEEP)
                         img = chart.screenshot_as_png

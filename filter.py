@@ -29,7 +29,7 @@ DB_CONFIG = {
 }
 
 CHART_WAIT_SEC = 30
-POST_LOAD_SLEEP = 6
+POST_LOAD_SLEEP = 5  # Set to 5 seconds as requested
 DB_RETRY = 3
 MAX_DAY_TO_KEEP = 4
 
@@ -98,7 +98,7 @@ def roll_days_forward(db: DB):
         try:
             conn = db.ensure()
             cur = conn.cursor()
-            cur.execute(f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 0")
+            cur.execute(f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 1")
             cur.execute(f"DELETE FROM `{TARGET_TABLE}` WHERE `day` > %s AND LOWER(TRIM(COALESCE(`review_status`, ''))) = 'rejected'", (MAX_DAY_TO_KEEP,))
             log(f"✅ Rollover successful.")
             cur.close()
@@ -195,6 +195,10 @@ def main():
                             EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
                         )
                         
+                        # --- WAIT FOR LATE POPUPS ---
+                        log(f"    ⏳ Waiting {POST_LOAD_SLEEP}s for late popups: {symbol} ({tf})...")
+                        time.sleep(POST_LOAD_SLEEP)
+                        
                         # --- REMOVE POPUPS WITH LOGGING ---
                         was_removed = driver.execute_script("""
                             var found = false;
@@ -215,7 +219,8 @@ def main():
                         else:
                             log(f"    ✨ No popups found for {symbol} ({tf})")
                         
-                        time.sleep(POST_LOAD_SLEEP)
+                        # Small buffer to let the click/removal animation finish
+                        time.sleep(1)
                         img = chart.screenshot_as_png
                         
                         conn = db.ensure()

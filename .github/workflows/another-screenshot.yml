@@ -3,7 +3,7 @@ name: Another Screenshot Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 13 * * *'   # 7:00 PM IST (13:30 UTC)
+    - cron: '30 13 * * *'   # 7:00 PM IST
 
 jobs:
   prepare:
@@ -23,7 +23,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
-          pip install pandas selenium webdriver-manager gspread mysql-connector-python
+          
+          pip install --upgrade pip
+          pip install pandas selenium webdriver-manager gspread mysql-connector-python requests Pillow
 
       - name: Truncate table once
         env:
@@ -34,6 +36,9 @@ jobs:
           DB_NAME: ${{ secrets.DB_NAME }}
           TRADINGVIEW_COOKIES: ${{ secrets.TRADINGVIEW_COOKIES }}
           GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
+          WP_BASE_URL: ${{ secrets.WP_BASE_URL }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
           START_ROW: "0"
           END_ROW: "0"
           BATCH_SIZE: "100"
@@ -74,7 +79,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
-          pip install pandas selenium webdriver-manager gspread mysql-connector-python
+          
+          pip install --upgrade pip
+          pip install pandas selenium webdriver-manager gspread mysql-connector-python requests Pillow
 
       - name: Run Script ${{ matrix.start_row }}-${{ matrix.end_row }}
         env:
@@ -85,6 +92,9 @@ jobs:
           DB_NAME: ${{ secrets.DB_NAME }}
           TRADINGVIEW_COOKIES: ${{ secrets.TRADINGVIEW_COOKIES }}
           GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
+          WP_BASE_URL: ${{ secrets.WP_BASE_URL }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
           START_ROW: "${{ matrix.start_row }}"
           END_ROW: "${{ matrix.end_row }}"
           BATCH_SIZE: "100"

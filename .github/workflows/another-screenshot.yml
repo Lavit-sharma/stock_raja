@@ -2,8 +2,7 @@ name: Another Screenshot Bot
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '30 13 * * *'
+ 
 
 jobs:
   prepare:

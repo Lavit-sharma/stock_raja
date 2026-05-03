@@ -38,7 +38,7 @@ def get_driver():
     return driver
 
 def save_to_db(symbol, timeframe, img_data, chart_date):
-    """Saves the binary image data to the MySQL database."""
+    """Saves the binary image data and the specific chart date to MySQL."""
     if not img_data or len(img_data) < 1000:
         print(f"⚠️ Skipping {symbol}: Image data empty or too small.")
         return False
@@ -47,6 +47,8 @@ def save_to_db(symbol, timeframe, img_data, chart_date):
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
+        
+        # We explicitly map chart_date here so it saves the date from your sheet
         query = """
             INSERT INTO another_screenshot (symbol, timeframe, screenshot, chart_date) 
             VALUES (%s, %s, %s, %s)
@@ -70,13 +72,15 @@ def process_row(row):
     """Handles the logic for a single stock row."""
     symbol = str(row.get("Symbol", "")).strip()
     url = str(row.get("Day", "")).strip()
+    
+    # Dynamically pull the date from the 'dates' column in your Google Sheet
     target_date = str(row.get("dates", "")).strip()
 
-    if not symbol or "tradingview.com" not in url:
+    if not symbol or "tradingview.com" not in url or not target_date:
+        print(f"⚠️ Skipping: {symbol}. Check if Symbol, URL, or 'dates' column is empty.")
         return
 
-    # UPDATED LOGGING: Now includes the URL and the target date
-    print(f"🚀 Starting: {symbol} | Date: {target_date} | URL: {url}")
+    print(f"🚀 Starting: {symbol} | Target Date: {target_date} | URL: {url}")
     driver = get_driver()
     
     try:
@@ -107,21 +111,22 @@ def process_row(row):
         # 4. Trigger "Go To Date" (Alt + G)
         ActionChains(driver).key_down(Keys.ALT).send_keys("g").key_up(Keys.ALT).perform()
         
-        # 5. Input Target Date
+        # 5. Input Target Date from the Sheet into the TradingView prompt
         input_xpath = "//input[contains(@class,'query') or contains(@class,'input')]"
         date_input = wait.until(EC.element_to_be_clickable((By.XPATH, input_xpath)))
+        
+        # Clear existing text and enter our target date
         date_input.send_keys(Keys.CONTROL + "a" + Keys.BACKSPACE)
         time.sleep(0.5)
         date_input.send_keys(target_date + Keys.ENTER)
         
-        # UPDATED LOGGING: Confirming the GoTo action
-        print(f"📍 Executed 'Go To' for: {target_date}")
+        print(f"📍 TradingView jump executed for: {target_date}")
         
-        # 6. Wait for technical indicators to render
-        print(f"⏳ Rendering {symbol}...")
+        # 6. Wait for indicators to render
+        print(f"⏳ Rendering {symbol} visuals...")
         time.sleep(12) 
 
-        # --- UPDATED: AGGRESSIVE POPUP REMOVAL ---
+        # Aggressive Popup Removal via JS
         driver.execute_script("""
             const selectors = [
                 '[class*="overlap-"]', 
@@ -135,15 +140,14 @@ def process_row(row):
             });
         """)
         
-        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-        time.sleep(0.5)
+        # Final cleanup attempt with ESC keys
         ActionChains(driver).send_keys(Keys.ESCAPE).perform()
         time.sleep(1)
         
-        # 7. Capture Screenshot and Save
+        # 7. Capture Screenshot and Save to DB
         img = driver.get_screenshot_as_png()
         if save_to_db(symbol, "day", img, target_date):
-            print(f"✅ {symbol} processed successfully.")
+            print(f"✅ {symbol} for {target_date} saved successfully.")
         
     except Exception as e:
         print(f"❌ Error during {symbol}: {str(e)[:100]}")
@@ -165,6 +169,7 @@ def main():
         print(f"❌ Failed to load Google Sheet: {e}")
         return
 
+    # Batch processing control
     start = int(os.getenv("START_ROW", 0))
     end = int(os.getenv("END_ROW", 500))
     selected_rows = rows[start:end]
@@ -173,7 +178,7 @@ def main():
 
     for row in selected_rows:
         process_row(row)
-        time.sleep(1)
+        time.sleep(1) # Small gap between browser sessions
 
 if __name__ == "__main__":
     main()

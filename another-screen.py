@@ -75,7 +75,8 @@ def process_row(row):
     if not symbol or "tradingview.com" not in url:
         return
 
-    print(f"🚀 Starting: {symbol} | Date: {target_date}")
+    # UPDATED LOGGING: Now includes the URL and the target date
+    print(f"🚀 Starting: {symbol} | Date: {target_date} | URL: {url}")
     driver = get_driver()
     
     try:
@@ -113,12 +114,14 @@ def process_row(row):
         time.sleep(0.5)
         date_input.send_keys(target_date + Keys.ENTER)
         
+        # UPDATED LOGGING: Confirming the GoTo action
+        print(f"📍 Executed 'Go To' for: {target_date}")
+        
         # 6. Wait for technical indicators to render
         print(f"⏳ Rendering {symbol}...")
         time.sleep(12) 
 
         # --- UPDATED: AGGRESSIVE POPUP REMOVAL ---
-        # 1. Use JS to find and remove any 'overlap' or 'modal' elements
         driver.execute_script("""
             const selectors = [
                 '[class*="overlap-"]', 
@@ -132,7 +135,6 @@ def process_row(row):
             });
         """)
         
-        # 2. Double ESC press as a fallback
         ActionChains(driver).send_keys(Keys.ESCAPE).perform()
         time.sleep(0.5)
         ActionChains(driver).send_keys(Keys.ESCAPE).perform()

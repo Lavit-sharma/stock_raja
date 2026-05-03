@@ -38,17 +38,14 @@ def get_driver():
     return driver
 
 def save_to_db(symbol, timeframe, img_data, chart_date):
-    """Saves the binary image data and the specific chart date to MySQL."""
+    """Saves image and the specific date from the sheet to MySQL."""
     if not img_data or len(img_data) < 1000:
-        print(f"⚠️ Skipping {symbol}: Image data empty or too small.")
         return False
         
     conn = None
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
-        
-        # We explicitly map chart_date here so it saves the date from your sheet
         query = """
             INSERT INTO another_screenshot (symbol, timeframe, screenshot, chart_date) 
             VALUES (%s, %s, %s, %s)
@@ -69,85 +66,64 @@ def save_to_db(symbol, timeframe, img_data, chart_date):
             conn.close()
 
 def process_row(row):
-    """Handles the logic for a single stock row."""
-    symbol = str(row.get("Symbol", "")).strip()
-    url = str(row.get("Day", "")).strip()
+    """Handles logic using headers: Symbol, Day (URL), and dates."""
+    # Strip whitespace from keys to prevent 'KeyError' from hidden spaces in Sheet
+    clean_row = {str(k).strip(): v for k, v in row.items()}
     
-    # Dynamically pull the date from the 'dates' column in your Google Sheet
-    target_date = str(row.get("dates", "")).strip()
+    symbol = str(clean_row.get("Symbol", "")).strip()
+    url = str(clean_row.get("Day", "")).strip()
+    target_date = str(clean_row.get("dates", "")).strip()
 
     if not symbol or "tradingview.com" not in url or not target_date:
-        print(f"⚠️ Skipping: {symbol}. Check if Symbol, URL, or 'dates' column is empty.")
+        print(f"⚠️ Skipping {symbol}: Missing URL or Date info.")
         return
 
-    print(f"🚀 Starting: {symbol} | Target Date: {target_date} | URL: {url}")
+    print(f"🚀 Processing: {symbol} | Target Date: {target_date}")
     driver = get_driver()
     
     try:
-        # 1. Inject Authentication Cookies
+        # 1. Login via Cookies
         driver.get("https://www.tradingview.com/")
-        cookies_env = os.getenv("TRADINGVIEW_COOKIES", "[]")
-        cookies = json.loads(cookies_env)
+        cookies = json.loads(os.getenv("TRADINGVIEW_COOKIES", "[]"))
         for c in cookies:
             try:
-                driver.add_cookie({
-                    "name": c["name"], 
-                    "value": c["value"], 
-                    "domain": ".tradingview.com", 
-                    "path": "/"
-                })
+                driver.add_cookie({"name": c["name"], "value": c["value"], "domain": ".tradingview.com", "path": "/"})
             except: continue
         
-        # 2. Navigate to Chart URL
+        # 2. Open Chart
         driver.get(url)
         wait = WebDriverWait(driver, 35)
         
-        # 3. Locate Chart and Focus
+        # 3. Focus and Go To Date
         chart_xpath = "//div[contains(@class,'chart-container') or contains(@class,'chart-gui-wrapper')]"
         chart = wait.until(EC.presence_of_element_located((By.XPATH, chart_xpath)))
         ActionChains(driver).move_to_element(chart).click().perform()
         time.sleep(2)
         
-        # 4. Trigger "Go To Date" (Alt + G)
+        # Alt + G Shortcut
         ActionChains(driver).key_down(Keys.ALT).send_keys("g").key_up(Keys.ALT).perform()
         
-        # 5. Input Target Date from the Sheet into the TradingView prompt
+        # 4. Input the 'dates' value from your sheet
         input_xpath = "//input[contains(@class,'query') or contains(@class,'input')]"
         date_input = wait.until(EC.element_to_be_clickable((By.XPATH, input_xpath)))
-        
-        # Clear existing text and enter our target date
         date_input.send_keys(Keys.CONTROL + "a" + Keys.BACKSPACE)
         time.sleep(0.5)
         date_input.send_keys(target_date + Keys.ENTER)
         
-        print(f"📍 TradingView jump executed for: {target_date}")
-        
-        # 6. Wait for indicators to render
-        print(f"⏳ Rendering {symbol} visuals...")
-        time.sleep(12) 
+        print(f"📍 Jumped to {target_date} on chart.")
+        time.sleep(12) # Wait for indicators
 
-        # Aggressive Popup Removal via JS
+        # 5. UI Cleanup
         driver.execute_script("""
-            const selectors = [
-                '[class*="overlap-"]', 
-                '[class*="modal-"]', 
-                '[class*="dialog-"]', 
-                '.tv-dialog__close', 
-                '.js-dialog__close'
-            ];
-            selectors.forEach(selector => {
-                document.querySelectorAll(selector).forEach(el => el.remove());
-            });
+            document.querySelectorAll('[class*="overlap-"], [class*="modal-"], [class*="dialog-"], .tv-dialog__close').forEach(el => el.remove());
         """)
-        
-        # Final cleanup attempt with ESC keys
         ActionChains(driver).send_keys(Keys.ESCAPE).perform()
         time.sleep(1)
         
-        # 7. Capture Screenshot and Save to DB
+        # 6. Capture and Save
         img = driver.get_screenshot_as_png()
         if save_to_db(symbol, "day", img, target_date):
-            print(f"✅ {symbol} for {target_date} saved successfully.")
+            print(f"✅ Saved {symbol} for {target_date}")
         
     except Exception as e:
         print(f"❌ Error during {symbol}: {str(e)[:100]}")
@@ -156,29 +132,20 @@ def process_row(row):
 
 def main():
     try:
-        creds_json = os.getenv("GSPREAD_CREDENTIALS")
-        if not creds_json:
-            print("❌ GSPREAD_CREDENTIALS env var is missing.")
-            return
-            
-        creds = json.loads(creds_json)
+        creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
         gc = gspread.service_account_from_dict(creds)
         sh = gc.open("Stock List").worksheet("Weekday")
         rows = sh.get_all_records()
     except Exception as e:
-        print(f"❌ Failed to load Google Sheet: {e}")
+        print(f"❌ Spreadsheet Error: {e}")
         return
 
-    # Batch processing control
     start = int(os.getenv("START_ROW", 0))
     end = int(os.getenv("END_ROW", 500))
-    selected_rows = rows[start:end]
     
-    print(f"📦 Total rows to process: {len(selected_rows)} (Range: {start}-{end})")
-
-    for row in selected_rows:
+    for row in rows[start:end]:
         process_row(row)
-        time.sleep(1) # Small gap between browser sessions
+        time.sleep(1)
 
 if __name__ == "__main__":
     main()

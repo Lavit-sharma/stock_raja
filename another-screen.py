@@ -115,6 +115,13 @@ def process_row(row):
         # 6. Wait for technical indicators and candles to render
         print(f"⏳ Rendering {symbol}...")
         time.sleep(12) 
+
+        # --- NEW: POPUP REMOVAL STEP ---
+        # Press ESC twice to clear any potential popups/modals before screenshot
+        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+        time.sleep(1)
+        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+        time.sleep(1)
         
         # 7. Capture Screenshot and Save
         img = driver.get_screenshot_as_png()

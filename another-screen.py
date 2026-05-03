@@ -1,8 +1,4 @@
-import os
-import time
-import json
-import gspread
-import concurrent.futures
+import os, time, json, gspread, concurrent.futures, re, traceback, sys
 import pandas as pd
 import mysql.connector
 from mysql.connector import pooling
@@ -12,20 +8,15 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 from webdriver_manager.chrome import ChromeDriverManager
 from datetime import datetime
 
 # ---------------- CONFIG ---------------- #
 SPREADSHEET_NAME = "Stock List"
 TAB_NAME = "Weekday"
-
-MAX_THREADS = int(os.getenv("MAX_THREADS", "3"))
-START_ROW = int(os.getenv("START_ROW", "0"))
-END_ROW = int(os.getenv("END_ROW", "999999"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
-TRADINGVIEW_COOKIES_JSON = os.getenv("TRADINGVIEW_COOKIES")
-
-USER_DATA_DIR = os.path.join(os.getcwd(), "chrome_profile")
+MAX_THREADS = int(os.getenv("MAX_THREADS", "4"))
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -33,214 +24,208 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD"),
     "database": os.getenv("DB_NAME"),
     "port": int(os.getenv("DB_PORT", "3306")),
+    "connect_timeout": 10 
 }
 
-# ---------------- DB POOL ---------------- #
-db_pool = mysql.connector.pooling.MySQLConnectionPool(
-    pool_name="screenshot_pool",
-    pool_size=10,
-    **DB_CONFIG
-)
+# --- DB POOL INITIALIZATION ---
+db_pool = None
+try:
+    db_pool = mysql.connector.pooling.MySQLConnectionPool(
+        pool_name="screenshot_pool",
+        pool_size=MAX_THREADS + 2,
+        **DB_CONFIG
+    )
+except Exception as e:
+    print(f"[FATAL] Could not initialize DB Pool: {e}")
 
 CHROME_DRIVER_PATH = ChromeDriverManager().install()
 
 # ---------------- LOGGING ---------------- #
+RUN_ID = datetime.now().strftime("%Y%m%d-%H%M%S")
+
 def log(msg, symbol="-", tf="-"):
-    timestamp = datetime.now().strftime('%H:%M:%S')
-    print(f"[{timestamp}] [{symbol}] [{tf}] {msg}", flush=True)
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] [{RUN_ID}] [{symbol}] [{tf}] {msg}", flush=True)
 
-# ---------------- DRIVER ---------------- #
-def get_driver():
-    options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
-    options.add_argument("--profile-directory=Default")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
-
-    return webdriver.Chrome(service=Service(CHROME_DRIVER_PATH), options=options)
+def short_exc(e: Exception, max_len=160):
+    s = f"{type(e).__name__}: {e}"
+    return (s[:max_len] + "...") if len(s) > max_len else s
 
 # ---------------- HELPERS ---------------- #
-def get_db_connection():
-    return db_pool.get_connection()
 
-def save_to_mysql(symbol, timeframe, img):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        query = """
-        INSERT INTO another_screenshot (symbol, timeframe, screenshot, updated_at)
-        VALUES (%s, %s, %s, NOW())
-        ON DUPLICATE KEY UPDATE 
-            screenshot=VALUES(screenshot),
-            updated_at=NOW()
-        """
-        cursor.execute(query, (symbol, timeframe, img))
-        conn.commit()
-    finally:
-        cursor.close()
-        conn.close()
+def make_unique_headers(headers):
+    seen = {}
+    out = []
+    for h in headers:
+        key = (h or "").strip()
+        if key == "": key = "col"
+        if key in seen:
+            seen[key] += 1
+            out.append(f"{key}_{seen[key]}")
+        else:
+            seen[key] = 1
+            out.append(key)
+    return out
 
-def load_cookies(driver):
-    """Parses TRADINGVIEW_COOKIES env and injects them into the driver."""
-    if not TRADINGVIEW_COOKIES_JSON:
-        log("⚠️ No TRADINGVIEW_COOKIES found in environment", "COOKIES")
-        return False
-    
+def get_month_name(date_str):
     try:
-        # Selenium needs to be on the domain to set cookies
-        driver.get("https://www.tradingview.com") 
-        time.sleep(2)
-        
-        cookies = json.loads(TRADINGVIEW_COOKIES_JSON)
-        for cookie in cookies:
-            # Remove expiry for session-based stability if necessary
-            if 'expiry' in cookie:
-                del cookie['expiry']
+        clean_date = re.sub(r'[*]', '', str(date_str)).strip()
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d", "%d/%m/%Y"):
             try:
-                driver.add_cookie(cookie)
-            except Exception as e:
-                log(f"Skipping cookie: {str(e)}", "COOKIES")
-        
-        log("✅ Cookies injected successfully", "COOKIES")
+                dt = datetime.strptime(clean_date, fmt)
+                return dt.strftime('%B')
+            except ValueError: continue
+        return "Unknown"
+    except: return "Unknown"
+
+def save_to_mysql(symbol, timeframe, image_data, chart_date, month_val):
+    if not db_pool: return False
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        query = """
+            INSERT INTO another_screenshot (symbol, timeframe, screenshot, chart_date, month_before) 
+            VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE 
+                screenshot = VALUES(screenshot),
+                chart_date = VALUES(chart_date),
+                month_before = VALUES(month_before),
+                created_at = CURRENT_TIMESTAMP
+        """
+        cursor.execute(query, (symbol, timeframe, image_data, chart_date, month_val))
+        conn.commit()
+        cursor.close()
+        return True
+    except Exception as err:
+        log(f"❌ DB Save Error: {short_exc(err)}", symbol, timeframe)
+        return False
+    finally:
+        if conn: conn.close()
+
+def get_driver():
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--disable-gpu")
+    service = Service(CHROME_DRIVER_PATH)
+    return webdriver.Chrome(service=service, options=opts)
+
+def inject_tv_cookies(driver, symbol="-"):
+    try:
+        cookie_data = os.getenv("TRADINGVIEW_COOKIES")
+        if not cookie_data: return False
+        cookies = json.loads(cookie_data)
+        driver.get("https://www.tradingview.com/")
+        for c in cookies:
+            try:
+                driver.add_cookie({"name": c["name"], "value": c["value"], "domain": ".tradingview.com", "path": "/"})
+            except: continue
         driver.refresh()
         return True
     except Exception as e:
-        log(f"❌ Error loading cookies: {str(e)}", "COOKIES")
+        log(f"⚠️ Cookie Error: {short_exc(e)}", symbol)
         return False
 
-def remove_popups(driver):
-    selectors = [
-        "div[class*='overlap-manager']", 
-        "div[class*='dialog-']", 
-        "button[name='close']",
-        ".tv-dialog__close",
-        "[data-role='toast-container']",
-        "div[id*='cookies-policy']"
-    ]
-    js_script = f"""
-    var selectors = {json.dumps(selectors)};
-    selectors.forEach(function(s) {{
-        var elements = document.querySelectorAll(s);
-        elements.forEach(function(el) {{ el.style.display = 'none'; }});
-    }});
-    """
-    driver.execute_script(js_script)
-
-# ---------------- CORE ---------------- #
-def check_login_status(driver, symbol):
+def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
     try:
-        # Check for user menu or a specific logged-in element
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div[data-name='header-user-menu']"))
-        )
-        log("🔑 LOGIN VERIFIED", symbol)
-        return True
-    except:
-        log("⚠️ LOGIN WARNING: Running as Guest", symbol)
-        return False
-
-def take_screenshot(driver, symbol, tf, url):
-    try:
-        log(f"🌐 VISITING: {url}", symbol, tf)
+        log(f"🌐 Loading {timeframe}: {url}", symbol, timeframe)
         driver.get(url)
-
-        # 1. Wait for chart
-        WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "canvas"))
-        )
         
-        check_login_status(driver, symbol)
-
-        # 2. Stability wait for indicators
+        # Wait for the main page shell to load
         time.sleep(8) 
 
-        # 3. Clean UI before snap
-        remove_popups(driver)
-        log("🧹 Popups cleared", symbol, tf)
+        wait = WebDriverWait(driver, 30)
+        # Ensure chart is clickable
+        chart = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class,'chart-container') or contains(@class,'chart')]")))
+        
+        # Click to focus
+        ActionChains(driver).move_to_element(chart).click().perform()
+        time.sleep(1)
+        
+        # Open "Go To" Dialog
+        ActionChains(driver).key_down(Keys.ALT).send_keys('g').key_up(Keys.ALT).perform()
+        
+        # Locate input and enter date
+        input_xpath = "//input[contains(@class,'query') or @data-role='search' or contains(@class,'input')]"
+        goto_input = wait.until(EC.visibility_of_element_located((By.XPATH, input_xpath)))
+        goto_input.send_keys(Keys.CONTROL + "a" + Keys.BACKSPACE)
+        goto_input.send_keys(str(target_date) + Keys.ENTER)
 
-        # 4. Save
-        img = driver.get_screenshot_as_png()
-        save_to_mysql(symbol, tf, img)
-        log("📸 SUCCESS: Entry Updated in DB", symbol, tf)
+        # CRITICAL: Wait for candles and indicators to draw after jumping to date
+        log(f"⏳ Waiting 10s for candles/indicators to render...", symbol, timeframe)
+        time.sleep(10)
+
+        img = chart.screenshot_as_png
+        if save_to_mysql(symbol, timeframe, img, target_date, month_val):
+            log(f"✅ Saved {timeframe} to DB", symbol, timeframe)
+        else:
+            log(f"⚠️ {timeframe} captured but not saved", symbol, timeframe)
 
     except Exception as e:
-        log(f"❌ ERROR: {str(e)}", symbol, tf)
+        log(f"❌ {timeframe} Error: {short_exc(e)}", symbol, timeframe)
 
-# ---------------- PROCESS ROW ---------------- #
 def process_row(row, idx):
-    symbol = row.get("Symbol", "").strip()
-    day_url = row.get("Day", "").strip()
-    week_url = row.get("Week", "").strip()
+    symbol = str(row.get("Symbol", "")).strip()
+    target_date = str(row.get("dates", "")).strip()
+    day_url = str(row.get("Day", "")).strip()
+    week_url = str(row.get("Week", "")).strip() 
+    
+    if not symbol or not target_date: return
 
-    if not symbol:
-        return
-
-    log("▶️ STARTING SYMBOL PROCESS", symbol)
     driver = get_driver()
-
     try:
-        # LOAD COOKIES ONCE PER DRIVER LIFECYCLE
-        load_cookies(driver)
-
-        if day_url:
-            take_screenshot(driver, symbol, "day", day_url)
-
-        if week_url:
-            take_screenshot(driver, symbol, "week", week_url)
-
+        if inject_tv_cookies(driver, symbol):
+            month_name = get_month_name(target_date)
+            
+            # 1. Daily Chart
+            if day_url and "tradingview.com" in day_url:
+                navigate_and_snap(driver, symbol, "day", day_url, target_date, month_name)
+                time.sleep(3) # Short buffer between navigations
+            
+            # 2. Weekly Chart
+            if week_url and "tradingview.com" in week_url:
+                navigate_and_snap(driver, symbol, "week", week_url, target_date, month_name)
+                
     finally:
         driver.quit()
-        log("⛔ FINISHED SYMBOL PROCESS", symbol)
-
-# ---------------- LOAD SHEET ---------------- #
-def load_rows():
-    creds_json = os.getenv("GSPREAD_CREDENTIALS")
-    if not creds_json:
-        raise ValueError("GSPREAD_CREDENTIALS environment variable is not set.")
-    
-    creds = json.loads(creds_json)
-    gc = gspread.service_account_from_dict(creds)
-    ws = gc.open(SPREADSHEET_NAME).worksheet(TAB_NAME)
-    data = ws.get_all_values()
-
-    headers = data[0]
-    rows = pd.DataFrame(data[1:], columns=headers).to_dict("records")
-    return rows
 
 # ---------------- MAIN ---------------- #
+
 def main():
-    log("🚀 INITIALIZING SCRAPER ENGINE")
-    
-    # Handle Truncate Request if passed
-    if os.getenv("TRUNCATE_ON_START") == "1":
-        log("🧹 TRUNCATING TABLE...")
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("TRUNCATE TABLE another_screenshot")
-        conn.commit()
-        cursor.close()
-        conn.close()
-        if os.getenv("END_ROW") == "0": # Exit if this was just a truncate job
-            return
+    if not db_pool:
+        log("❌ Connection Pool failed. Check DB config.", "-", "-")
 
-    rows = load_rows()
-    selected = rows[START_ROW:END_ROW]
-    log(f"📋 TARGET DATA: {len(selected)} rows found")
+    try:
+        if db_pool:
+            conn = db_pool.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("TRUNCATE TABLE another_screenshot")
+            conn.commit()
+            cursor.close()
+            conn.close()
+            log("✅ Table Truncated.")
+    except Exception as e:
+        log(f"⚠️ Truncate failed: {short_exc(e)}")
 
-    for i in range(0, len(selected), BATCH_SIZE):
-        batch = selected[i:i+BATCH_SIZE]
-        log(f"📦 PROCESSING BATCH: {i} to {i+len(batch)}")
+    try:
+        creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
+        gc = gspread.service_account_from_dict(creds)
+        worksheet = gc.open(SPREADSHEET_NAME).worksheet(TAB_NAME)
+        data = worksheet.get_all_values()
+        headers = make_unique_headers(data[0])
+        rows = pd.DataFrame(data[1:], columns=headers).to_dict("records")
+        log(f"✅ Loaded {len(rows)} rows.")
+    except Exception as e:
+        log(f"❌ Google Sheet Error: {short_exc(e)}")
+        return
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as ex:
-            futures = [ex.submit(process_row, row, idx) for idx, row in enumerate(batch)]
-            for f in futures:
-                f.result()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        executor.map(lambda r: process_row(r[1], r[0]), enumerate(rows, 1))
 
-    log("🏁 ALL TASKS COMPLETED")
+    log("🏁 Finished.")
 
 if __name__ == "__main__":
     main()

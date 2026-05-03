@@ -101,18 +101,15 @@ def get_db_connection():
     return db_pool.get_connection()
 
 def save_to_mysql(symbol, timeframe, image_data, chart_date, month_val):
-    # Validation: Ensure screenshot isn't tiny (indicator of a failed render)
     if not image_data or len(image_data) < 5000:
-        log("❌ DB Save Aborted: Screenshot data too small (render failed)", symbol, timeframe)
+        log("❌ DB Save Aborted: Screenshot too small", symbol, timeframe)
         return False
 
     conn = None
     cursor = None
     try:
         conn = get_db_connection()
-        if not conn:
-            return False
-
+        if not conn: return False
         cursor = conn.cursor()
         query = """
             INSERT INTO another_screenshot (symbol, timeframe, screenshot, chart_date, month_before)
@@ -126,11 +123,8 @@ def save_to_mysql(symbol, timeframe, image_data, chart_date, month_val):
         cursor.execute(query, (symbol, timeframe, image_data, chart_date, month_val))
         conn.commit()
         return True
-
     except Exception as err:
-        if conn:
-            try: conn.rollback()
-            except Exception: pass
+        if conn: conn.rollback()
         log(f"❌ DB Save Error: {short_exc(err)}", symbol, timeframe)
         return False
     finally:
@@ -145,7 +139,6 @@ def get_driver():
     opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--hide-scrollbars")
-    opts.add_argument("--force-device-scale-factor=1")
     opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
     service = Service(CHROME_DRIVER_PATH)
@@ -159,22 +152,13 @@ def inject_tv_cookies(driver, symbol="-"):
         if not cookie_data:
             log("⚠️ Missing TRADINGVIEW_COOKIES", symbol)
             return False
-
         cookies = json.loads(cookie_data)
         driver.get("https://www.tradingview.com/")
         time.sleep(3)
-
         for c in cookies:
             try:
-                driver.add_cookie({
-                    "name": c["name"],
-                    "value": c["value"],
-                    "domain": ".tradingview.com",
-                    "path": "/"
-                })
-            except Exception:
-                continue
-
+                driver.add_cookie({"name": c["name"], "value": c["value"], "domain": ".tradingview.com", "path": "/"})
+            except: continue
         driver.refresh()
         time.sleep(3)
         return True
@@ -186,44 +170,31 @@ def navigate_and_snap(driver, symbol, timeframe, url, target_date, month_val):
     try:
         log(f"🌐 Loading {timeframe}: {url}", symbol, timeframe)
         driver.get(url)
+        wait = WebDriverWait(driver, 45)
         
-        # Wait for chart container to exist
-        wait = WebDriverWait(driver, 40)
+        # Ensure chart container is loaded
         chart_xpath = "//div[contains(@class,'chart-container') or contains(@class,'chart-gui-wrapper')]"
         chart_element = wait.until(EC.presence_of_element_located((By.XPATH, chart_xpath)))
         
-        # Click to focus
-        ActionChains(driver).move_to_element(chart_element).click().perform()
-        time.sleep(2)
-
         # Trigger Go To Date
+        ActionChains(driver).move_to_element(chart_element).click().perform()
+        time.sleep(1)
         ActionChains(driver).key_down(Keys.ALT).send_keys("g").key_up(Keys.ALT).perform()
         
-        # Wait for Input
+        # Fill Date
         input_xpath = "//input[contains(@class,'query') or @data-role='search' or contains(@class,'input')]"
         goto_input = wait.until(EC.element_to_be_clickable((By.XPATH, input_xpath)))
-        
-        # Type date with a small delay
         goto_input.send_keys(Keys.CONTROL + "a")
         goto_input.send_keys(Keys.BACKSPACE)
-        time.sleep(0.5)
         goto_input.send_keys(str(target_date))
-        time.sleep(0.5)
         goto_input.send_keys(Keys.ENTER)
 
-        # CRITICAL: Wait for chart to seek and redraw
-        log("⏳ Waiting for chart seek...", symbol, timeframe)
+        log("⏳ Waiting for render...", symbol, timeframe)
         time.sleep(12) 
 
-        # Take screenshot of the whole page to ensure we capture the chart area correctly
-        # Often the specific 'chart' element in Selenium captures a 0x0 area if not fully rendered
         img = driver.get_screenshot_as_png()
-
         if save_to_mysql(symbol, timeframe, img, target_date, month_val):
             log("✅ Saved to DB", symbol, timeframe)
-        else:
-            log("⚠️ Failed to process screenshot", symbol, timeframe)
-
     except Exception as e:
         log(f"❌ Screenshot Error: {short_exc(e)}", symbol, timeframe)
 
@@ -233,87 +204,68 @@ def process_row(row, actual_index):
     day_url = str(row.get("Day", "")).strip()
     week_url = str(row.get("Week", "")).strip()
 
-    if not symbol or not target_date:
-        return
+    if not symbol or not target_date: return
 
     driver = None
     try:
         driver = get_driver()
-        if not inject_tv_cookies(driver, symbol):
-            return
-
+        if not inject_tv_cookies(driver, symbol): return
         month_name = get_month_name(target_date)
 
         if day_url and "tradingview.com" in day_url:
             navigate_and_snap(driver, symbol, "day", day_url, target_date, month_name)
             time.sleep(2)
-
         if week_url and "tradingview.com" in week_url:
             navigate_and_snap(driver, symbol, "week", week_url, target_date, month_name)
 
     except Exception as e:
-        log(f"❌ Row Error at row {actual_index}: {short_exc(e)}", symbol)
+        log(f"❌ Row Error at {actual_index}: {short_exc(e)}", symbol)
     finally:
         if driver:
             try: driver.quit()
             except: pass
-
-def truncate_table_if_needed():
-    if not TRUNCATE_ON_START: return
-    conn = None
-    try:
-        conn = get_db_connection()
-        if conn:
-            cursor = conn.cursor()
-            cursor.execute("TRUNCATE TABLE another_screenshot")
-            conn.commit()
-            log("✅ Table Truncated.")
-    except Exception as e:
-        log(f"⚠️ Truncate failed: {short_exc(e)}")
-    finally:
-        if conn: conn.close()
-
-def load_rows():
-    creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
-    gc = gspread.service_account_from_dict(creds)
-    worksheet = gc.open(SPREADSHEET_NAME).worksheet(TAB_NAME)
-    data = worksheet.get_all_values()
-    headers = make_unique_headers(data[0])
-    return pd.DataFrame(data[1:], columns=headers).to_dict("records")
-
-def process_batch(batch_rows):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        futures = [executor.submit(process_row, row, idx) for idx, row in batch_rows]
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                future.result()
-            except Exception as e:
-                log(f"⚠️ Worker failure: {short_exc(e)}")
 
 def main():
     if not db_pool:
         log("❌ Connection pool failed.")
         return
 
-    truncate_table_if_needed()
-
+    # Load Google Sheets Data
     try:
-        all_rows = load_rows()
+        creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
+        gc = gspread.service_account_from_dict(creds)
+        worksheet = gc.open(SPREADSHEET_NAME).worksheet(TAB_NAME)
+        data = worksheet.get_all_values()
+        headers = make_unique_headers(data[0])
+        all_rows = pd.DataFrame(data[1:], columns=headers).to_dict("records")
         log(f"✅ Loaded total rows: {len(all_rows)}")
     except Exception as e:
-        log(f"❌ Google Sheet Error: {short_exc(e)}")
+        log(f"❌ Load Error: {short_exc(e)}")
         return
 
+    # Slice Rows
     selected_rows = all_rows[START_ROW:END_ROW]
     if not selected_rows:
-        log("⚠️ No rows found in range.")
+        log("⚠️ No rows in range.")
         return
 
+    # Process everything within ONE Executor to ensure script waits for all workers
     indexed_rows = list(enumerate(selected_rows, start=START_ROW + 1))
-    for i in range(0, len(indexed_rows), BATCH_SIZE):
-        batch = indexed_rows[i:i + BATCH_SIZE]
-        log(f"🚀 Batch {batch[0][0]}-{batch[-1][0]}")
-        process_batch(batch)
+    
+    log(f"🚀 Processing {len(indexed_rows)} rows with {MAX_THREADS} threads...")
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        # Map all rows to the executor
+        futures = [executor.submit(process_row, row, idx) for idx, row in indexed_rows]
+        
+        # This loop forces the main thread to wait and report results
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result() 
+            except Exception as e:
+                log(f"⚠️ Worker failure: {short_exc(e)}")
+
+    log("🏁 Finished all tasks.")
 
 if __name__ == "__main__":
     main()

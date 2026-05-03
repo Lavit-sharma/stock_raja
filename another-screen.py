@@ -81,7 +81,8 @@ def process_row(row):
     try:
         # 1. Inject Authentication Cookies
         driver.get("https://www.tradingview.com/")
-        cookies = json.loads(os.getenv("TRADINGVIEW_COOKIES", "[]"))
+        cookies_env = os.getenv("TRADINGVIEW_COOKIES", "[]")
+        cookies = json.loads(cookies_env)
         for c in cookies:
             try:
                 driver.add_cookie({
@@ -112,14 +113,28 @@ def process_row(row):
         time.sleep(0.5)
         date_input.send_keys(target_date + Keys.ENTER)
         
-        # 6. Wait for technical indicators and candles to render
+        # 6. Wait for technical indicators to render
         print(f"⏳ Rendering {symbol}...")
         time.sleep(12) 
 
-        # --- NEW: POPUP REMOVAL STEP ---
-        # Press ESC twice to clear any potential popups/modals before screenshot
+        # --- UPDATED: AGGRESSIVE POPUP REMOVAL ---
+        # 1. Use JS to find and remove any 'overlap' or 'modal' elements
+        driver.execute_script("""
+            const selectors = [
+                '[class*="overlap-"]', 
+                '[class*="modal-"]', 
+                '[class*="dialog-"]', 
+                '.tv-dialog__close', 
+                '.js-dialog__close'
+            ];
+            selectors.forEach(selector => {
+                document.querySelectorAll(selector).forEach(el => el.remove());
+            });
+        """)
+        
+        # 2. Double ESC press as a fallback
         ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-        time.sleep(1)
+        time.sleep(0.5)
         ActionChains(driver).send_keys(Keys.ESCAPE).perform()
         time.sleep(1)
         
@@ -134,7 +149,6 @@ def process_row(row):
         driver.quit()
 
 def main():
-    # Setup Google Sheets
     try:
         creds_json = os.getenv("GSPREAD_CREDENTIALS")
         if not creds_json:
@@ -149,17 +163,15 @@ def main():
         print(f"❌ Failed to load Google Sheet: {e}")
         return
 
-    # Determine Row Range
     start = int(os.getenv("START_ROW", 0))
     end = int(os.getenv("END_ROW", 500))
     selected_rows = rows[start:end]
     
     print(f"📦 Total rows to process: {len(selected_rows)} (Range: {start}-{end})")
 
-    # Sequential processing for reliability in GitHub Actions
     for row in selected_rows:
         process_row(row)
-        time.sleep(1) # Small gap between symbols
+        time.sleep(1)
 
 if __name__ == "__main__":
     main()

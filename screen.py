@@ -31,7 +31,7 @@ DB_CONFIG = {
 
 MONTHLY_THRESHOLD = 0.25
 CHART_WAIT_SEC = 30
-POST_LOAD_SLEEP = 6
+POST_LOAD_SLEEP = 15
 DB_RETRY = 3
 DB_CONNECT_RETRY = 3
 DB_CONNECT_WAIT = 5
@@ -258,9 +258,31 @@ def main():
                 for label, url in targets:
                     if url and "tradingview.com" in url:
                         if open_with_retry(driver, url, retries=PAGE_RETRY):
-                            chart = wait_chart(driver)
-                            time.sleep(POST_LOAD_SLEEP)
-                            save_to_mysql(db, symbol, label, chart.screenshot_as_png, mv2_json)
+
+    # Wait for chart container
+    chart = wait_chart(driver)
+
+    # Wait for TradingView indicators and colorful lines
+    WebDriverWait(driver, 40).until(
+        lambda d: len(
+            d.find_elements(
+                By.XPATH,
+                "//*[contains(@class,'pane')]//*[name()='svg']//*[name()='path']"
+            )
+        ) > 20
+    )
+
+    # Extra wait for full rendering
+    time.sleep(10)
+
+    # Take screenshot
+    save_to_mysql(
+        db,
+        symbol,
+        label,
+        chart.screenshot_as_png,
+        mv2_json
+    )
 
         log("🏁 DONE!")
     except Exception as e:

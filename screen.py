@@ -239,7 +239,7 @@ def get_driver():
 
 def inject_tv_cookies(driver):
     try:
-        cookie_data = os.getenv("TRADINGVIEW_COOKIES2")
+        cookie_data = os.getenv("TRADINGVIEW_COOKIES")
         if not cookie_data:
             log("❌ TRADINGVIEW_COOKIES missing.")
             return False

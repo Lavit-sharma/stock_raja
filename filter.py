@@ -4,9 +4,7 @@ import json
 import gspread
 import pandas as pd
 import mysql.connector
-from datetime import datetime
 
-from collections import Counter
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -21,6 +19,7 @@ STOCK_LIST_GID = 1400370843
 MV2_SQL_URL = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skcBi1OFtaK8h1905oZOc/edit"
 
 TARGET_TABLE = "filter"
+
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "user": os.getenv("DB_USER"),
@@ -54,48 +53,34 @@ def safe_float(v):
         return 0.0
 
 def fix_duplicate_columns(df):
+
     cols = pd.Series(df.columns)
 
     for dup in cols[cols.duplicated()].unique():
+
         cols[cols[cols == dup].index.values.tolist()] = [
             f"{dup}_{i}" if i != 0 else dup
             for i in range(sum(cols == dup))
         ]
 
     df.columns = cols
+
     return df
-
-def parse_us_date(date_str):
-    try:
-        date_str = str(date_str).strip()
-
-        if not date_str or date_str.lower() == "nan":
-            return None
-
-        return datetime.strptime(
-            date_str,
-            '%m/%d/%Y'
-        ).strftime('%Y-%m-%d')
-
-    except:
-        try:
-            return datetime.strptime(
-                date_str,
-                '%m/%d/%y'
-            ).strftime('%Y-%m-%d')
-
-        except:
-            return None
 
 # ---------------- DB CLASS ---------------- #
 class DB:
+
     def __init__(self, config):
+
         self.config = config
         self.conn = None
+
         self.connect()
 
     def connect(self):
+
         if self.conn:
+
             try:
                 self.conn.close()
             except:
@@ -103,15 +88,18 @@ class DB:
 
         self.conn = mysql.connector.connect(**self.config)
         self.conn.autocommit = True
+
         return self.conn
 
     def ensure(self):
+
         if not self.conn or not self.conn.is_connected():
             return self.connect()
 
         return self.conn
 
     def close(self):
+
         if self.conn:
             self.conn.close()
 
@@ -121,6 +109,7 @@ def roll_days_forward(db: DB):
     for attempt in range(DB_RETRY):
 
         try:
+
             conn = db.ensure()
             cur = conn.cursor()
 
@@ -140,13 +129,15 @@ def roll_days_forward(db: DB):
             log("✅ Rollover successful.")
 
             cur.close()
+
             return
 
         except Exception as e:
 
-            log(f"⚠️ Rollover retry {attempt+1}: {e}")
+            log(f"⚠️ Rollover retry {attempt + 1}: {e}")
 
             db.connect()
+
             time.sleep(1)
 
 def get_driver():
@@ -173,7 +164,7 @@ def main():
 
         roll_days_forward(db)
 
-        # 1. Load Data
+        # ---------------- LOAD DATA ---------------- #
         creds = os.getenv("GSPREAD_CREDENTIALS")
 
         client = gspread.service_account_from_dict(
@@ -199,20 +190,17 @@ def main():
 
         url_map = {
             row[0].strip(): {
-                'week': row[2].strip(),
-                'day': row[3].strip()
+                "week": row[2].strip(),
+                "day": row[3].strip()
             }
             for row in stock_ws[1:]
-            if row[0]
+            if row and row[0].strip()
         }
 
-        # 2. Process Filters
+        # ---------------- FILTER PROCESSING ---------------- #
         cols_to_fix = [
             "D_Trigger",
-            "D_Trigger_S",
-            "D_DG",
-            "D_EF1",
-            "D_Today"
+            "D_Trigger_S"
         ]
 
         for col in cols_to_fix:
@@ -220,42 +208,15 @@ def main():
             if col in df_mv2.columns:
 
                 df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
-                df_mv2[f"{col}_f"] = df_mv2[col].apply(safe_float)
 
             else:
 
                 df_mv2[f"{col}_n"] = -1
-                df_mv2[f"{col}_f"] = 0.0
-
-        today_str = datetime.now().strftime('%Y-%m-%d')
-
-        delivery_max_mask = pd.Series(
-            [False] * len(df_mv2)
-        )
-
-        for date_col in ["DATE1", "DATE2", "DATE3"]:
-
-            if date_col in df_mv2.columns:
-
-                delivery_max_mask |= (
-                    df_mv2[date_col].apply(parse_us_date)
-                    == today_str
-                )
-
-        dg_mask = (
-            (df_mv2["D_DG_f"] == 1.0)
-            &
-            (
-                df_mv2["D_Today_f"]
-                >
-                (0.5 * df_mv2["D_EF1_f"])
-            )
-        )
 
         # ---------------- COMPACT FILTER ---------------- #
         compact_filter_df = df_mv2[
             (
-                df_mv2["MXMN"].apply(safe_float) < 20
+                df_mv2["MXMN"].apply(safe_float) < 30
             )
             &
             (
@@ -263,19 +224,7 @@ def main():
             )
         ]
 
-        # Run second condition only if first has zero results
-        if compact_filter_df.empty:
-
-            compact_filter_df = df_mv2[
-                (
-                    df_mv2["MXMN"].apply(safe_float) < 30
-                )
-                &
-                (
-                    df_mv2["D_CL_AB"].apply(safe_int) == 1
-                )
-            ]
-
+        # ---------------- TRIGGERS ---------------- #
         triggers = {
 
             "D_Trigger": df_mv2[
@@ -294,17 +243,10 @@ def main():
                 )
             ],
 
-            "Delivery_Max": df_mv2[
-                delivery_max_mask
-            ],
-
-            "Double_Green": df_mv2[
-                dg_mask
-            ],
-
             "Compact_Filter": compact_filter_df
         }
 
+        # ---------------- DEBUG LOGS ---------------- #
         for name, d_sub in triggers.items():
 
             symbols_found = d_sub.iloc[:, 0].astype(str).tolist()
@@ -315,7 +257,7 @@ def main():
                 f"Symbols: {', '.join(symbols_found) if symbols_found else 'None'}"
             )
 
-        # 3. Setup Browser
+        # ---------------- SETUP BROWSER ---------------- #
         driver = get_driver()
 
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
@@ -327,6 +269,7 @@ def main():
             for c in json.loads(cookie_data):
 
                 try:
+
                     driver.add_cookie({
                         "name": c["name"],
                         "value": c["value"],
@@ -339,7 +282,7 @@ def main():
 
             driver.refresh()
 
-        # 4. Execute Screenshots
+        # ---------------- EXECUTE SCREENSHOTS ---------------- #
         for filter_name, matched_df in triggers.items():
 
             if matched_df.empty:
@@ -356,11 +299,11 @@ def main():
                 if not urls:
                     continue
 
-                for tf in ['day', 'week']:
+                for tf in ["day", "week"]:
 
-                    url = urls[tf]
+                    url = urls.get(tf)
 
-                    if "tradingview.com" not in url:
+                    if not url or "tradingview.com" not in url:
                         continue
 
                     try:
@@ -379,7 +322,6 @@ def main():
                             )
                         )
 
-                        # --- WAIT FOR LATE POPUPS ---
                         log(
                             f"    ⏳ Waiting {POST_LOAD_SLEEP}s "
                             f"for late popups: {symbol} ({tf})..."
@@ -387,7 +329,7 @@ def main():
 
                         time.sleep(POST_LOAD_SLEEP)
 
-                        # --- REMOVE POPUPS WITH LOGGING ---
+                        # ---------------- REMOVE POPUPS ---------------- #
                         was_removed = driver.execute_script("""
 
                             var found = false;
@@ -415,7 +357,9 @@ def main():
                                 '.chart-container-border'
                             );
 
-                            if(chartElem) chartElem.click();
+                            if(chartElem) {
+                                chartElem.click();
+                            }
 
                             return found;
 
@@ -435,7 +379,6 @@ def main():
                                 f"for {symbol} ({tf})"
                             )
 
-                        # Small buffer
                         time.sleep(1)
 
                         img = chart.screenshot_as_png

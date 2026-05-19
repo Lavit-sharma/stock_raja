@@ -1,0 +1,37 @@
+name: Download Stock Data
+
+on:
+  workflow_dispatch:
+
+jobs:
+  download-data:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Packages
+        run: |
+          pip install yfinance pandas
+
+      - name: Run Python Script
+        run: |
+          python dhan.py
+
+      - name: Commit CSV Files
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+
+          git add data/
+
+          git commit -m "Updated stock data" || echo "No changes to commit"
+
+          git push

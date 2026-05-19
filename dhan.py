@@ -1,6 +1,7 @@
 import yfinance as yf
 import pandas as pd
 import os
+from datetime import datetime
 
 # =========================
 # STOCK LIST
@@ -8,7 +9,9 @@ import os
 stocks = [
     "RELIANCE.NS",
     "TCS.NS",
-    "INFY.NS"
+    "INFY.NS",
+    "HDFCBANK.NS",
+    "SBIN.NS"
 ]
 
 # =========================
@@ -17,35 +20,42 @@ stocks = [
 os.makedirs("data", exist_ok=True)
 
 # =========================
-# DOWNLOAD 1 MINUTE DATA
+# DOWNLOAD DATA
 # =========================
+today = datetime.now().strftime("%Y-%m-%d")
+
 for stock in stocks:
 
     print(f"Downloading {stock}...")
 
-    df = yf.download(
-        tickers=stock,
-        interval="1m",
-        period="1d",
-        progress=False
-    )
+    try:
+        df = yf.download(
+            tickers=stock,
+            interval="1m",
+            period="1d",
+            progress=False
+        )
 
-    # Skip if no data
-    if df.empty:
-        print(f"No data for {stock}")
-        continue
+        if df.empty:
+            print(f"No data for {stock}")
+            continue
 
-    # Reset index
-    df.reset_index(inplace=True)
+        # Reset index
+        df.reset_index(inplace=True)
 
-    # Clean filename
-    filename = stock.replace(".NS", "") + "_1min.csv"
+        # Clean filename
+        clean_name = stock.replace(".NS", "")
 
-    # Save CSV in repo folder
-    filepath = os.path.join("data", filename)
+        filename = f"{clean_name}_{today}.csv"
 
-    df.to_csv(filepath, index=False)
+        filepath = os.path.join("data", filename)
 
-    print(f"Saved: {filepath}")
+        # Save CSV
+        df.to_csv(filepath, index=False)
+
+        print(f"Saved: {filepath}")
+
+    except Exception as e:
+        print(f"Error downloading {stock}: {e}")
 
 print("DONE")

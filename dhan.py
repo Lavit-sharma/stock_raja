@@ -1,3 +1,4 @@
+```python id="u5l6i5"
 import os
 import time
 from datetime import datetime, timedelta
@@ -7,12 +8,25 @@ import pandas as pd
 import gspread
 
 # =========================================
+# DEBUG
+# =========================================
+
+print("FILE EXISTS:", os.path.exists("credentials.json"))
+
+with open("credentials.json", "r") as f:
+    print(f.read()[:300])
+
+# =========================================
 # GOOGLE SHEETS
 # =========================================
 
-gc = gspread.service_account("credentials.json")
+gc = gspread.service_account(
+    filename="credentials.json"
+)
 
 sheet = gc.open("STOCKLIST 2").worksheet("Sheet1")
+
+print("✅ Sheet Connected")
 
 # =========================================
 # READ ALL DATA
@@ -20,23 +34,20 @@ sheet = gc.open("STOCKLIST 2").worksheet("Sheet1")
 
 rows = sheet.get_all_records()
 
-print("Sheet Connected")
-
 # =========================================
 # START COLUMN
 # =========================================
 
-# K = 11
-START_COL = 11
+START_COL = 11  # K
 
 # =========================================
-# CLEAR OLD DATA
+# CLEAR OLD OUTPUT
 # =========================================
 
 sheet.batch_clear(["K:ZZ"])
 
 # =========================================
-# PROCESS EACH ROW
+# PROCESS EACH SYMBOL
 # =========================================
 
 for idx, row in enumerate(rows):
@@ -44,36 +55,46 @@ for idx, row in enumerate(rows):
     try:
 
         # =========================================
-        # READ SYMBOL
+        # SYMBOL
         # =========================================
 
-        symbol = row["symbol"]
+        symbol = str(row["symbol"]).strip()
+
+        if not symbol:
+            continue
 
         # =========================================
-        # READ DATES
+        # DATES
         # =========================================
 
         date1 = str(row["date1"]).strip()
         date2 = str(row["date2"]).strip()
 
-        print(f"\nProcessing {symbol}")
+        print(f"\n========================")
+        print(f"Processing: {symbol}")
+        print(f"Date1: {date1}")
+        print(f"Date2: {date2}")
 
         # =========================================
-        # ROW POSITION
+        # BASE ROW
         # =========================================
 
         base_row = (idx * 500) + 1
 
         # =========================================
-        # FUNCTION
+        # DOWNLOAD FUNCTION
         # =========================================
 
-        def download_and_store(target_date, start_row, title):
+        def process_date(target_date, start_row, title):
 
             if not target_date:
                 return
 
-            print(f"Downloading {title} : {target_date}")
+            print(f"\nDownloading {title}")
+
+            # =========================================
+            # DATE CONVERT
+            # =========================================
 
             start_date = datetime.strptime(
                 target_date,
@@ -94,8 +115,12 @@ for idx, row in enumerate(rows):
                 progress=False
             )
 
+            # =========================================
+            # EMPTY CHECK
+            # =========================================
+
             if df.empty:
-                print(f"No data for {symbol}")
+                print(f"No data found for {symbol}")
                 return
 
             # =========================================
@@ -105,7 +130,7 @@ for idx, row in enumerate(rows):
             df.reset_index(inplace=True)
 
             # =========================================
-            # KEEP ONLY REQUIRED
+            # REQUIRED COLUMNS ONLY
             # =========================================
 
             df = df[[
@@ -115,24 +140,20 @@ for idx, row in enumerate(rows):
             ]]
 
             # =========================================
-            # HEADER
+            # PREPARE VALUES
             # =========================================
 
             values = []
 
-            values.append(
-                [f"{symbol} - {title} - {target_date}"]
-            )
+            values.append([
+                f"{symbol} - {title} - {target_date}"
+            ])
 
             values.append([
                 "Datetime",
                 "Close",
                 "Volume"
             ])
-
-            # =========================================
-            # DATA ROWS
-            # =========================================
 
             for _, r in df.iterrows():
 
@@ -154,20 +175,20 @@ for idx, row in enumerate(rows):
             print(f"Stored {title}")
 
         # =========================================
-        # STORE DATE1
+        # DATE1
         # =========================================
 
-        download_and_store(
+        process_date(
             date1,
             base_row,
             "DATE1"
         )
 
         # =========================================
-        # STORE DATE2
+        # DATE2
         # =========================================
 
-        download_and_store(
+        process_date(
             date2,
             base_row + 220,
             "DATE2"
@@ -177,6 +198,7 @@ for idx, row in enumerate(rows):
 
     except Exception as e:
 
-        print(f"Error: {e}")
+        print(f"\n❌ ERROR: {e}")
 
-print("\nDONE")
+print("\n✅ DONE")
+```

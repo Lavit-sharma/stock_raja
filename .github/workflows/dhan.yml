@@ -1,76 +1,108 @@
-
-name: Download Stock Data
+```yaml id="vk6mx4"
+name: T1 (Shards 0–4)
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  download-data:
+  scrape:
 
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+
+      matrix:
+        shard: [0, 1, 2, 3, 4]
+
+    env:
+      SHARD_STEP: 20
 
     steps:
 
       # =========================================
-      # CHECKOUT REPOSITORY
+      # CHECKOUT
       # =========================================
 
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       # =========================================
       # PYTHON
       # =========================================
 
-      - name: Set Up Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       # =========================================
-      # INSTALL PACKAGES
+      # SYSTEM DEPENDENCIES
       # =========================================
 
-      - name: Install Packages
+      - name: Install System Dependencies
         run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            libnss3 \
+            libxi6 \
+            libgbm1 \
+            libasound2t64
+
+      # =========================================
+      # PYTHON PACKAGES
+      # =========================================
+
+      - name: Install Python Packages
+        run: |
+
           pip install yfinance
           pip install pandas
           pip install gspread
-          pip install google-auth
           pip install oauth2client
+          pip install google-auth
 
       # =========================================
-      # CREATE CREDENTIAL FILE
+      # CREATE credentials.json
       # =========================================
 
       - name: Create credentials.json
         run: |
-          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+          printf "%s" '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+      # =========================================
+      # DEBUG
+      # =========================================
+
+      - name: Debug credentials.json
+        run: |
+          echo "===== credentials.json ====="
+          head -n 5 credentials.json
+
+      # =========================================
+      # CHECKPOINT FILE
+      # =========================================
+
+      - name: Create checkpoint file
+        run: |
+          FILE="checkpoint_group1_${{ matrix.shard }}.txt"
+
+          if [ ! -f "$FILE" ]; then
+            echo "0" > "$FILE"
+          fi
 
       # =========================================
       # RUN SCRIPT
       # =========================================
 
       - name: Run Python Script
+
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          CHECKPOINT_FILE: checkpoint_group1_${{ matrix.shard }}.txt
+          PYTHONUNBUFFERED: "1"
+
         run: |
           python dhan.py
-
-      # =========================================
-      # COMMIT DATA FILES IF ANY
-      # =========================================
-
-      - name: Commit Changes
-        run: |
-
-          git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
-
-          git add .
-
-          git commit -m "Updated stock data" || echo "No changes"
-
-          git push
-
+```

@@ -1,4 +1,4 @@
-```yaml
+
 name: Download Stock Data
 
 on:
@@ -73,4 +73,4 @@ jobs:
           git commit -m "Updated stock data" || echo "No changes"
 
           git push
-```
+

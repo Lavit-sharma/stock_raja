@@ -1,3 +1,4 @@
+```yaml
 name: Download Stock Data
 
 on:
@@ -8,35 +9,68 @@ permissions:
 
 jobs:
   download-data:
+
     runs-on: ubuntu-latest
 
     steps:
 
+      # =========================================
+      # CHECKOUT REPOSITORY
+      # =========================================
+
       - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
+
+      # =========================================
+      # PYTHON
+      # =========================================
 
       - name: Set Up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+
+      # =========================================
+      # INSTALL PACKAGES
+      # =========================================
 
       - name: Install Packages
         run: |
-          pip install yfinance pandas
+          pip install yfinance
+          pip install pandas
+          pip install gspread
+          pip install google-auth
+          pip install oauth2client
+
+      # =========================================
+      # CREATE CREDENTIAL FILE
+      # =========================================
+
+      - name: Create credentials.json
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+      # =========================================
+      # RUN SCRIPT
+      # =========================================
 
       - name: Run Python Script
         run: |
           python dhan.py
 
-      - name: Commit CSV Files
+      # =========================================
+      # COMMIT DATA FILES IF ANY
+      # =========================================
+
+      - name: Commit Changes
         run: |
+
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
 
-          git add data/
+          git add .
 
-          git commit -m "Updated stock data" || echo "No changes to commit"
+          git commit -m "Updated stock data" || echo "No changes"
 
           git push
+```

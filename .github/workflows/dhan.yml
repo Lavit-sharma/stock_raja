@@ -1,4 +1,4 @@
-```yaml id="vk6mx4"
+
 name: T1 (Shards 0–4)
 
 on:
@@ -105,4 +105,4 @@ jobs:
 
         run: |
           python dhan.py
-```
+

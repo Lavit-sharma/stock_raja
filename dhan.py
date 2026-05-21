@@ -17,8 +17,8 @@ START_ROW = SHARD_INDEX * SHARD_SIZE
 END_ROW = START_ROW + SHARD_SIZE
 
 # Zerodha API credentials - Read from GitHub secrets / environment variables
-API_KEY = os.getenv("ZERODHA_API_KEY", "your_api_key_here")
-ACCESS_TOKEN = os.getenv("ZERODHA_ACCESS_TOKEN", "your_daily_access_token_here")
+API_KEY = os.getenv("ZERODHA_API_KEY", "1n0kjsoryxh6wed1")
+ACCESS_TOKEN = os.getenv("ZERODHA_ACCESS_TOKEN", "6R11kEjLTeo9su1E1iwwv4IU5FjvTgPv")
 
 # ---------------- GOOGLE SHEETS ---------------- #
 def connect_sheets():

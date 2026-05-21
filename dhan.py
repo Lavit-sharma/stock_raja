@@ -82,7 +82,8 @@ def fetch_30d_1min_data(symbol: str) -> pd.DataFrame:
 
 def upload_to_sheets(df: pd.DataFrame, spreadsheet_name: str, worksheet_name: str):
     """
-    Connects to Google Sheets and uploads data matrices safely without breaking JSON serialization.
+    Connects to Google Sheets and uploads data matrices safely by stripping out 
+    un-serializable NaN values.
     """
     if df.empty:
         print("[INFO] Synchronization bypassed due to empty dataset.")
@@ -99,10 +100,15 @@ def upload_to_sheets(df: pd.DataFrame, spreadsheet_name: str, worksheet_name: st
         try:
             worksheet = sh.worksheet(worksheet_name)
         except gspread.exceptions.WorksheetNotFound:
-            # Giving it ample room for 30 days of 1-minute data (approx 11,000+ rows)
+            # Giving it ample room for 30 days of 1-minute data (approx 15,000+ rows)
             worksheet = sh.add_worksheet(title=worksheet_name, rows="15000", cols="10")
 
+        # Create a deep copy to manipulate field formats safely
         df_copy = df.copy()
+        
+        # ✅ CRITICAL FIX: Convert all NaNs/Null values into clean strings 
+        # This prevents the raw math json payload encoder crash.
+        df_copy = df_copy.fillna('')
         
         # Clean up timestamps to a clean string format (strips timezone info out)
         if 'DATE' in df_copy.columns:
@@ -150,3 +156,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```</Response>

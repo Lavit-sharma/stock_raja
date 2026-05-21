@@ -170,11 +170,7 @@ try:
             "Source Date Label",
             "Requested Date",
             "Datetime",
-            "Open",
-            "High",
-            "Low",
             "Close",
-            "Adj Close",
             "Volume"
 
         ])
@@ -210,12 +206,14 @@ for i in range(start_idx, end_idx):
     if not raw_symbol:
         continue
 
+
     trading_symbol = (
         raw_symbol
         .replace(".NS", "")
         .replace(".BSE", "")
         .strip()
     )
+
 
     instrument_token = token_map.get(
         trading_symbol
@@ -341,14 +339,6 @@ for i in range(start_idx, end_idx):
                         raw_date,
 
                         str(candle["date"]),
-
-                        float(candle["open"]),
-
-                        float(candle["high"]),
-
-                        float(candle["low"]),
-
-                        float(candle["close"]),
 
                         float(candle["close"]),
 

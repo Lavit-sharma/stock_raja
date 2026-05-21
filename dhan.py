@@ -39,10 +39,14 @@ API_KEY = os.getenv("ZERODHA_API_KEY")
 ACCESS_TOKEN = os.getenv("ZERODHA_ACCESS_TOKEN")
 
 if not API_KEY:
-    raise Exception("❌ Missing GitHub Secret: ZERODHA_API_KEY")
+    raise Exception(
+        "❌ Missing GitHub Secret: ZERODHA_API_KEY"
+    )
 
 if not ACCESS_TOKEN:
-    raise Exception("❌ Missing GitHub Secret: ZERODHA_ACCESS_TOKEN")
+    raise Exception(
+        "❌ Missing GitHub Secret: ZERODHA_ACCESS_TOKEN"
+    )
 
 
 # =========================================================
@@ -51,20 +55,31 @@ if not ACCESS_TOKEN:
 def connect_sheets():
 
     try:
-        gc = gspread.service_account("credentials.json")
+
+        gc = gspread.service_account(
+            "credentials.json"
+        )
 
         spreadsheet = gc.open(
             "Tradingview Data Reel Experimental May"
         )
 
-        source_sheet = spreadsheet.worksheet("Sheet5")
-        target_sheet = spreadsheet.worksheet("Sheet18")
+        source_sheet = spreadsheet.worksheet(
+            "Sheet5"
+        )
+
+        target_sheet = spreadsheet.worksheet(
+            "Sheet18"
+        )
 
         return source_sheet, target_sheet
 
     except Exception as e:
 
-        log(f"❌ Google Sheets Connection Failed: {e}")
+        log(
+            f"❌ Google Sheets Connection Failed: {e}"
+        )
+
         sys.exit(1)
 
 
@@ -81,11 +96,16 @@ try:
 
     all_data = sheet_source.get_all_records()
 
-    log("✅ Source sheet loaded successfully.")
+    log(
+        "✅ Source sheet loaded successfully."
+    )
 
 except Exception as e:
 
-    log(f"❌ Failed loading source sheet: {e}")
+    log(
+        f"❌ Failed loading source sheet: {e}"
+    )
+
     sys.exit(1)
 
 
@@ -98,27 +118,42 @@ try:
 
     kite.set_access_token(ACCESS_TOKEN)
 
-    log("✅ Zerodha KiteConnect Session initialized.")
+    log(
+        "✅ Zerodha KiteConnect Session initialized."
+    )
 
-    log("🔄 Downloading Zerodha Instrument Master...")
+    log(
+        "🔄 Downloading Zerodha Instrument Master..."
+    )
 
     instruments = kite.instruments("NSE")
 
     token_map = {
-        inst["tradingsymbol"]: inst["instrument_token"]
+
+        inst["tradingsymbol"]:
+        inst["instrument_token"]
+
         for inst in instruments
     }
 
-    log("✅ Instrument Master processed successfully.")
+    log(
+        "✅ Instrument Master processed successfully."
+    )
 
 except TokenException as e:
 
-    log(f"❌ Invalid or expired access token: {e}")
+    log(
+        f"❌ Invalid or expired access token: {e}"
+    )
+
     sys.exit(1)
 
 except Exception as e:
 
-    log(f"❌ Zerodha initialization failed: {e}")
+    log(
+        f"❌ Zerodha initialization failed: {e}"
+    )
+
     sys.exit(1)
 
 
@@ -130,6 +165,7 @@ try:
     if not sheet_target.row_values(1):
 
         sheet_target.append_row([
+
             "Symbol",
             "Source Date Label",
             "Requested Date",
@@ -140,22 +176,27 @@ try:
             "Close",
             "Adj Close",
             "Volume"
+
         ])
 
 except Exception as e:
 
-    log(f"⚠️ Header initialization skipped: {e}")
+    log(
+        f"⚠️ Header initialization skipped: {e}"
+    )
 
 
 # =========================================================
 # MAIN SCRAPER LOOP
 # =========================================================
-all_rows_payload = []
-
 total_rows = len(all_data)
 
 start_idx = max(0, START_ROW)
-end_idx = min(END_ROW, total_rows)
+
+end_idx = min(
+    END_ROW,
+    total_rows
+)
 
 
 for i in range(start_idx, end_idx):
@@ -176,7 +217,9 @@ for i in range(start_idx, end_idx):
         .strip()
     )
 
-    instrument_token = token_map.get(trading_symbol)
+    instrument_token = token_map.get(
+        trading_symbol
+    )
 
     if not instrument_token:
 
@@ -187,16 +230,24 @@ for i in range(start_idx, end_idx):
 
         continue
 
+
     # =====================================================
     # FETCH DATE1 + DATE2
     # =====================================================
     dates_to_fetch = [
 
-        ("date1", row.get("date1")),
+        (
+            "date1",
+            row.get("date1")
+        ),
 
-        ("date2", row.get("date2"))
+        (
+            "date2",
+            row.get("date2")
+        )
 
     ]
+
 
     for date_label, raw_date in dates_to_fetch:
 
@@ -219,6 +270,7 @@ for i in range(start_idx, end_idx):
 
             continue
 
+
         from_date = target_date.replace(
             hour=0,
             minute=0,
@@ -231,11 +283,14 @@ for i in range(start_idx, end_idx):
             second=59
         )
 
+
         log(
-            f"🔄 Processing row [{i+1}/{total_rows}] "
+            f"🔄 Processing row "
+            f"[{i+1}/{total_rows}] "
             f"— Symbol: {trading_symbol} "
             f"| {date_label}: {raw_date}"
         )
+
 
         retries = 3
 
@@ -244,15 +299,20 @@ for i in range(start_idx, end_idx):
             try:
 
                 log(
-                    f"   Downloading 1m candles for "
-                    f"{raw_date}..."
+                    f"   Downloading 1m candles "
+                    f"for {raw_date}..."
                 )
 
                 records = kite.historical_data(
+
                     instrument_token=instrument_token,
+
                     from_date=from_date,
+
                     to_date=to_date,
+
                     interval="minute"
+
                 )
 
                 if not records:
@@ -264,11 +324,15 @@ for i in range(start_idx, end_idx):
 
                     break
 
+
                 df = pd.DataFrame(records)
+
+                symbol_rows = []
+
 
                 for _, candle in df.iterrows():
 
-                    all_rows_payload.append([
+                    symbol_rows.append([
 
                         f"{trading_symbol}.NS",
 
@@ -292,12 +356,27 @@ for i in range(start_idx, end_idx):
 
                     ])
 
+
+                # =========================================
+                # IMMEDIATE GOOGLE SHEETS UPLOAD
+                # =========================================
+                sheet_target.append_rows(
+
+                    symbol_rows,
+
+                    value_input_option="RAW"
+
+                )
+
+
                 log(
-                    f"   ✅ Successfully fetched "
-                    f"{len(df)} candles"
+                    f"   ✅ Uploaded "
+                    f"{len(symbol_rows)} rows "
+                    f"to Sheet18"
                 )
 
                 break
+
 
             except TokenException as e:
 
@@ -308,11 +387,19 @@ for i in range(start_idx, end_idx):
 
                 sys.exit(1)
 
-            except (InputException, DataException) as e:
+
+            except (
+                InputException,
+                DataException
+            ) as e:
 
                 err = str(e).lower()
 
-                if "rate" in err or "limit" in err:
+                if (
+                    "rate" in err
+                    or
+                    "limit" in err
+                ):
 
                     log(
                         "⚠️ Rate limit hit. "
@@ -332,6 +419,7 @@ for i in range(start_idx, end_idx):
 
                     break
 
+
             except NetworkException:
 
                 log(
@@ -343,6 +431,7 @@ for i in range(start_idx, end_idx):
 
                 retries -= 1
 
+
             except Exception as e:
 
                 log(
@@ -352,35 +441,9 @@ for i in range(start_idx, end_idx):
 
                 break
 
+
         # Zerodha safe throttle
         time.sleep(0.4)
 
 
-# =========================================================
-# PUSH TO GOOGLE SHEETS
-# =========================================================
-if all_rows_payload:
-
-    log(
-        f"🚀 Uploading "
-        f"{len(all_rows_payload)} rows "
-        f"to Sheet18..."
-    )
-
-    try:
-
-        sheet_target.append_rows(
-            all_rows_payload,
-            value_input_option="RAW"
-        )
-
-        log("✅ Data upload completed successfully.")
-
-    except Exception as e:
-
-        log(f"❌ Google Sheets upload failed: {e}")
-
-else:
-
-    log("⚠️ No candle data collected.")
-
+log("✅ Script execution completed.")

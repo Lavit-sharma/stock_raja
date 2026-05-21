@@ -1,100 +1,125 @@
 import sys
 import os
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 import pandas as pd
+import yfinance as yf
 import gspread
-from jugaad_data.nse import stock_df
 
-def fetch_nse_historical(symbol: str, days_back: int = 30) -> pd.DataFrame:
+def fetch_nse_intraday_1min(symbol: str) -> pd.DataFrame:
     """
-    Fetches historical equity data using jugaad-data and cleans headers.
+    Downloads raw 1-minute intraday data for the last active trading session.
     """
-    end_date = date.today()
-    start_date = end_date - timedelta(days=days_back)
+    # Format symbol tracking for Yahoo Finance (.NS extension)
+    ticker = f"{symbol.upper()}.NS" if not symbol.endswith(".NS") else symbol.upper()
     
     try:
-        print(f"[INFO] Extracting {symbol} from {start_date} to {end_date} via jugaad-data...")
-        # Fetching standard equity segment series 'EQ'
-        df = stock_df(symbol=symbol, from_date=start_date, to_date=end_date, series="EQ")
+        print(f"[INFO] Initializing yfinance download for {ticker} (Interval: 1m)...")
+        
+        # Pull last 1 day of intraday data
+        df = yf.download(
+            tickers=ticker,
+            period="1d",
+            interval="1m"
+        )
         
         if df.empty:
-            print(f"[WARNING] No data returned for symbol: {symbol}")
+            print(f"[WARNING] No intraday rows returned for target symbol: {ticker}")
             return pd.DataFrame()
             
-        # Standardize date format & sort chronologically
-        df['DATE'] = pd.to_datetime(df['DATE'])
-        df = df.sort_values('DATE').reset_index(drop=True)
+        # Clear multi-level row headers injected by newer yfinance versions
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        # Pull Datetime index out into an explicit processing column
+        df = df.reset_index()
         
-        # Ensure column labels match standard uppercase tracking expectations
-        df.columns = [col.upper() for col in df.columns]
+        # Standardize structural key capitalization mapping
+        df.rename(columns={
+            'Datetime': 'DATE',
+            'Open': 'OPEN',
+            'High': 'HIGH',
+            'Low': 'LOW',
+            'Close': 'CLOSE',
+            'Volume': 'VOLUME'
+        }, inplace=True)
+        
+        # Filter down strictly to standard core metric properties
+        target_cols = ['DATE', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']
+        df = df[[col for col in target_cols if col in df.columns]]
+        
+        print(f"[SUCCESS] Extracted {len(df)} lines of 1-minute timeline data.")
         return df
 
     except Exception as e:
-        print(f"[ERROR] Failed fetching data for {symbol}: {e}")
+        print(f"[ERROR] Engine encountered failure during data fetch: {e}")
         return pd.DataFrame()
 
 def upload_to_sheets(df: pd.DataFrame, spreadsheet_name: str, worksheet_name: str):
     """
-    Authenticates and updates target worksheet with dataframe metrics.
+    Connects to Google Drive Sheets API and pushes array blocks via update_values.
     """
     if df.empty:
-        print("[INFO] Empty dataframe skipped from sheets synchronization.")
+        print("[INFO] Synchronization sequence bypassed due to empty dataset.")
         return
 
     try:
         if not os.path.exists('credentials.json'):
-            raise FileNotFoundError("Authentication 'credentials.json' file is missing.")
+            raise FileNotFoundError("System key resource 'credentials.json' is missing.")
             
-        print(f"[INFO] Connecting to Google Sheets: '{spreadsheet_name}' -> '{worksheet_name}'")
+        print(f"[INFO] Establishing connection: '{spreadsheet_name}' -> '{worksheet_name}'")
         gc = gspread.service_account(filename='credentials.json')
         sh = gc.open(spreadsheet_name)
         
         try:
             worksheet = sh.worksheet(worksheet_name)
         except gspread.exceptions.WorksheetNotFound:
-            worksheet = sh.add_worksheet(title=worksheet_name, rows="100", cols="20")
+            worksheet = sh.add_worksheet(title=worksheet_name, rows="500", cols="10")
 
-        # Prep payload data (convert timestamp columns safely to string format)
+        # Create a deep copy to manipulate field formats safely
         df_copy = df.copy()
+        
+        # Stringify timestamp values so JSON dump structures accept them
         if 'DATE' in df_copy.columns:
-            df_copy['DATE'] = df_copy['DATE'].dt.strftime('%Y-%m-%d')
+            df_copy['DATE'] = df_copy['DATE'].astype(str)
             
-        # Format payload structure [headers, values...]
+        # Parse payload lists [Headers, Rows...]
         payload = [df_copy.columns.values.tolist()] + df_copy.values.tolist()
         
-        # Atomically clear old calculations and dump fresh target vectors
+        # Clear out old metrics completely to prevent tail overlapping
         worksheet.clear()
-        worksheet.update('A1', payload)
+        
+        # Atomically push matrix block onto grid coordinates
+        worksheet.update_values('A1', payload)
         print("[SUCCESS] Operational metrics safely synchronized onto Google Sheets.")
 
     except Exception as e:
         print(f"[ERROR] Sheets synchronization layer failure: {e}")
 
 def main():
-    # Capture positional flags passing down from GitHub Runner execution string: `update int his`
+    # Process argument flags from execution string
     args = sys.argv[1:]
-    print(f"[START] Running script execution routine with arguments: {args}")
+    print(f"[START] Initializing runner interface with processing flags: {args}")
     
-    # Target evaluation setup
+    # Extraction target constants
     target_ticker = "RELIANCE" 
     target_spreadsheet = "NSE_Automation_Dashboard"
     target_worksheet = "Raw_Historical"
 
-    # Match execution criteria flags matching your exact positional runtime call
+    # Evaluate execution string matching 'update int his'
     if len(args) >= 3 and args[0] == "update" and args[1] == "int" and args[2] == "his":
-        print("[PROCESS] Trigger matching execution routine: 'update int his'")
+        print("[PROCESS] Match verified: Executing 1-minute core matrix loop...")
         
-        # Pull transactional window historical markers (e.g. 30 days)
-        historical_metrics = fetch_nse_historical(symbol=target_ticker, days_back=30)
+        # Fetch high-frequency dataset
+        intraday_data = fetch_nse_intraday_1min(symbol=target_ticker)
         
-        if not historical_metrics.empty:
-            print("\n--- Data Target Extraction Overview ---")
-            print(historical_metrics[['DATE', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']].tail(5))
+        if not intraday_data.empty:
+            print("\n--- Data Target Extraction Overview (1-Minute Intervals) ---")
+            print(intraday_data.tail(5))
             
-            # Send cleaned datasets downstream to target Google Sheet grids
-            upload_to_sheets(historical_metrics, target_spreadsheet, target_worksheet)
+            # Flush dataset into sheet grid cells
+            upload_to_sheets(intraday_data, target_spreadsheet, target_worksheet)
     else:
-        print("[ERROR] Argument structural routing invalid or unhandled. Expected: 'update int his'")
+        print("[ERROR] Arguments missing or misaligned. Expected pattern: 'update int his'")
         sys.exit(1)
 
 if __name__ == "__main__":

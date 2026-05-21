@@ -16,9 +16,9 @@ SHARD_SIZE = int(os.getenv("SHARD_SIZE", "500"))
 START_ROW = SHARD_INDEX * SHARD_SIZE
 END_ROW = START_ROW + SHARD_SIZE
 
-# Zerodha API credentials - Read from GitHub secrets / environment variables
-API_KEY = os.getenv("ZERODHA_API_KEY", "your_api_key_here")
-ACCESS_TOKEN = os.getenv("ZERODHA_ACCESS_TOKEN", "your_daily_access_token_here")
+# Updated variable configurations
+API_KEY = os.getenv("API_KEY", "your_api_key_here")
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN", "your_daily_access_token_here")
 
 # ---------------- GOOGLE SHEETS ---------------- #
 def connect_sheets():
@@ -36,7 +36,7 @@ def connect_sheets():
 try:
     sheet_source, sheet_target = connect_sheets()
     
-    # Read headers to locate dynamic column mappings dynamically
+    # Read headers to locate dynamic column mappings
     headers = [h.strip().lower() for h in sheet_source.row_values(1)]
     
     # Match the specified column: 'symbol'
@@ -60,8 +60,9 @@ try:
     # Fetch Instrument Master once to dynamically map symbols to Instrument Tokens
     log("🔄 Downloading Zerodha Instrument Master...")
     instruments = kite.instruments("NSE")
-    # Map layout: {'20MICRONS': 356865, 'INFY': 408065, ...}
-    token_map = {inst['tradingsymbol']: inst['instrument_token'] for inst in instruments}
+    
+    # Robust map layout handling spaces/stripping cleanly
+    token_map = {inst['tradingsymbol'].strip().upper(): inst['instrument_token'] for inst in instruments}
     log("✅ Instrument Master processed successfully.")
 except Exception as kite_err:
     log(f"❌ Zerodha Client Configuration Error: {kite_err}")
@@ -81,7 +82,7 @@ total_rows = len(symbol_list)
 start_idx = max(1, START_ROW)
 end_idx = min(END_ROW, total_rows)
 
-# Pre-calculate the historical window (Kite allows up to 60 continuous days of 1-minute data in a single call)
+# Pre-calculate the historical window (Kite allows up to 60 days of 1-minute data)
 to_date = datetime.now()
 from_date = to_date - timedelta(days=30)
 
@@ -90,11 +91,11 @@ for i in range(start_idx, end_idx):
         break
         
     raw_symbol = symbol_list[i].strip()
-    if not raw_symbol:
+    if not raw_symbol or raw_symbol.lower() == "symbol":
         continue
 
-    # Clean the symbol name (Kite requires pure tradingsymbol without exchange extensions like '.NS')
-    trading_symbol = raw_symbol.replace(".NS", "").replace(".BSE", "").strip()
+    # Clean symbol variations reliably (.NS, .BSE, whitespaces)
+    trading_symbol = raw_symbol.split('.')[0].strip().upper()
     
     # Lookup the symbol's numeric token inside our compiled map dictionary
     instrument_token = token_map.get(trading_symbol)
@@ -104,7 +105,6 @@ for i in range(start_idx, end_idx):
         continue
     
     log(f"🔄 Processing row [{i+1}/{total_rows}] — Symbol: {trading_symbol} (Token: {instrument_token})")
-    log(f"   Downloading last 30 days of 1m candle data from Zerodha...")
     
     try:
         # Fetching historical candles from Zerodha API
@@ -121,20 +121,21 @@ for i in range(start_idx, end_idx):
             
         df = pd.DataFrame(records)
         
-        # Format and convert dataframes into simple row arrays for Google Sheets upload
+        # Format and convert dataframes into simple row arrays
         for _, row_data in df.iterrows():
-            # Convert timestamp object to clean readable string format
-            ts = str(row_data['date'])
+            # Stripping timezone details off datetime so Google Sheets formats it nicely as a native timestamp
+            dt_naive = row_data['date'].replace(tzinfo=None) if hasattr(row_data['date'], 'tzinfo') else pd.to_datetime(row_data['date']).replace(tzinfo=None)
+            ts = dt_naive.strftime('%Y-%m-%d %H:%M:%S')
             
             payload_row = [
-                f"{trading_symbol}.NS", # Keeps symbol layout fully identical for your target worksheet 
+                f"{trading_symbol}.NS", 
                 "Last 30 Days", 
                 ts,
                 float(row_data['open']),
                 float(row_data['high']),
                 float(row_data['low']),
                 float(row_data['close']),
-                float(row_data['close']), # Zerodha does not compute standalone 'Adj Close' - map close here
+                float(row_data['close']), 
                 int(row_data['volume'])
             ]
             all_rows_payload.append(payload_row)
@@ -142,17 +143,28 @@ for i in range(start_idx, end_idx):
     except Exception as data_err:
         log(f"   ❌ Error executing Zerodha data fetch for {trading_symbol}: {data_err}")
         
-    # Rate limit buffer: Restricts pacing to safe limits within Kite API ceilings
-    time.sleep(0.5)
+    # Rate limit buffer: Safe pacing window for Kite API
+    time.sleep(0.35)
 
-# Write output records iteratively using efficient multi-row append actions
+# Write output records using safe, chunked upload loops to protect Gspread constraints
 if all_rows_payload:
-    log(f"🚀 Pushing {len(all_rows_payload)} technical rows into Sheet18...")
-    try:
-        sheet_target.append_rows(all_rows_payload, value_input_option="RAW")
-        log("✅ Upload successfully complete.")
-    except Exception as upload_err:
-        log(f"❌ Error uploading metrics array to target worksheet: {upload_err}")
+    total_payload_size = len(all_rows_payload)
+    log(f"🚀 Pushing {total_payload_size} technical rows into Sheet18...")
+    
+    # Split upload into chunks of 30,000 rows to prevent Google API timeouts/payload rejections
+    chunk_size = 30000
+    for chunk_start in range(0, total_payload_size, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, total_payload_size)
+        sub_payload = all_rows_payload[chunk_start:chunk_end]
+        
+        try:
+            sheet_target.append_rows(sub_payload, value_input_option="USER_ENTERED")
+            log(f"   📊 Chunk [{chunk_start}/{total_payload_size}] written successfully.")
+            time.sleep(1) # Small breather between major sheet writes
+        except Exception as upload_err:
+            log(f"   ❌ Error uploading chunk range [{chunk_start}:{chunk_end}]: {upload_err}")
+            
+    log("✅ Upload operation finished.")
 else:
     log("⚠️ No new datasets fetched inside execution window metrics framework.")
 

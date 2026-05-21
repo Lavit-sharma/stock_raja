@@ -1,203 +1,167 @@
-
+import sys
 import os
 import time
 from datetime import datetime, timedelta
-
-import yfinance as yf
 import pandas as pd
+import yfinance as yf
 import gspread
 
-# =========================================
-# DEBUG
-# =========================================
+# ---------------- LOG ---------------- #
+def log(msg):
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
-print("FILE EXISTS:", os.path.exists("credentials.json"))
+# ---------------- CONFIG ---------------- #
+SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
+SHARD_SIZE = int(os.getenv("SHARD_SIZE", "500"))
+START_ROW = SHARD_INDEX * SHARD_SIZE
+END_ROW = START_ROW + SHARD_SIZE
 
-with open("credentials.json", "r") as f:
-    print(f.read()[:300])
+# ---------------- GOOGLE SHEETS ---------------- #
+def connect_sheets():
+    gc = gspread.service_account("credentials.json")
+    
+    # Open the single spreadsheet workbook
+    spreadsheet = gc.open("Tradingview Data Reel Experimental May")
+    
+    sh_source = spreadsheet.worksheet("Sheet5")
+    sh_target = spreadsheet.worksheet("Sheet18")
+    
+    return sh_source, sh_target
 
-# =========================================
-# GOOGLE SHEETS
-# =========================================
-
-gc = gspread.service_account(
-    filename="credentials.json"
-)
-
-sheet = gc.open("STOCKLIST 2").worksheet("Sheet1")
-
-print("✅ Sheet Connected")
-
-# =========================================
-# READ ALL DATA
-# =========================================
-
-rows = sheet.get_all_records()
-
-# =========================================
-# START COLUMN
-# =========================================
-
-START_COL = 11  # K
-
-# =========================================
-# CLEAR OLD OUTPUT
-# =========================================
-
-sheet.batch_clear(["K:ZZ"])
-
-# =========================================
-# PROCESS EACH SYMBOL
-# =========================================
-
-for idx, row in enumerate(rows):
-
-    try:
-
-        # =========================================
-        # SYMBOL
-        # =========================================
-
-        symbol = str(row["symbol"]).strip()
-
-        if not symbol:
+def parse_date(date_str):
+    """Normalizes various common sheet date formats into YYYY-MM-DD."""
+    if not date_str:
+        return None
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(date_str.strip(), fmt)
+        except ValueError:
             continue
+    return None
 
-        # =========================================
-        # DATES
-        # =========================================
+def get_next_day_string(dt_obj):
+    """Returns the next day as a string, required for yfinance end date boundary."""
+    next_day = dt_obj + timedelta(days=1)
+    return next_day.strftime("%Y-%m-%d")
 
-        date1 = str(row["date1"]).strip()
-        date2 = str(row["date2"]).strip()
+# ---------------- MAIN ---------------- #
+try:
+    sheet_source, sheet_target = connect_sheets()
+    
+    # Read headers to locate dynamic column mappings dynamically
+    headers = [h.strip().lower() for h in sheet_source.row_values(1)]
+    
+    # Match the specified columns: 'symbol', 'date1', and 'date2'
+    symbol_col_idx = headers.index("symbol") + 1 if "symbol" in headers else 1
+    date1_col_idx = headers.index("date1") + 1 if "date1" in headers else 7
+    date2_col_idx = headers.index("date2") + 1 if "date2" in headers else 8
+    
+    # Extract column values
+    symbol_list = sheet_source.col_values(symbol_col_idx)
+    date1_list = sheet_source.col_values(date1_col_idx)
+    date2_list = sheet_source.col_values(date2_col_idx)
 
-        print(f"\n========================")
-        print(f"Processing: {symbol}")
-        print(f"Date1: {date1}")
-        print(f"Date2: {date2}")
+    log(f"✅ Sheets mapped successfully. Columns found -> Symbol: Col {symbol_col_idx}, Date1: Col {date1_col_idx}, Date2: Col {date2_col_idx}")
 
-        # =========================================
-        # BASE ROW
-        # =========================================
+except Exception as e:
+    log(f"❌ Initialization/Sheet Reading error: {e}")
+    sys.exit(1)
 
-        base_row = (idx * 500) + 1
+# Prepare target headers on Sheet18 if it's brand new/empty
+try:
+    if not sheet_target.row_values(1):
+        sheet_target.append_row(["Symbol", "Target Date Label", "Datetime", "Open", "High", "Low", "Close", "Adj Close", "Volume"])
+except Exception as e:
+    log(f"⚠️ Header setup warning: {e}")
 
-        # =========================================
-        # DOWNLOAD FUNCTION
-        # =========================================
+all_rows_payload = []
 
-        def process_date(target_date, start_row, title):
+# Process rows within shard boundaries (skipping header row 0 in index calculation)
+total_rows = len(symbol_list)
+start_idx = max(1, START_ROW)
+end_idx = min(END_ROW, total_rows)
 
-            if not target_date:
-                return
+for i in range(start_idx, end_idx):
+    if i >= len(symbol_list):
+        break
+        
+    raw_symbol = symbol_list[i].strip()
+    if not raw_symbol:
+        continue
 
-            print(f"\nDownloading {title}")
-
-            # =========================================
-            # DATE CONVERT
-            # =========================================
-
-            start_date = datetime.strptime(
-                target_date,
-                "%Y-%m-%d"
-            )
-
-            end_date = start_date + timedelta(days=1)
-
-            # =========================================
-            # DOWNLOAD
-            # =========================================
-
+    # Format symbol safely for Yahoo Finance (NSE requires .NS suffix)
+    stock_symbol = raw_symbol if raw_symbol.endswith(".NS") else f"{raw_symbol}.NS"
+    
+    # Extract corresponding raw target dates
+    raw_d1 = date1_list[i] if i < len(date1_list) else ""
+    raw_d2 = date2_list[i] if i < len(date2_list) else ""
+    
+    target_dates = [("Date1", parse_date(raw_d1)), ("Date2", parse_date(raw_d2))]
+    
+    log(f"🔄 Processing row [{i+1}/{total_rows}] — Symbol: {stock_symbol}")
+    
+    for label, dt_obj in target_dates:
+        if dt_obj is None:
+            log(f"   ⚠️ Missing or invalid format for {label}, skipping.")
+            continue
+            
+        start_str = dt_obj.strftime("%Y-%m-%d")
+        end_str = get_next_day_string(dt_obj)
+        
+        log(f"   Downloading 1m data for {stock_symbol} on {start_str} ({label})...")
+        
+        try:
             df = yf.download(
-                tickers=symbol,
+                tickers=stock_symbol,
+                start=start_str,
+                end=end_str,
                 interval="1m",
-                start=start_date.strftime("%Y-%m-%d"),
-                end=end_date.strftime("%Y-%m-%d"),
                 progress=False
             )
-
-            # =========================================
-            # EMPTY CHECK
-            # =========================================
-
+            
             if df.empty:
-                print(f"No data found for {symbol}")
-                return
-
-            # =========================================
-            # RESET INDEX
-            # =========================================
-
+                log(f"   ❌ No 1m data available for {stock_symbol} on {start_str} (Likely >30 days old or holiday)")
+                continue
+                
+            # Flatten multi-index columns if generated by modern yfinance versions
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+                
             df.reset_index(inplace=True)
+            
+            # Format and convert dataframes into simple row arrays for Google Sheets upload
+            for _, row_data in df.iterrows():
+                # Convert timestamp object to readable string format
+                ts = str(row_data['Datetime'])
+                
+                payload_row = [
+                    stock_symbol,
+                    label, # Tracking notation label ("Date1" or "Date2")
+                    ts,
+                    float(row_data['Open']),
+                    float(row_data['High']),
+                    float(row_data['Low']),
+                    float(row_data['Close']),
+                    float(row_data['Adj Close']) if 'Adj Close' in row_data else float(row_data['Close']),
+                    int(row_data['Volume'])
+                ]
+                all_rows_payload.append(payload_row)
+                
+        except Exception as data_err:
+            log(f"   ❌ Error executing yfinance fetch for {stock_symbol} [{label}]: {data_err}")
+            
+    # Regular safe intervals to avoid aggressive pooling rate limits
+    time.sleep(1)
 
-            # =========================================
-            # REQUIRED COLUMNS ONLY
-            # =========================================
+# Write output records iteratively using efficient multi-row append actions
+if all_rows_payload:
+    log(f"🚀 Pushing {len(all_rows_payload)} technical rows into Sheet18...")
+    try:
+        sheet_target.append_rows(all_rows_payload, value_input_option="RAW")
+        log("✅ Upload successfully complete.")
+    except Exception as upload_err:
+        log(f"❌ Error uploading metrics array to target worksheet: {upload_err}")
+else:
+    log("⚠️ No new datasets fetched inside execution window metrics framework.")
 
-            df = df[[
-                "Datetime",
-                "Close",
-                "Volume"
-            ]]
-
-            # =========================================
-            # PREPARE VALUES
-            # =========================================
-
-            values = []
-
-            values.append([
-                f"{symbol} - {title} - {target_date}"
-            ])
-
-            values.append([
-                "Datetime",
-                "Close",
-                "Volume"
-            ])
-
-            for _, r in df.iterrows():
-
-                values.append([
-                    str(r["Datetime"]),
-                    float(r["Close"]),
-                    int(r["Volume"])
-                ])
-
-            # =========================================
-            # STORE IN SHEET
-            # =========================================
-
-            sheet.update(
-                f"K{start_row}",
-                values
-            )
-
-            print(f"Stored {title}")
-
-        # =========================================
-        # DATE1
-        # =========================================
-
-        process_date(
-            date1,
-            base_row,
-            "DATE1"
-        )
-
-        # =========================================
-        # DATE2
-        # =========================================
-
-        process_date(
-            date2,
-            base_row + 220,
-            "DATE2"
-        )
-
-        time.sleep(2)
-
-    except Exception as e:
-
-        print(f"\n❌ ERROR: {e}")
-
-print("\n✅ DONE")
+log("🏁 DONE")

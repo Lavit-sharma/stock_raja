@@ -152,8 +152,4 @@ if all_rows_payload:
         sheet_target.append_rows(all_rows_payload, value_input_option="RAW")
         log("✅ Upload successfully complete.")
     except Exception as upload_err:
-        log(f"❌ Error uploading metrics array to target worksheet: {upload_err}")
-else:
-    log("⚠️ No new datasets fetched inside execution window metrics framework.")
-
-log("🏁 DONE")
+        log(f"❌ Error uploading metrics: {upload_err}")

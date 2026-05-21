@@ -1,4 +1,4 @@
-```python
+
 import sys
 import os
 import time
@@ -324,4 +324,3 @@ if all_rows_payload:
 
 else:
     log("⚠️ No candle data collected.")
-```

@@ -1,108 +1,37 @@
-
-name: T1 (Shards 0–4)
+name: dhan download
 
 on:
   workflow_dispatch:
 
 jobs:
-  scrape:
-
+  download-data:
     runs-on: ubuntu-latest
 
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-
-      matrix:
-        shard: [0, 1, 2, 3, 4]
-
-    env:
-      SHARD_STEP: 20
-
     steps:
-
-      # =========================================
-      # CHECKOUT
-      # =========================================
-
       - uses: actions/checkout@v4
-
-      # =========================================
-      # PYTHON
-      # =========================================
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      # =========================================
-      # SYSTEM DEPENDENCIES
-      # =========================================
-
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-
-          sudo apt-get install -y \
-            libnss3 \
-            libxi6 \
-            libgbm1 \
-            libasound2t64
-
-      # =========================================
-      # PYTHON PACKAGES
-      # =========================================
+          python-version: '3.10'
 
       - name: Install Python Packages
         run: |
+          pip install --upgrade pip
+          pip install yfinance pandas gspread
 
-          pip install yfinance
-          pip install pandas
-          pip install gspread
-          pip install oauth2client
-          pip install google-auth
-
-      # =========================================
-      # CREATE credentials.json
-      # =========================================
-
+      # ✅ Proper JSON writing for Google Sheets API authentication
       - name: Create credentials.json
         run: |
-          printf "%s" '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+          printf "%s" '${{ secrets.GSPREAD_CREDENTIALS }}' > credentials.json
 
-      # =========================================
-      # DEBUG
-      # =========================================
-
-      - name: Debug credentials.json
+      # ✅ Optional debug (Safely logs start of authentication parameters)
+      - name: Debug Environment
         run: |
-          echo "===== credentials.json ====="
+          echo "---- credentials.json profile head ----"
           head -n 5 credentials.json
 
-      # =========================================
-      # CHECKPOINT FILE
-      # =========================================
-
-      - name: Create checkpoint file
-        run: |
-          FILE="checkpoint_group1_${{ matrix.shard }}.txt"
-
-          if [ ! -f "$FILE" ]; then
-            echo "0" > "$FILE"
-          fi
-
-      # =========================================
-      # RUN SCRIPT
-      # =========================================
-
-      - name: Run Python Script
-
+      - name: Run Intraday Data Downloader
         env:
-          SHARD_INDEX: ${{ matrix.shard }}
-          CHECKPOINT_FILE: checkpoint_group1_${{ matrix.shard }}.txt
           PYTHONUNBUFFERED: "1"
-
-        run: |
-          python dhan.py
-
+        run: python run_scraper.py

@@ -1,158 +1,327 @@
+```python
 import sys
 import os
 import time
 from datetime import datetime, timedelta
+
 import pandas as pd
-from kiteconnect import KiteConnect
-from kiteconnect.exceptions import TokenException, NetworkException, RateLimitException
 import gspread
 
-# ---------------- LOGGING UTILITY ---------------- #
+from kiteconnect import KiteConnect
+from kiteconnect.exceptions import (
+    TokenException,
+    NetworkException,
+    InputException,
+    DataException
+)
+
+# =========================================================
+# LOGGING
+# =========================================================
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ---------------- CONFIGURATION & ENVIRONMENT ---------------- #
+
+# =========================================================
+# SHARD CONFIGURATION
+# =========================================================
 SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
 SHARD_SIZE = int(os.getenv("SHARD_SIZE", "500"))
+
 START_ROW = SHARD_INDEX * SHARD_SIZE
 END_ROW = START_ROW + SHARD_SIZE
 
-# Zerodha API Credentials - Safely read from environment setups
-API_KEY = os.getenv("ZERODHA_API_KEY", "1n0kjsoryxh6wed1")
-ACCESS_TOKEN = os.getenv("ZERODHA_ACCESS_TOKEN", "6R11kEjLTeo9su1E1iwwv4IU5FjvTgPv")
 
-# ---------------- GOOGLE SHEETS CONNECTOR ---------------- #
+# =========================================================
+# ZERODHA CREDENTIALS (FROM GITHUB SECRETS)
+# =========================================================
+API_KEY = os.getenv("ZERODHA_API_KEY")
+ACCESS_TOKEN = os.getenv("ZERODHA_ACCESS_TOKEN")
+
+if not API_KEY:
+    raise Exception("❌ Missing GitHub Secret: ZERODHA_API_KEY")
+
+if not ACCESS_TOKEN:
+    raise Exception("❌ Missing GitHub Secret: ZERODHA_ACCESS_TOKEN")
+
+
+# =========================================================
+# GOOGLE SHEETS CONNECTION
+# =========================================================
 def connect_sheets():
     try:
         gc = gspread.service_account("credentials.json")
-        spreadsheet = gc.open("Tradingview Data Reel Experimental May")
-        sh_source = spreadsheet.worksheet("Sheet5")
-        sh_target = spreadsheet.worksheet("Sheet18")
-        return sh_source, sh_target
+
+        spreadsheet = gc.open(
+            "Tradingview Data Reel Experimental May"
+        )
+
+        source_sheet = spreadsheet.worksheet("Sheet5")
+        target_sheet = spreadsheet.worksheet("Sheet18")
+
+        return source_sheet, target_sheet
+
     except Exception as e:
-        log(f"❌ Critical Google Sheets Connection Error: {e}")
+        log(f"❌ Google Sheets Connection Failed: {e}")
         sys.exit(1)
 
-# ---------------- MAIN EXECUTION ENGINE ---------------- #
-# 1. Initialize Google Sheets
+
+# =========================================================
+# CONNECT SHEETS
+# =========================================================
 sheet_source, sheet_target = connect_sheets()
 
+
+# =========================================================
+# READ SYMBOLS
+# =========================================================
 try:
-    headers = [h.strip().lower() for h in sheet_source.row_values(1)]
-    symbol_col_idx = headers.index("symbol") + 1 if "symbol" in headers else 1
+    headers = [
+        h.strip().lower()
+        for h in sheet_source.row_values(1)
+    ]
+
+    symbol_col_idx = (
+        headers.index("symbol") + 1
+        if "symbol" in headers
+        else 1
+    )
+
     symbol_list = sheet_source.col_values(symbol_col_idx)
-    log(f"✅ Sheets mapped successfully. Symbol target detected in Column: {symbol_col_idx}")
-except Exception as sheet_err:
-    log(f"❌ Failed to parse source sheets data: {sheet_err}")
+
+    log(
+        f"✅ Sheets mapped successfully. "
+        f"Symbol column found -> Col {symbol_col_idx}"
+    )
+
+except Exception as e:
+    log(f"❌ Failed parsing source sheet: {e}")
     sys.exit(1)
 
-# 2. Initialize Kite Connect Client
+
+# =========================================================
+# INITIALIZE ZERODHA
+# =========================================================
 try:
-    # Enabled debug output to verify low-level payload responses
-    kite = KiteConnect(api_key=API_KEY, debug=True)
+    kite = KiteConnect(api_key=API_KEY)
+
     kite.set_access_token(ACCESS_TOKEN)
-    log("✅ Zerodha KiteConnect Session Instance loaded.")
-    
-    log("🔄 Pulling primary Instrument Master maps from Exchange...")
+
+    log("✅ Zerodha KiteConnect Session initialized.")
+
+    log("🔄 Downloading Zerodha Instrument Master...")
+
     instruments = kite.instruments("NSE")
-    token_map = {inst['tradingsymbol']: inst['instrument_token'] for inst in instruments}
-    log("✅ Instrument Master parsed successfully.")
-except TokenException as auth_err:
-    log(f"🛑 Terminating: Your current API token setup is missing core scope permissions or expired. Error: {auth_err}")
-    sys.exit(1)
-except Exception as init_err:
-    log(f"❌ Unexpected Broker Configuration error: {init_err}")
+
+    token_map = {
+        inst["tradingsymbol"]: inst["instrument_token"]
+        for inst in instruments
+    }
+
+    log("✅ Instrument Master processed successfully.")
+
+except TokenException as e:
+    log(f"❌ Invalid or expired access token: {e}")
     sys.exit(1)
 
-# 3. Setup Target Header Schema
+except Exception as e:
+    log(f"❌ Zerodha initialization failed: {e}")
+    sys.exit(1)
+
+
+# =========================================================
+# CREATE TARGET HEADER IF EMPTY
+# =========================================================
 try:
     if not sheet_target.row_values(1):
-        sheet_target.append_row(["Symbol", "Target Date Label", "Datetime", "Open", "High", "Low", "Close", "Adj Close", "Volume"])
+
+        sheet_target.append_row([
+            "Symbol",
+            "Target Date Label",
+            "Datetime",
+            "Open",
+            "High",
+            "Low",
+            "Close",
+            "Adj Close",
+            "Volume"
+        ])
+
 except Exception as e:
-    log(f"⚠️ Target sheet header initialization bypass: {e}")
+    log(f"⚠️ Header initialization skipped: {e}")
 
-all_rows_payload = []
-total_rows = len(symbol_list)
-start_idx = max(1, START_ROW)
-end_idx = min(END_ROW, total_rows)
 
-# Precompute target range (Max 30 days window)
+# =========================================================
+# DATE RANGE
+# =========================================================
 to_date = datetime.now()
 from_date = to_date - timedelta(days=30)
 
-# 4. Engine Scraper Pipeline Loop
+
+# =========================================================
+# SCRAPER LOOP
+# =========================================================
+all_rows_payload = []
+
+total_rows = len(symbol_list)
+
+start_idx = max(1, START_ROW)
+end_idx = min(END_ROW, total_rows)
+
+
 for i in range(start_idx, end_idx):
+
     if i >= len(symbol_list):
         break
-        
+
     raw_symbol = symbol_list[i].strip()
+
     if not raw_symbol:
         continue
 
-    # Clean ticker configurations
-    trading_symbol = raw_symbol.replace(".NS", "").replace(".BSE", "").strip()
+    trading_symbol = (
+        raw_symbol
+        .replace(".NS", "")
+        .replace(".BSE", "")
+        .strip()
+    )
+
     instrument_token = token_map.get(trading_symbol)
-    
+
     if not instrument_token:
-        log(f"⚠️ Ticker '{trading_symbol}' was not located in active NSE masters. Skipping.")
+        log(
+            f"⚠️ Symbol not found in NSE instruments: "
+            f"{trading_symbol}"
+        )
         continue
-        
-    log(f"🔄 [{i+1}/{total_rows}] Scrape Request -> Ticker: {trading_symbol} | Token Identifier: {instrument_token}")
-    
+
+    log(
+        f"🔄 Processing row [{i+1}/{total_rows}] "
+        f"— Symbol: {trading_symbol} "
+        f"(Token: {instrument_token})"
+    )
+
     retries = 3
+
     while retries > 0:
+
         try:
+            log(
+                "   Downloading last 30 days "
+                "of 1m candle data from Zerodha..."
+            )
+
             records = kite.historical_data(
                 instrument_token=instrument_token,
                 from_date=from_date,
                 to_date=to_date,
                 interval="minute"
             )
-            
+
             if not records:
-                log(f"   ⚠️ Request structural warning: Empty bars returned for {trading_symbol}.")
+                log(
+                    f"   ⚠️ No candle data returned "
+                    f"for {trading_symbol}"
+                )
                 break
-                
+
             df = pd.DataFrame(records)
-            for _, row_data in df.iterrows():
+
+            for _, row in df.iterrows():
+
                 all_rows_payload.append([
                     f"{trading_symbol}.NS",
                     "Last 30 Days",
-                    str(row_data['date']),
-                    float(row_data['open']),
-                    float(row_data['high']),
-                    float(row_data['low']),
-                    float(row_data['close']),
-                    float(row_data['close']), # Fallback mapping configuration
-                    int(row_data['volume'])
+                    str(row["date"]),
+                    float(row["open"]),
+                    float(row["high"]),
+                    float(row["low"]),
+                    float(row["close"]),
+                    float(row["close"]),
+                    int(row["volume"])
                 ])
-            break  # Break retry loop on successful execution
-            
-        except TokenException as token_fail:
-            log(f"🛑 Critical Authentication Exception: Historical endpoints rejected API Token scopes. Execution Terminated -> {token_fail}")
-            sys.exit(1)
-        except RateLimitException:
-            log("   ⚠️ Throttled: Zerodha Rate-limit threshold hit. Cooling down engine execution pipeline...")
-            time.sleep(5)
-            retries -= 1
-        except NetworkException:
-            log("   ⚠️ Network dropout detected. Re-attempting execution bridge connection...")
-            time.sleep(2)
-            retries -= 1
-        except Exception as query_err:
-            log(f"   ❌ Execution failure on fetching symbol {trading_symbol}: {query_err}")
+
+            log(
+                f"   ✅ Successfully fetched "
+                f"{len(df)} candles"
+            )
+
             break
-            
-    # Regular spacing buffer to avoid exceeding 3 calls/sec constraints
+
+        except TokenException as e:
+            log(
+                f"   ❌ Invalid API Key or Access Token: {e}"
+            )
+            sys.exit(1)
+
+        except (InputException, DataException) as e:
+
+            err = str(e).lower()
+
+            if "rate" in err or "limit" in err:
+
+                log(
+                    "   ⚠️ Rate limit hit. "
+                    "Sleeping for 5 seconds..."
+                )
+
+                time.sleep(5)
+
+                retries -= 1
+
+            else:
+                log(
+                    f"   ❌ Zerodha query failed "
+                    f"for {trading_symbol}: {e}"
+                )
+                break
+
+        except NetworkException:
+
+            log(
+                "   ⚠️ Network issue detected. "
+                "Retrying..."
+            )
+
+            time.sleep(2)
+
+            retries -= 1
+
+        except Exception as e:
+
+            log(
+                f"   ❌ Error executing Zerodha "
+                f"data fetch for {trading_symbol}: {e}"
+            )
+
+            break
+
+    # Zerodha allows max ~3 req/sec
     time.sleep(0.4)
 
-# 5. Flush Payload Cache to Target Sheet 
+
+# =========================================================
+# PUSH TO GOOGLE SHEETS
+# =========================================================
 if all_rows_payload:
-    log(f"🚀 Pushing payload block ({len(all_rows_payload)} records) down to Sheet18...")
+
+    log(
+        f"🚀 Uploading {len(all_rows_payload)} "
+        f"records to Sheet18..."
+    )
+
     try:
-        sheet_target.append_rows(all_rows_payload, value_input_option="RAW")
-        log("✅ Scrape run transaction completed successfully.")
-    except Exception as commit_err:
-        log(f"❌ Sheet push operations tracking failed: {commit_err}")
+        sheet_target.append_rows(
+            all_rows_payload,
+            value_input_option="RAW"
+        )
+
+        log("✅ Data upload completed successfully.")
+
+    except Exception as e:
+
+        log(f"❌ Google Sheets upload failed: {e}")
+
 else:
-    log("⚠️ Operational sequence notice: No fresh candle records saved during this batch execution loop cycle.")
+    log("⚠️ No candle data collected.")
+```

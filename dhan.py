@@ -2,7 +2,7 @@
 import sys
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pandas as pd
 import gspread
@@ -33,7 +33,7 @@ END_ROW = START_ROW + SHARD_SIZE
 
 
 # =========================================================
-# ZERODHA CREDENTIALS (FROM GITHUB SECRETS)
+# ZERODHA CREDENTIALS
 # =========================================================
 API_KEY = os.getenv("ZERODHA_API_KEY")
 ACCESS_TOKEN = os.getenv("ZERODHA_ACCESS_TOKEN")
@@ -49,6 +49,7 @@ if not ACCESS_TOKEN:
 # GOOGLE SHEETS CONNECTION
 # =========================================================
 def connect_sheets():
+
     try:
         gc = gspread.service_account("credentials.json")
 
@@ -62,6 +63,7 @@ def connect_sheets():
         return source_sheet, target_sheet
 
     except Exception as e:
+
         log(f"❌ Google Sheets Connection Failed: {e}")
         sys.exit(1)
 
@@ -73,29 +75,17 @@ sheet_source, sheet_target = connect_sheets()
 
 
 # =========================================================
-# READ SYMBOLS
+# LOAD SOURCE DATA
 # =========================================================
 try:
-    headers = [
-        h.strip().lower()
-        for h in sheet_source.row_values(1)
-    ]
 
-    symbol_col_idx = (
-        headers.index("symbol") + 1
-        if "symbol" in headers
-        else 1
-    )
+    all_data = sheet_source.get_all_records()
 
-    symbol_list = sheet_source.col_values(symbol_col_idx)
-
-    log(
-        f"✅ Sheets mapped successfully. "
-        f"Symbol column found -> Col {symbol_col_idx}"
-    )
+    log("✅ Source sheet loaded successfully.")
 
 except Exception as e:
-    log(f"❌ Failed parsing source sheet: {e}")
+
+    log(f"❌ Failed loading source sheet: {e}")
     sys.exit(1)
 
 
@@ -103,6 +93,7 @@ except Exception as e:
 # INITIALIZE ZERODHA
 # =========================================================
 try:
+
     kite = KiteConnect(api_key=API_KEY)
 
     kite.set_access_token(ACCESS_TOKEN)
@@ -121,23 +112,27 @@ try:
     log("✅ Instrument Master processed successfully.")
 
 except TokenException as e:
+
     log(f"❌ Invalid or expired access token: {e}")
     sys.exit(1)
 
 except Exception as e:
+
     log(f"❌ Zerodha initialization failed: {e}")
     sys.exit(1)
 
 
 # =========================================================
-# CREATE TARGET HEADER IF EMPTY
+# CREATE TARGET HEADER
 # =========================================================
 try:
+
     if not sheet_target.row_values(1):
 
         sheet_target.append_row([
             "Symbol",
-            "Target Date Label",
+            "Source Date Label",
+            "Requested Date",
             "Datetime",
             "Open",
             "High",
@@ -148,33 +143,28 @@ try:
         ])
 
 except Exception as e:
+
     log(f"⚠️ Header initialization skipped: {e}")
 
 
 # =========================================================
-# DATE RANGE
-# =========================================================
-to_date = datetime.now()
-from_date = to_date - timedelta(days=30)
-
-
-# =========================================================
-# SCRAPER LOOP
+# MAIN SCRAPER LOOP
 # =========================================================
 all_rows_payload = []
 
-total_rows = len(symbol_list)
+total_rows = len(all_data)
 
-start_idx = max(1, START_ROW)
+start_idx = max(0, START_ROW)
 end_idx = min(END_ROW, total_rows)
 
 
 for i in range(start_idx, end_idx):
 
-    if i >= len(symbol_list):
-        break
+    row = all_data[i]
 
-    raw_symbol = symbol_list[i].strip()
+    raw_symbol = str(
+        row.get("symbol", "")
+    ).strip()
 
     if not raw_symbol:
         continue
@@ -189,115 +179,181 @@ for i in range(start_idx, end_idx):
     instrument_token = token_map.get(trading_symbol)
 
     if not instrument_token:
+
         log(
             f"⚠️ Symbol not found in NSE instruments: "
             f"{trading_symbol}"
         )
+
         continue
 
-    log(
-        f"🔄 Processing row [{i+1}/{total_rows}] "
-        f"— Symbol: {trading_symbol} "
-        f"(Token: {instrument_token})"
-    )
+    # =====================================================
+    # FETCH DATE1 + DATE2
+    # =====================================================
+    dates_to_fetch = [
 
-    retries = 3
+        ("date1", row.get("date1")),
 
-    while retries > 0:
+        ("date2", row.get("date2"))
+
+    ]
+
+    for date_label, raw_date in dates_to_fetch:
+
+        if not raw_date:
+            continue
 
         try:
+
+            target_date = datetime.strptime(
+                str(raw_date),
+                "%Y-%m-%d"
+            )
+
+        except Exception:
+
             log(
-                "   Downloading last 30 days "
-                "of 1m candle data from Zerodha..."
+                f"⚠️ Invalid date format for "
+                f"{trading_symbol}: {raw_date}"
             )
 
-            records = kite.historical_data(
-                instrument_token=instrument_token,
-                from_date=from_date,
-                to_date=to_date,
-                interval="minute"
-            )
+            continue
 
-            if not records:
+        from_date = target_date.replace(
+            hour=0,
+            minute=0,
+            second=0
+        )
+
+        to_date = target_date.replace(
+            hour=23,
+            minute=59,
+            second=59
+        )
+
+        log(
+            f"🔄 Processing row [{i+1}/{total_rows}] "
+            f"— Symbol: {trading_symbol} "
+            f"| {date_label}: {raw_date}"
+        )
+
+        retries = 3
+
+        while retries > 0:
+
+            try:
+
                 log(
-                    f"   ⚠️ No candle data returned "
-                    f"for {trading_symbol}"
+                    f"   Downloading 1m candles for "
+                    f"{raw_date}..."
                 )
+
+                records = kite.historical_data(
+                    instrument_token=instrument_token,
+                    from_date=from_date,
+                    to_date=to_date,
+                    interval="minute"
+                )
+
+                if not records:
+
+                    log(
+                        f"   ⚠️ No candle data returned "
+                        f"for {trading_symbol}"
+                    )
+
+                    break
+
+                df = pd.DataFrame(records)
+
+                for _, candle in df.iterrows():
+
+                    all_rows_payload.append([
+
+                        f"{trading_symbol}.NS",
+
+                        date_label,
+
+                        raw_date,
+
+                        str(candle["date"]),
+
+                        float(candle["open"]),
+
+                        float(candle["high"]),
+
+                        float(candle["low"]),
+
+                        float(candle["close"]),
+
+                        float(candle["close"]),
+
+                        int(candle["volume"])
+
+                    ])
+
+                log(
+                    f"   ✅ Successfully fetched "
+                    f"{len(df)} candles"
+                )
+
                 break
 
-            df = pd.DataFrame(records)
-
-            for _, row in df.iterrows():
-
-                all_rows_payload.append([
-                    f"{trading_symbol}.NS",
-                    "Last 30 Days",
-                    str(row["date"]),
-                    float(row["open"]),
-                    float(row["high"]),
-                    float(row["low"]),
-                    float(row["close"]),
-                    float(row["close"]),
-                    int(row["volume"])
-                ])
-
-            log(
-                f"   ✅ Successfully fetched "
-                f"{len(df)} candles"
-            )
-
-            break
-
-        except TokenException as e:
-            log(
-                f"   ❌ Invalid API Key or Access Token: {e}"
-            )
-            sys.exit(1)
-
-        except (InputException, DataException) as e:
-
-            err = str(e).lower()
-
-            if "rate" in err or "limit" in err:
+            except TokenException as e:
 
                 log(
-                    "   ⚠️ Rate limit hit. "
-                    "Sleeping for 5 seconds..."
+                    f"❌ Invalid API Key "
+                    f"or Access Token: {e}"
                 )
 
-                time.sleep(5)
+                sys.exit(1)
+
+            except (InputException, DataException) as e:
+
+                err = str(e).lower()
+
+                if "rate" in err or "limit" in err:
+
+                    log(
+                        "⚠️ Rate limit hit. "
+                        "Sleeping for 5 seconds..."
+                    )
+
+                    time.sleep(5)
+
+                    retries -= 1
+
+                else:
+
+                    log(
+                        f"❌ Zerodha query failed "
+                        f"for {trading_symbol}: {e}"
+                    )
+
+                    break
+
+            except NetworkException:
+
+                log(
+                    "⚠️ Network issue detected. "
+                    "Retrying..."
+                )
+
+                time.sleep(2)
 
                 retries -= 1
 
-            else:
+            except Exception as e:
+
                 log(
-                    f"   ❌ Zerodha query failed "
-                    f"for {trading_symbol}: {e}"
+                    f"❌ Error fetching "
+                    f"{trading_symbol}: {e}"
                 )
+
                 break
 
-        except NetworkException:
-
-            log(
-                "   ⚠️ Network issue detected. "
-                "Retrying..."
-            )
-
-            time.sleep(2)
-
-            retries -= 1
-
-        except Exception as e:
-
-            log(
-                f"   ❌ Error executing Zerodha "
-                f"data fetch for {trading_symbol}: {e}"
-            )
-
-            break
-
-    # Zerodha allows max ~3 req/sec
-    time.sleep(0.4)
+        # Zerodha safe throttle
+        time.sleep(0.4)
 
 
 # =========================================================
@@ -306,11 +362,13 @@ for i in range(start_idx, end_idx):
 if all_rows_payload:
 
     log(
-        f"🚀 Uploading {len(all_rows_payload)} "
-        f"records to Sheet18..."
+        f"🚀 Uploading "
+        f"{len(all_rows_payload)} rows "
+        f"to Sheet18..."
     )
 
     try:
+
         sheet_target.append_rows(
             all_rows_payload,
             value_input_option="RAW"
@@ -323,4 +381,6 @@ if all_rows_payload:
         log(f"❌ Google Sheets upload failed: {e}")
 
 else:
+
     log("⚠️ No candle data collected.")
+

@@ -34,4 +34,4 @@ jobs:
       - name: Run Intraday Data Downloader
         env:
           PYTHONUNBUFFERED: "1"
-        run: python run_scraper.py
+        run: python dhan.py

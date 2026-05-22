@@ -216,11 +216,19 @@ def main():
         # ---------------- COMPACT FILTER ---------------- #
         compact_filter_df = df_mv2[
             (
-                df_mv2["MXMN"].apply(safe_float) < 30
+                df_mv2["MXMN_low"].apply(safe_float) == 1
             )
             &
             (
-                df_mv2["D_CL_AB"].apply(safe_int) == 1
+                df_mv2["D_CL_AB"].apply(safe_float) > 1
+            )
+            &
+            (
+                df_mv2["D_CL_AB"].apply(safe_float) < 1.10
+            )
+            &
+            (
+                df_mv2["MXMN"].apply(safe_float) < 30
             )
         ]
 

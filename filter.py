@@ -224,7 +224,7 @@ def main():
             )
             &
             (
-                df_mv2["D_CL_AB"].apply(safe_float) < 1.10
+                df_mv2["D_CL_AB"].apply(safe_float) < 1.03
             )
             &
             (

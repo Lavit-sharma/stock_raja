@@ -65,7 +65,7 @@ def connect_sheets():
         )
 
         source_sheet = spreadsheet.worksheet(
-            "Sheet5"
+            "Sheet20"
         )
 
         target_sheet = spreadsheet.worksheet(

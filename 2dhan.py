@@ -51,7 +51,7 @@ def connect_sheets():
         )
 
         spreadsheet = gc.open(
-            "ML DATA"
+            "ML DATA "
         )
 
         target_sheet = spreadsheet.worksheet(

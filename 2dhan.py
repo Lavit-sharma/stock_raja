@@ -51,11 +51,11 @@ def connect_sheets():
         )
 
         spreadsheet = gc.open(
-            "Tradingview Data Reel Experimental May"
+            "ML DATA"
         )
 
         target_sheet = spreadsheet.worksheet(
-            "Sheet5"
+            "Sheet1"
         )
 
         return target_sheet

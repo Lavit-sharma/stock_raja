@@ -1,4 +1,3 @@
-
 import sys
 import os
 import time
@@ -144,6 +143,36 @@ if not instrument_token:
 
 
 # =========================================================
+# FETCH REAL-TIME MARKET DEPTH
+# =========================================================
+log(f"🔄 Fetching live Market Depth for NSE:{trading_symbol}...")
+bid_prices = [0.0] * 5
+bid_quantities = [0] * 5
+ask_prices = [0.0] * 5
+ask_quantities = [0] * 5
+
+try:
+    # Fetching live quote which includes the top 5 levels of market depth
+    quote_res = kite.quote(f"NSE:{trading_symbol}")
+    depth = quote_res.get(f"NSE:{trading_symbol}", {}).get("depth", {})
+    
+    buys = depth.get("buy", [])
+    sells = depth.get("sell", [])
+    
+    for i in range(5):
+        if i < len(buys):
+            bid_prices[i] = float(buys[i].get("price", 0.0))
+            bid_quantities[i] = int(buys[i].get("quantity", 0))
+        if i < len(sells):
+            ask_prices[i] = float(sells[i].get("price", 0.0))
+            ask_quantities[i] = int(sells[i].get("quantity", 0))
+            
+    log("✅ Live Market Depth captured successfully.")
+except Exception as e:
+    log(f"⚠️ Market depth fetch failed (Defaulting fields to 0): {e}")
+
+
+# =========================================================
 # CLEAR OLD SHEET DATA
 # =========================================================
 try:
@@ -155,7 +184,9 @@ try:
         "Symbol",
         "Datetime",
         "Close",
-        "Volume"
+        "Volume",
+        "Bid1_Px", "Bid1_Qty", "Bid2_Px", "Bid2_Qty", "Bid3_Px", "Bid3_Qty", "Bid4_Px", "Bid4_Qty", "Bid5_Px", "Bid5_Qty",
+        "Ask1_Px", "Ask1_Qty", "Ask2_Px", "Ask2_Qty", "Ask3_Px", "Ask3_Qty", "Ask4_Px", "Ask4_Qty", "Ask5_Px", "Ask5_Qty"
 
     ])
 
@@ -245,7 +276,15 @@ for day in range(100):
 
                     float(candle["close"]),
 
-                    int(candle["volume"])
+                    int(candle["volume"]),
+                    
+                    # Append market depth parameters to every row
+                    bid_prices[0], bid_quantities[0], bid_prices[1], bid_quantities[1], 
+                    bid_prices[2], bid_quantities[2], bid_prices[3], bid_quantities[3], 
+                    bid_prices[4], bid_quantities[4],
+                    ask_prices[0], ask_quantities[0], ask_prices[1], ask_quantities[1], 
+                    ask_prices[2], ask_quantities[2], ask_prices[3], ask_quantities[3], 
+                    ask_prices[4], ask_quantities[4]
 
                 ])
 
@@ -372,4 +411,3 @@ except Exception as e:
 log(
     "✅ Script execution completed."
 )
-

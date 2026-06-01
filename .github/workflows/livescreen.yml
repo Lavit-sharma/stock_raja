@@ -5,14 +5,21 @@ on:
   push:
     branches:
       - main        # Triggers one run immediately when you push/add this file
-  schedule:
-    - cron: "30 4 * * 1-5"    # 9:30 AM IST - Market Open
-    - cron: "0 5 * * 1-5"     # 10:30 AM IST
-    - cron: "0 6 * * 1-5"     # 11:30 AM IST
-    - cron: "0 7 * * 1-5"     # 12:30 PM IST
-    - cron: "0 8 * * 1-5"     # 1:30 PM IST
-    - cron: "0 9 * * 1-5"     # 2:30 PM IST
-    - cron: "0 10 * * 1-5"    # 3:30 PM IST - Market Close
+schedule:
+  - cron: "30 4 * * 1-5"    # 9:30 AM IST
+  - cron: "0 5 * * 1-5"     # 10:30 AM IST
+  - cron: "0 6 * * 1-5"     # 11:30 AM IST
+  - cron: "0 7 * * 1-5"     # 12:30 PM IST
+  - cron: "0 8 * * 1-5"     # 1:30 PM IST
+  - cron: "0 9 * * 1-5"     # 2:30 PM IST
+  - cron: "0 10 * * 1-5"    # 3:30 PM IST
+  - cron: "0 11 * * 1-5"    # 4:30 PM IST
+  - cron: "0 12 * * 1-5"    # 5:30 PM IST
+  - cron: "0 13 * * 1-5"    # 6:30 PM IST
+  - cron: "0 14 * * 1-5"    # 7:30 PM IST
+  - cron: "0 15 * * 1-5"    # 8:30 PM IST
+  - cron: "0 16 * * 1-5"    # 9:30 PM IST
+  - cron: "0 17 * * 1-5"    # 10:30 PM IST
 
 jobs:
   run-bot:

@@ -1,11 +1,8 @@
 name: Hello World Test
-
 on:
   workflow_dispatch:
-
   schedule:
-    - cron: "20 9 * * *"   # 2:50 PM IST
-
+    - cron: "10 15 * * *"   # 8:40 PM IST
 jobs:
   hello:
     runs-on: ubuntu-22.04

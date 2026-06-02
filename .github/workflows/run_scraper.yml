@@ -3,9 +3,9 @@ name: Run Stock Chart Scraper
 on:
   # Allows manual execution anytime from the GitHub Actions tab
   workflow_dispatch:
-  # Automatically runs every day at 12:50 PM IST (07:20 UTC)
+  # Automatically runs every day at 1:30 PM IST (08:00 UTC)
   schedule:
-    - cron: '25 7 * * *'
+    - cron: '30 8 * * *'
 
 jobs:
   scrape:
@@ -22,13 +22,9 @@ jobs:
         cache: 'pip'
 
     - name: Install Google Chrome Browser
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y wget curl unzip
-        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-        sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
-        sudo apt-get update
-        sudo apt-get install -y google-chrome-stable
+      uses: browser-actions/setup-chrome@v2
+      with:
+        chrome-version: stable
 
     - name: Install Python Dependencies
       run: |

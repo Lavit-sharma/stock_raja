@@ -4,8 +4,7 @@ on:
   # Allows manual execution anytime from the GitHub Actions tab
   workflow_dispatch:
   # Automatically runs every day at 1:30 PM IST (08:00 UTC)
-  schedule:
-    - cron: '30 8 * * *'
+
 
 jobs:
   scrape:

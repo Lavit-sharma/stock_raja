@@ -1,408 +1,439 @@
-import osimport timeimport jsonimport gspreadimport pandas as pdimport mysql.connector
+import os
+import time
+import json
+import gspread
+import pandas as pd
+import mysql.connector
 
-from selenium import webdriverfrom selenium.webdriver.chrome.service import Servicefrom selenium.webdriver.chrome.options import Optionsfrom selenium.webdriver.common.by import Byfrom selenium.webdriver.support.ui import WebDriverWaitfrom selenium.webdriver.support import expected_conditions as ECfrom webdriver_manager.chrome import ChromeDriverManager
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 
----------------- CONFIG ----------------
-
-STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"STOCK_LIST_GID = 1400370843MV2_SQL_URL = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skcBi1OFtaK8h1905oZOc/edit"
+# ---------------- CONFIG ---------------- #
+STOCK_LIST_URL = "https://docs.google.com/spreadsheets/d/1V8DsH-R3vdUbXqDKZYWHk_8T0VRjqTEVyj7PhlIDtG4/edit#gid=0"
+STOCK_LIST_GID = 1400370843
+MV2_SQL_URL = "https://docs.google.com/spreadsheets/d/1G5Bl7GssgJdk-TBDr1eWn4skcBi1OFtaK8h1905oZOc/edit"
 
 TARGET_TABLE = "filter"
 
-DB_CONFIG = {"host": os.getenv("DB_HOST"),"user": os.getenv("DB_USER"),"password": os.getenv("DB_PASSWORD"),"database": os.getenv("DB_NAME"),}
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "database": os.getenv("DB_NAME"),
+}
 
-CHART_WAIT_SEC = 30POST_LOAD_SLEEP = 5DB_RETRY = 3MAX_DAY_TO_KEEP = 4
+CHART_WAIT_SEC = 30
+POST_LOAD_SLEEP = 5
+DB_RETRY = 3
+MAX_DAY_TO_KEEP = 4
 
----------------- HELPERS ----------------
+# ---------------- HELPERS ---------------- #
+def log(msg):
+    print(msg, flush=True)
 
-def log(msg):print(msg, flush=True)
+def safe_int(v):
+    try:
+        if v is None or str(v).strip() == "" or str(v).lower() == "nan":
+            return -1
+        return int(float(str(v).strip()))
+    except (ValueError, TypeError):
+        return -1
 
-def safe_int(v):try:if v is None or str(v).strip() == "" or str(v).lower() == "nan":return -1return int(float(str(v).strip()))except (ValueError, TypeError):return -1
-
-def safe_float(v):try:if v is None or str(v).strip() == "" or str(v).lower() == "nan":return 0.0return float(str(v).strip())except (ValueError, TypeError):return 0.0
+def safe_float(v):
+    try:
+        if v is None or str(v).strip() == "" or str(v).lower() == "nan":
+            return 0.0
+        return float(str(v).strip())
+    except (ValueError, TypeError):
+        return 0.0
 
 def fix_duplicate_columns(df):
 
-cols = pd.Series(df.columns)
+    cols = pd.Series(df.columns)
 
-for dup in cols[cols.duplicated()].unique():
+    for dup in cols[cols.duplicated()].unique():
 
-    cols[cols[cols == dup].index.values.tolist()] = [
-        f"{dup}_{i}" if i != 0 else dup
-        for i in range(sum(cols == dup))
-    ]
+        cols[cols[cols == dup].index.values.tolist()] = [
+            f"{dup}_{i}" if i != 0 else dup
+            for i in range(sum(cols == dup))
+        ]
 
-df.columns = cols
+    df.columns = cols
 
-return df
+    return df
 
----------------- DB CLASS ----------------
-
+# ---------------- DB CLASS ---------------- #
 class DB:
 
-def __init__(self, config):
+    def __init__(self, config):
 
-    self.config = config
-    self.conn = None
+        self.config = config
+        self.conn = None
 
-    self.connect()
+        self.connect()
 
-def connect(self):
+    def connect(self):
 
-    if self.conn:
+        if self.conn:
 
-        try:
+            try:
+                self.conn.close()
+            except:
+                pass
+
+        self.conn = mysql.connector.connect(**self.config)
+        self.conn.autocommit = True
+
+        return self.conn
+
+    def ensure(self):
+
+        if not self.conn or not self.conn.is_connected():
+            return self.connect()
+
+        return self.conn
+
+    def close(self):
+
+        if self.conn:
             self.conn.close()
-        except:
-            pass
 
-    self.conn = mysql.connector.connect(**self.config)
-    self.conn.autocommit = True
-
-    return self.conn
-
-def ensure(self):
-
-    if not self.conn or not self.conn.is_connected():
-        return self.connect()
-
-    return self.conn
-
-def close(self):
-
-    if self.conn:
-        self.conn.close()
-
----------------- CORE LOGIC ----------------
-
+# ---------------- CORE LOGIC ---------------- #
 def roll_days_forward(db: DB):
 
-for attempt in range(DB_RETRY):
+    for attempt in range(DB_RETRY):
 
-    try:
+        try:
 
-        conn = db.ensure()
-        cur = conn.cursor()
+            conn = db.ensure()
+            cur = conn.cursor()
 
-        cur.execute(
-            f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 1"
-        )
+            cur.execute(
+                f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 1"
+            )
 
-        cur.execute(
-            f"""
-            DELETE FROM `{TARGET_TABLE}`
-            WHERE `day` > %s
-            AND LOWER(TRIM(COALESCE(`review_status`, ''))) = 'rejected'
-            """,
-            (MAX_DAY_TO_KEEP,)
-        )
+            cur.execute(
+                f"""
+                DELETE FROM `{TARGET_TABLE}`
+                WHERE `day` > %s
+                AND LOWER(TRIM(COALESCE(`review_status`, ''))) = 'rejected'
+                """,
+                (MAX_DAY_TO_KEEP,)
+            )
 
-        log("✅ Rollover successful.")
+            log("✅ Rollover successful.")
 
-        cur.close()
+            cur.close()
 
-        return
+            return
 
-    except Exception as e:
+        except Exception as e:
 
-        log(f"⚠️ Rollover retry {attempt + 1}: {e}")
+            log(f"⚠️ Rollover retry {attempt + 1}: {e}")
 
-        db.connect()
+            db.connect()
 
-        time.sleep(1)
+            time.sleep(1)
 
 def get_driver():
 
-opts = Options()
+    opts = Options()
 
-opts.add_argument("--headless=new")
-opts.add_argument("--no-sandbox")
-opts.add_argument("--disable-dev-shm-usage")
-opts.add_argument("--window-size=1920,1080")
-opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
 
-return webdriver.Chrome(
-    service=Service(ChromeDriverManager().install()),
-    options=opts
-)
+    return webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=opts
+    )
 
 def main():
 
-db = DB(DB_CONFIG)
-driver = None
+    db = DB(DB_CONFIG)
+    driver = None
 
-try:
+    try:
 
-    roll_days_forward(db)
+        roll_days_forward(db)
 
-    # ---------------- LOAD DATA ---------------- #
-    creds = os.getenv("GSPREAD_CREDENTIALS")
+        # ---------------- LOAD DATA ---------------- #
+        creds = os.getenv("GSPREAD_CREDENTIALS")
 
-    client = gspread.service_account_from_dict(
-        json.loads(creds)
-    )
+        client = gspread.service_account_from_dict(
+            json.loads(creds)
+        )
 
-    mv2_sheet = client.open_by_url(
-        MV2_SQL_URL
-    ).sheet1.get_all_values()
+        mv2_sheet = client.open_by_url(
+            MV2_SQL_URL
+        ).sheet1.get_all_values()
 
-    df_mv2 = pd.DataFrame(
-        mv2_sheet[1:],
-        columns=[c.strip() for c in mv2_sheet[0]]
-    )
+        df_mv2 = pd.DataFrame(
+            mv2_sheet[1:],
+            columns=[c.strip() for c in mv2_sheet[0]]
+        )
 
-    df_mv2 = fix_duplicate_columns(df_mv2)
+        df_mv2 = fix_duplicate_columns(df_mv2)
 
-    stock_ws = client.open_by_url(
-        STOCK_LIST_URL
-    ).get_worksheet_by_id(
-        STOCK_LIST_GID
-    ).get_all_values()
+        stock_ws = client.open_by_url(
+            STOCK_LIST_URL
+        ).get_worksheet_by_id(
+            STOCK_LIST_GID
+        ).get_all_values()
 
-    url_map = {
-        row[0].strip(): {
-            "week": row[2].strip(),
-            "day": row[3].strip()
+        url_map = {
+            row[0].strip(): {
+                "week": row[2].strip(),
+                "day": row[3].strip()
+            }
+            for row in stock_ws[1:]
+            if row and row[0].strip()
         }
-        for row in stock_ws[1:]
-        if row and row[0].strip()
-    }
 
-    # ---------------- FILTER PROCESSING ---------------- #
-    cols_to_fix = [
-        "D_Trigger",
-        "D_Trigger_S"
-    ]
+        # ---------------- FILTER PROCESSING ---------------- #
+        cols_to_fix = [
+            "D_Trigger",
+            "D_Trigger_S"
+        ]
 
-    for col in cols_to_fix:
+        for col in cols_to_fix:
 
-        if col in df_mv2.columns:
+            if col in df_mv2.columns:
 
-            df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
+                df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
 
-        else:
+            else:
 
-            df_mv2[f"{col}_n"] = -1
+                df_mv2[f"{col}_n"] = -1
 
-    # ---------------- COMPACT FILTER ---------------- #
-    compact_filter_df = df_mv2[
-        (
-            df_mv2["MXMN_low"].apply(safe_float) == 1
-        )
-        &
-        (
-            df_mv2["D_CL_AB"].apply(safe_float) > 1
-        )
-        &
-        (
-            df_mv2["D_CL_AB"].apply(safe_float) < 1.03
-        )
-        &
-        (
-            df_mv2["MXMN"].apply(safe_float) < 30
-        )
-    ]
-
-    # ---------------- TRIGGERS ---------------- #
-    triggers = {
-
-        "D_Trigger": df_mv2[
-            df_mv2["D_Trigger_n"] == 0
-        ],
-
-        "D_Trigger_S": df_mv2[
+        # ---------------- COMPACT FILTER ---------------- #
+        compact_filter_df = df_mv2[
             (
-                df_mv2["D_Trigger_S_n"] == 0
+                df_mv2["MXMN_low"].apply(safe_float) == 1
             )
             &
             (
-                df_mv2["D_Trigger_S_n"]
-                !=
-                df_mv2["D_Trigger_n"]
+                df_mv2["D_CL_AB"].apply(safe_float) > 1
             )
-        ],
+            &
+            (
+                df_mv2["D_CL_AB"].apply(safe_float) < 1.03
+            )
+            &
+            (
+                df_mv2["MXMN"].apply(safe_float) < 30
+            )
+        ]
 
-        "Compact_Filter": compact_filter_df
-    }
+        # ---------------- TRIGGERS ---------------- #
+        triggers = {
 
-    # ---------------- DEBUG LOGS ---------------- #
-    for name, d_sub in triggers.items():
+            "D_Trigger": df_mv2[
+                df_mv2["D_Trigger_n"] == 0
+            ],
 
-        symbols_found = d_sub.iloc[:, 0].astype(str).tolist()
+            "D_Trigger_S": df_mv2[
+                (
+                    df_mv2["D_Trigger_S_n"] == 0
+                )
+                &
+                (
+                    df_mv2["D_Trigger_S_n"]
+                    !=
+                    df_mv2["D_Trigger_n"]
+                )
+            ],
 
-        log(
-            f"🔍 Filter Check: {name} | "
-            f"Found: {len(d_sub)} | "
-            f"Symbols: {', '.join(symbols_found) if symbols_found else 'None'}"
-        )
+            "Compact_Filter": compact_filter_df
+        }
 
-    # ---------------- SETUP BROWSER ---------------- #
-    driver = get_driver()
+        # ---------------- DEBUG LOGS ---------------- #
+        for name, d_sub in triggers.items():
 
-    cookie_data = os.getenv("TRADINGVIEW_COOKIES")
+            symbols_found = d_sub.iloc[:, 0].astype(str).tolist()
 
-    if cookie_data:
+            log(
+                f"🔍 Filter Check: {name} | "
+                f"Found: {len(d_sub)} | "
+                f"Symbols: {', '.join(symbols_found) if symbols_found else 'None'}"
+            )
 
-        driver.get("https://www.tradingview.com/")
+        # ---------------- SETUP BROWSER ---------------- #
+        driver = get_driver()
 
-        for c in json.loads(cookie_data):
+        cookie_data = os.getenv("TRADINGVIEW_COOKIES")
 
-            try:
+        if cookie_data:
 
-                driver.add_cookie({
-                    "name": c["name"],
-                    "value": c["value"],
-                    "domain": ".tradingview.com",
-                    "path": "/"
-                })
+            driver.get("https://www.tradingview.com/")
 
-            except:
-                continue
-
-        driver.refresh()
-
-    # ---------------- EXECUTE SCREENSHOTS ---------------- #
-    for filter_name, matched_df in triggers.items():
-
-        if matched_df.empty:
-            continue
-
-        log(f"🚀 Processing {filter_name}...")
-
-        for _, row in matched_df.iterrows():
-
-            symbol = str(row.iloc[0]).strip()
-
-            urls = url_map.get(symbol)
-
-            if not urls:
-                continue
-
-            for tf in ["day", "week"]:
-
-                url = urls.get(tf)
-
-                if not url or "tradingview.com" not in url:
-                    continue
+            for c in json.loads(cookie_data):
 
                 try:
 
-                    driver.get(url)
+                    driver.add_cookie({
+                        "name": c["name"],
+                        "value": c["value"],
+                        "domain": ".tradingview.com",
+                        "path": "/"
+                    })
 
-                    chart = WebDriverWait(
-                        driver,
-                        CHART_WAIT_SEC
-                    ).until(
-                        EC.visibility_of_element_located(
-                            (
-                                By.XPATH,
-                                "//div[contains(@class,'chart-container')]"
+                except:
+                    continue
+
+            driver.refresh()
+
+        # ---------------- EXECUTE SCREENSHOTS ---------------- #
+        for filter_name, matched_df in triggers.items():
+
+            if matched_df.empty:
+                continue
+
+            log(f"🚀 Processing {filter_name}...")
+
+            for _, row in matched_df.iterrows():
+
+                symbol = str(row.iloc[0]).strip()
+
+                urls = url_map.get(symbol)
+
+                if not urls:
+                    continue
+
+                for tf in ["day", "week"]:
+
+                    url = urls.get(tf)
+
+                    if not url or "tradingview.com" not in url:
+                        continue
+
+                    try:
+
+                        driver.get(url)
+
+                        chart = WebDriverWait(
+                            driver,
+                            CHART_WAIT_SEC
+                        ).until(
+                            EC.visibility_of_element_located(
+                                (
+                                    By.XPATH,
+                                    "//div[contains(@class,'chart-container')]"
+                                )
                             )
                         )
-                    )
-
-                    log(
-                        f"    ⏳ Waiting {POST_LOAD_SLEEP}s "
-                        f"for late popups: {symbol} ({tf})..."
-                    )
-
-                    time.sleep(POST_LOAD_SLEEP)
-
-                    # ---------------- REMOVE POPUPS ---------------- #
-                    was_removed = driver.execute_script("""
-
-                        var found = false;
-
-                        var popups = document.querySelectorAll(
-                            '[class*="overlap-manager-root"], \
-                            [class*="modal-"], \
-                            [class*="dialog-"], \
-                            [class*="backdrops-"]'
-                        );
-
-                        if (popups.length > 0) {
-
-                            popups.forEach(function(p) {
-                                p.remove();
-                            });
-
-                            found = true;
-                        }
-
-                        document.body.style.overflow = 'auto';
-                        document.body.style.position = 'static';
-
-                        var chartElem = document.querySelector(
-                            '.chart-container-border'
-                        );
-
-                        if(chartElem) {
-                            chartElem.click();
-                        }
-
-                        return found;
-
-                    """)
-
-                    if was_removed:
 
                         log(
-                            f"    🧹 Popup detected and removed "
-                            f"for {symbol} ({tf})"
+                            f"    ⏳ Waiting {POST_LOAD_SLEEP}s "
+                            f"for late popups: {symbol} ({tf})..."
                         )
 
-                    else:
+                        time.sleep(POST_LOAD_SLEEP)
 
-                        log(
-                            f"    ✨ No popups found "
-                            f"for {symbol} ({tf})"
+                        # ---------------- REMOVE POPUPS ---------------- #
+                        was_removed = driver.execute_script("""
+
+                            var found = false;
+
+                            var popups = document.querySelectorAll(
+                                '[class*="overlap-manager-root"], \
+                                [class*="modal-"], \
+                                [class*="dialog-"], \
+                                [class*="backdrops-"]'
+                            );
+
+                            if (popups.length > 0) {
+
+                                popups.forEach(function(p) {
+                                    p.remove();
+                                });
+
+                                found = true;
+                            }
+
+                            document.body.style.overflow = 'auto';
+                            document.body.style.position = 'static';
+
+                            var chartElem = document.querySelector(
+                                '.chart-container-border'
+                            );
+
+                            if(chartElem) {
+                                chartElem.click();
+                            }
+
+                            return found;
+
+                        """)
+
+                        if was_removed:
+
+                            log(
+                                f"    🧹 Popup detected and removed "
+                                f"for {symbol} ({tf})"
+                            )
+
+                        else:
+
+                            log(
+                                f"    ✨ No popups found "
+                                f"for {symbol} ({tf})"
+                            )
+
+                        time.sleep(1)
+
+                        img = chart.screenshot_as_png
+
+                        conn = db.ensure()
+                        cur = conn.cursor()
+
+                        cur.execute(
+                            f"""
+                            INSERT INTO `{TARGET_TABLE}`
+                            (
+                                symbol,
+                                timeframe,
+                                filter_type,
+                                day,
+                                screenshot
+                            )
+                            VALUES (%s, %s, %s, 0, %s)
+                            """,
+                            (
+                                symbol,
+                                tf,
+                                filter_name,
+                                img
+                            )
                         )
 
-                    time.sleep(1)
+                        cur.close()
 
-                    img = chart.screenshot_as_png
+                        log(f"    ✅ Saved {symbol} ({tf})")
 
-                    conn = db.ensure()
-                    cur = conn.cursor()
+                    except Exception as e:
 
-                    cur.execute(
-                        f"""
-                        INSERT INTO `{TARGET_TABLE}`
-                        (
-                            symbol,
-                            timeframe,
-                            filter_type,
-                            day,
-                            screenshot
-                        )
-                        VALUES (%s, %s, %s, 0, %s)
-                        """,
-                        (
-                            symbol,
-                            tf,
-                            filter_name,
-                            img
-                        )
-                    )
+                        log(f"    ❌ Error {symbol} {tf}: {e}")
 
-                    cur.close()
+        log("🏁 Execution Finished.")
 
-                    log(f"    ✅ Saved {symbol} ({tf})")
+    except Exception as e:
 
-                except Exception as e:
+        log(f"❌ Fatal: {e}")
 
-                    log(f"    ❌ Error {symbol} {tf}: {e}")
+    finally:
 
-    log("🏁 Execution Finished.")
+        if driver:
+            driver.quit()
 
-except Exception as e:
+        db.close()
 
-    log(f"❌ Fatal: {e}")
-
-finally:
-
-    if driver:
-        driver.quit()
-
-    db.close()
-
-if name == "main":main()
+if __name__ == "__main__":
+    main()

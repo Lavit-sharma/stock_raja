@@ -156,11 +156,14 @@ def main():
         creds = os.getenv("GSPREAD_CREDENTIALS")
         client = gspread.service_account_from_dict(json.loads(creds))
 
+        log("📊 Fetching sheet data from Google Drive...")
         mv2_sheet = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
         df_mv2 = pd.DataFrame(mv2_sheet[1:], columns=[c.strip() for c in mv2_sheet[0]])
         df_mv2 = fix_duplicate_columns(df_mv2)
+        log(f"📋 Loaded {len(df_mv2)} total source rows from MV2 SQL Sheet.")
 
         stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID).get_all_values()
+        log(f"📋 Loaded {len(stock_ws) - 1} mapping records from Stock List Sheet.")
 
         url_map = {
             row[0].strip(): {
@@ -195,19 +198,27 @@ def main():
         }
 
         # ---------------- DEBUG LOGS ---------------- #
+        log("--- FILTER MATCH SUMMARY ---")
+        total_unique_symbols = set()
         for name, d_sub in triggers.items():
-            symbols_found = d_sub.iloc[:, 0].astype(str).tolist()
+            symbols_found = d_sub.iloc[:, 0].astype(str).str.strip().tolist()
+            symbols_found = [s for s in symbols_found if s and s.lower() != 'nan']
+            total_unique_symbols.update(symbols_found)
+            
             log(
-                f"🔍 Filter Check: {name} | "
-                f"Found: {len(d_sub)} | "
+                f"🔍 Filter: {name:<15} | "
+                f"Count: {len(d_sub):<3} | "
                 f"Symbols: {', '.join(symbols_found) if symbols_found else 'None'}"
             )
+        log(f"⭐ Total Unique Target Symbols Across All Filters: {len(total_unique_symbols)}")
+        log("----------------------------")
 
         # ---------------- SETUP BROWSER ---------------- #
         driver = get_driver()
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
 
         if cookie_data:
+            log("🍪 Injecting TradingView session cookies...")
             driver.get("https://www.tradingview.com/")
             for c in json.loads(cookie_data):
                 try:
@@ -224,23 +235,27 @@ def main():
         # ---------------- EXECUTE SCREENSHOTS ---------------- #
         for filter_name, matched_df in triggers.items():
             if matched_df.empty:
+                log(f"⏭️ Skipping {filter_name} (0 items to process)")
                 continue
 
-            log(f"🚀 Processing {filter_name}...")
+            log(f"🚀 Processing {filter_name} ({len(matched_df)} assets)...")
 
             for _, row in matched_df.iterrows():
                 symbol = str(row.iloc[0]).strip()
                 urls = url_map.get(symbol)
 
                 if not urls:
+                    log(f"⚠️ Skipping symbol [{symbol}]: No matching URL configuration found in Stock List.")
                     continue
 
                 for tf in ["day", "week"]:
                     url = urls.get(tf)
                     if not url or "tradingview.com" not in url:
+                        log(f"⚠️ Skipping [{symbol}] ({tf}): Invalid or missing URL context.")
                         continue
 
                     try:
+                        log(f"🌐 Navigating to [{symbol}] ({tf}) chart...")
                         driver.get(url)
                         chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
                             EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
@@ -286,17 +301,18 @@ def main():
                         insert_params = (symbol, tf, filter_name, img)
                         
                         db.execute_update(insert_query, insert_params)
-                        log(f"    ✅ Saved {symbol} ({tf})")
+                        log(f"    ✅ Saved {symbol} ({tf}) successfully into DB.")
 
                     except Exception as e:
-                        log(f"    ❌ Error {symbol} {tf}: {e}")
+                        log(f"    ❌ Error capturing/saving [{symbol}] ({tf}): {e}")
 
         log("🏁 Execution Finished.")
 
     except Exception as e:
-        log(f"❌ Fatal: {e}")
+        log(f"❌ Fatal Error: {e}")
     finally:
         if driver:
+            log("🔌 Shutting down headless browser driver...")
             driver.quit()
         db.close()
 

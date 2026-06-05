@@ -49,7 +49,7 @@ def safe_float(v):
     try:
         if v is None or str(v).strip() == "" or str(v).lower() == "nan":
             return 0.0
-        return float(str(v).strip()))
+        return float(str(v).strip())
     except (ValueError, TypeError):
         return 0.0
 

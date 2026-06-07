@@ -2,8 +2,7 @@ name: Filter Screenshot Bot
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "30 13 * * *"
+  
 
 jobs:
   run-bot:

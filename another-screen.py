@@ -59,76 +59,90 @@ def save_to_db(symbol, timeframe, img_data, chart_date):
         cursor.close()
         return True
     except Exception as e:
-        print(f"❌ DB Error for {symbol}: {e}")
+        print(f"❌ DB Error for {symbol} ({timeframe}): {e}")
         return False
     finally:
         if conn and conn.is_connected():
             conn.close()
 
 def process_row(row):
-    """Handles logic using headers: Symbol, Day (URL), and dates."""
+    """Handles logic using exact headers: Symbol, Week, Day, and dates."""
     # Strip whitespace from keys to prevent 'KeyError' from hidden spaces in Sheet
     clean_row = {str(k).strip(): v for k, v in row.items()}
     
     symbol = str(clean_row.get("Symbol", "")).strip()
-    url = str(clean_row.get("Day", "")).strip()
     target_date = str(clean_row.get("dates", "")).strip()
 
-    if not symbol or "tradingview.com" not in url or not target_date:
-        print(f"⚠️ Skipping {symbol}: Missing URL or Date info.")
+    # Map timeframes directly to your new sheet column headers
+    urls_to_process = {
+        "week": str(clean_row.get("Week", "")).strip(),
+        "day": str(clean_row.get("Day", "")).strip()
+    }
+
+    if not symbol or not target_date:
+        print(f"⚠️ Skipping row: Missing Symbol or dates info.")
         return
 
-    print(f"🚀 Processing: {symbol} | Target Date: {target_date}")
-    driver = get_driver()
-    
-    try:
-        # 1. Login via Cookies
-        driver.get("https://www.tradingview.com/")
-        cookies = json.loads(os.getenv("TRADINGVIEW_COOKIES", "[]"))
-        for c in cookies:
-            try:
-                driver.add_cookie({"name": c["name"], "value": c["value"], "domain": ".tradingview.com", "path": "/"})
-            except: continue
-        
-        # 2. Open Chart
-        driver.get(url)
-        wait = WebDriverWait(driver, 35)
-        
-        # 3. Focus and Go To Date
-        chart_xpath = "//div[contains(@class,'chart-container') or contains(@class,'chart-gui-wrapper')]"
-        chart = wait.until(EC.presence_of_element_located((By.XPATH, chart_xpath)))
-        ActionChains(driver).move_to_element(chart).click().perform()
-        time.sleep(2)
-        
-        # Alt + G Shortcut
-        ActionChains(driver).key_down(Keys.ALT).send_keys("g").key_up(Keys.ALT).perform()
-        
-        # 4. Input the 'dates' value from your sheet
-        input_xpath = "//input[contains(@class,'query') or contains(@class,'input')]"
-        date_input = wait.until(EC.element_to_be_clickable((By.XPATH, input_xpath)))
-        date_input.send_keys(Keys.CONTROL + "a" + Keys.BACKSPACE)
-        time.sleep(0.5)
-        date_input.send_keys(target_date + Keys.ENTER)
-        
-        print(f"📍 Jumped to {target_date} on chart.")
-        time.sleep(12) # Wait for indicators
+    # Loop through both URLs sequentially
+    for timeframe, url in urls_to_process.items():
+        if not url or "tradingview.com" not in url:
+            print(f"⚠️ Skipping {symbol} ({timeframe}): Invalid or missing URL.")
+            continue
 
-        # 5. UI Cleanup
-        driver.execute_script("""
-            document.querySelectorAll('[class*="overlap-"], [class*="modal-"], [class*="dialog-"], .tv-dialog__close').forEach(el => el.remove());
-        """)
-        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-        time.sleep(1)
+        print(f"🚀 Processing: {symbol} | Timeframe: {timeframe} | Target Date: {target_date}")
+        driver = get_driver()
         
-        # 6. Capture and Save
-        img = driver.get_screenshot_as_png()
-        if save_to_db(symbol, "day", img, target_date):
-            print(f"✅ Saved {symbol} for {target_date}")
+        try:
+            # 1. Login via Cookies
+            driver.get("https://www.tradingview.com/")
+            cookies = json.loads(os.getenv("TRADINGVIEW_COOKIES", "[]"))
+            for c in cookies:
+                try:
+                    driver.add_cookie({"name": c["name"], "value": c["value"], "domain": ".tradingview.com", "path": "/"})
+                except: continue
+            
+            # 2. Open Chart (Can be Week or Day URL)
+            driver.get(url)
+            wait = WebDriverWait(driver, 35)
+            
+            # 3. Focus and Go To Date
+            chart_xpath = "//div[contains(@class,'chart-container') or contains(@class,'chart-gui-wrapper')]"
+            chart = wait.until(EC.presence_of_element_located((By.XPATH, chart_xpath)))
+            ActionChains(driver).move_to_element(chart).click().perform()
+            time.sleep(2)
+            
+            # Alt + G Shortcut
+            ActionChains(driver).key_down(Keys.ALT).send_keys("g").key_up(Keys.ALT).perform()
+            
+            # 4. Input the 'dates' value from your sheet
+            input_xpath = "//input[contains(@class,'query') or contains(@class,'input')]"
+            date_input = wait.until(EC.element_to_be_clickable((By.XPATH, input_xpath)))
+            date_input.send_keys(Keys.CONTROL + "a" + Keys.BACKSPACE)
+            time.sleep(0.5)
+            date_input.send_keys(target_date + Keys.ENTER)
+            
+            print(f"📍 Jumped to {target_date} on {timeframe} chart.")
+            time.sleep(12) # Wait for indicators to render
+
+            # 5. UI Cleanup
+            driver.execute_script("""
+                document.querySelectorAll('[class*="overlap-"], [class*="modal-"], [class*="dialog-"], .tv-dialog__close').forEach(el => el.remove());
+            """)
+            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+            time.sleep(1)
+            
+            # 6. Capture and Save
+            img = driver.get_screenshot_as_png()
+            if save_to_db(symbol, timeframe, img, target_date):
+                print(f"✅ Saved {symbol} for {target_date} ({timeframe})")
+            
+        except Exception as e:
+            print(f"❌ Error during {symbol} ({timeframe}): {str(e)[:100]}")
+        finally:
+            driver.quit()
         
-    except Exception as e:
-        print(f"❌ Error during {symbol}: {str(e)[:100]}")
-    finally:
-        driver.quit()
+        # Small delay between processing Week and Day for the same stock
+        time.sleep(2)
 
 def main():
     try:

@@ -1,6 +1,7 @@
 import os
 import time
 import json
+from datetime import datetime
 import gspread
 import mysql.connector
 from selenium import webdriver
@@ -40,10 +41,12 @@ def get_driver():
 def save_to_db(symbol, timeframe, img_data, chart_date):
     """Saves image and the specific date from the sheet to MySQL."""
     if not img_data or len(img_data) < 1000:
+        print(f"⚠️  [DB SAVE] Invalid or empty screenshot data for {symbol} ({timeframe}).")
         return False
         
     conn = None
     try:
+        print(f"🔌  [DB SAVE] Connecting to database to save screenshot for {symbol}...")
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
         query = """
@@ -57,56 +60,53 @@ def save_to_db(symbol, timeframe, img_data, chart_date):
         cursor.execute(query, (symbol, timeframe, img_data, chart_date))
         conn.commit()
         cursor.close()
+        print(f"💾  [DB SAVE] Successfully saved screenshot for {symbol} ({timeframe}) into 'another_screenshot'.")
         return True
     except Exception as e:
-        print(f"❌ DB Error for {symbol} ({timeframe}): {e}")
+        print(f"❌  [DB SAVE ERROR] Failed to save {symbol} ({timeframe}): {e}")
         return False
     finally:
         if conn and conn.is_connected():
             conn.close()
 
-def ensure_column_exists_and_save_total():
+def calculate_and_save_daily_sum():
     """
     Fetches CURR_DQ and D_CLOSE from wp_mv2, multiplies them row-by-row,
-    calculates the grand sum, ensures the destination column exists in wp_live_close,
-    and updates/saves the combined sum into wp_live_close.
+    and upserts the accumulated matrix sum into the closesum table tagged by current date.
     """
+    print("\n" + "="*60)
+    print("🧮  STARTING DAY-WISE VALUE SUMMATION CALCULATION ROUTINE")
+    print("="*60)
+    
+    today_date = datetime.now().strftime('%Y-%m-%d')
+    print(f"📆  Targeting Execution Date: {today_date}")
+    
     conn = None
     try:
+        print("🔌  [DB MATH] Connecting to database...")
         conn = mysql.connector.connect(**DB_CONFIG)
+        print("✅  [DB MATH] Database connected successfully.")
         cursor = conn.cursor(dictionary=True)
 
-        # 1. Ensure the calculation column exists in the target table wp_live_close
-        print("🛠️ Checking/Adding output column in 'wp_live_close'...")
-        try:
-            cursor.execute("""
-                ALTER TABLE wp_live_close 
-                ADD COLUMN total_dq_value VARCHAR(255) NULL DEFAULT NULL
-            """)
-            conn.commit()
-            print("✅ Column 'total_dq_value' successfully added to wp_live_close.")
-        except mysql.connector.Error as err:
-            if err.errno == 1060:  # Duplicate column name error code
-                print("ℹ️ Column 'total_dq_value' already exists.")
-            else:
-                raise err
-
-        # 2. Fetch the target data columns from wp_mv2
-        print("📊 Fetching CURR_DQ and D_CLOSE from wp_mv2...")
+        # 1. Fetch the target data columns from wp_mv2
+        print("📥  [DB MATH] Fetching all rows (Symbol, CURR_DQ, D_CLOSE) from 'wp_mv2' table...")
         cursor.execute("SELECT Symbol, CURR_DQ, D_CLOSE FROM wp_mv2")
         rows = cursor.fetchall()
+        print(f"📋  [DB MATH] Successfully fetched {len(rows)} records from 'wp_mv2'.")
 
         grand_total = 0.0
         processed_count = 0
 
-        # 3. Row-by-Row multiplication and compounding
-        for row in rows:
+        # 2. Row-by-Row multiplication and compounding
+        print("⚙️  [DB MATH] Beginning row-by-row multiplication (CURR_DQ * D_CLOSE)...")
+        for idx, row in enumerate(rows, start=1):
+            symbol = row.get("Symbol", "UNKNOWN")
             curr_dq_str = row.get("CURR_DQ")
             d_close_str = row.get("D_CLOSE")
 
             if curr_dq_str is not None and d_close_str is not None:
                 try:
-                    # Clean strings (remove commas, spaces, etc.) and convert to float
+                    # Clean strings (remove commas, spaces, currency symbols) and convert to float
                     curr_dq = float(str(curr_dq_str).replace(",", "").strip())
                     d_close = float(str(d_close_str).replace(",", "").strip())
                     
@@ -114,30 +114,43 @@ def ensure_column_exists_and_save_total():
                     row_product = curr_dq * d_close
                     grand_total += row_product
                     processed_count += 1
+                    
+                    # Periodic summary logging every 100 rows
+                    if idx % 100 == 0 or idx == len(rows):
+                        print(f"    ↳ Processing row {idx}/{len(rows)} | Current Accumulated Sum: {grand_total:,.2f}")
+                        
                 except ValueError:
-                    # Skipping entries that aren't valid numbers (like empty strings or headers)
+                    # Skip problematic text inputs gracefully
                     continue
+            else:
+                if idx % 500 == 0:
+                    print(f"    ↳ Line item status check: Row {idx}/{len(rows)} processed.")
 
-        print(f"📈 Summed up {processed_count} valid rows. Grand Total Product: {grand_total}")
+        print("-"*60)
+        print(f"📊  [DB MATH SUMMARY] Calculated {processed_count} valid rows successfully.")
+        print(f"💎  [DB MATH SUMMARY] Final Generated Sum Product: {grand_total:,.2f}")
+        print("-"*60)
 
-        # 4. Save the final calculated value to wp_live_close
-        # Using a row lookup or baseline record identifier if applicable. 
-        # Here it updates the global state or first record for simple storage.
+        # 3. Save the final calculated value to closesum table matching today's date
+        print(f"📤  [DB MATH] Upserting daily total value into 'closesum' for date: {today_date}...")
         save_query = """
-            INSERT INTO wp_live_close (id, total_dq_value) 
-            VALUES (1, %s) 
-            ON DUPLICATE KEY UPDATE total_dq_value = VALUES(total_dq_value)
+            INSERT INTO closesum (calculation_date, total_dq_value) 
+            VALUES (%s, %s) 
+            ON DUPLICATE KEY UPDATE 
+                total_dq_value = VALUES(total_dq_value)
         """
-        cursor.execute(save_query, (str(grand_total),))
+        cursor.execute(save_query, (today_date, str(grand_total)))
         conn.commit()
-        print("🚀 Successfully updated the total sum product into wp_live_close!")
+        print(f"🚀  [DB MATH] Successfully processed and recorded metrics for context date {today_date}!")
 
         cursor.close()
     except Exception as e:
-        print(f"❌ Error during Database Math Processing: {e}")
+        print(f"❌  [DB MATH GLOBAL ERROR] Critical failure during execution context: {e}")
     finally:
         if conn and conn.is_connected():
             conn.close()
+            print("🔌  [DB MATH] Closed database connection pipeline safely.")
+    print("="*60 + "\n")
 
 def process_row(row):
     """Handles logic using exact headers: Symbol, Week, Day, and dates."""
@@ -152,15 +165,15 @@ def process_row(row):
     }
 
     if not symbol or not target_date:
-        print(f"⚠️ Skipping row: Missing Symbol or dates info.")
+        print(f"⚠️  [SCRAPER] Skipping Google Sheet Row: Missing tracking configuration criteria (Symbol/Dates).")
         return
 
     for timeframe, url in urls_to_process.items():
         if not url or "tradingview.com" not in url:
-            print(f"⚠️ Skipping {symbol} ({timeframe}): Invalid or missing URL.")
+            print(f"⚠️  [SCRAPER] Skipping {symbol} ({timeframe}): Missing/invalid TradingView reference URL.")
             continue
 
-        print(f"🚀 Processing: {symbol} | Timeframe: {timeframe} | Target Date: {target_date}")
+        print(f"🌐  [SCRAPER] Active Target -> Symbol: {symbol} | Timeframe: {timeframe} | Target Date: {target_date}")
         driver = get_driver()
         
         try:
@@ -187,7 +200,8 @@ def process_row(row):
             time.sleep(0.5)
             date_input.send_keys(target_date + Keys.ENTER)
             
-            print(f"📍 Jumped to {target_date} on {timeframe} chart.")
+            print(f"    📍 Jumped to calendar viewport reference date: {target_date} ({timeframe} chart).")
+            print("    ⏳ Waiting 12 seconds for indicators and historical ticks to render standard assets...")
             time.sleep(12)
 
             driver.execute_script("""
@@ -198,35 +212,44 @@ def process_row(row):
             
             img = driver.get_screenshot_as_png()
             if save_to_db(symbol, timeframe, img, target_date):
-                print(f"✅ Saved {symbol} for {target_date} ({timeframe})")
+                print(f"    ✅ Captured and recorded snapshot for {symbol} successfully.")
             
         except Exception as e:
-            print(f"❌ Error during {symbol} ({timeframe}): {str(e)[:100]}")
+            print(f"❌  [SCRAPER ERROR] Exception hit processing {symbol} ({timeframe}): {str(e)[:100]}")
         finally:
             driver.quit()
         
         time.sleep(2)
 
 def main():
-    # 1. Execute the spreadsheet automation routine
+    print("🏁  [STARTUP] Launching automation script sequence...")
     try:
+        print("📥  [GSPREAD] Accessing workspace credentials payload configuration...")
         creds = json.loads(os.getenv("GSPREAD_CREDENTIALS"))
         gc = gspread.service_account_from_dict(creds)
+        print("📖  [GSPREAD] Pulling records from Google Sheet: 'Stock List' -> Worksheet: 'Weekday'...")
         sh = gc.open("Stock List").worksheet("Weekday")
         rows = sh.get_all_records()
+        print(f"✅  [GSPREAD] Total rows loaded from Google Sheet: {len(rows)}")
     except Exception as e:
-        print(f"❌ Spreadsheet Error: {e}")
+        print(f"❌  [GSPREAD CRITICAL ERROR] Initialization pipeline broken: {e}")
         return
 
     start = int(os.getenv("START_ROW", 0))
     end = int(os.getenv("END_ROW", 500))
     
-    for row in rows[start:end]:
+    print(f"⚙️  [SCHEDULER] Range configured from environment parameters: Row {start} to Row {end}.")
+    
+    # 1. Run automation loop
+    for idx, row in enumerate(rows[start:end], start=start+1):
+        print(f"\n📝  [PROCESS] Handling Data Sheet Segment Entry index #{idx}")
         process_row(row)
         time.sleep(1)
 
-    # 2. Execute database calculation logic once automation finishes
-    ensure_column_exists_and_save_total()
+    print("\n🏁  [SCRAPER COMPLETE] Finished cloud automation processing workspace loop records.")
+
+    # 2. Run the Day-wise calculations using the new closesum table
+    calculate_and_save_daily_sum()
 
 if __name__ == "__main__":
     main()

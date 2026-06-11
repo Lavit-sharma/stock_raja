@@ -2,7 +2,6 @@ name: Filter Screenshot Bot
 
 on:
   workflow_dispatch:
-  
 
 jobs:
   run-bot:
@@ -23,8 +22,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas selenium webdriver-manager gspread mysql-connector-python requests
 
+      - name: Debug Secret Availability
+        run: |
+          echo "Checking if secrets are injected into GitHub Runner..."
+          if [ -z "${{ secrets.DB_HOST }}" ]; then echo "❌ CRITICAL: DB_HOST secret is completely empty or missing in GitHub Settings!"; exit 1; fi
+          if [ -z "${{ secrets.DB_USER }}" ]; then echo "❌ CRITICAL: DB_USER secret is empty!"; exit 1; fi
+          if [ -z "${{ secrets.DB_PASSWORD }}" ]; then echo "❌ CRITICAL: DB_PASSWORD secret is empty!"; exit 1; fi
+          if [ -z "${{ secrets.DB_NAME }}" ]; then echo "❌ CRITICAL: DB_NAME secret is empty!"; exit 1; fi
+          if [ -z "${{ secrets.GSPREAD_CREDENTIALS }}" ]; then echo "❌ CRITICAL: GSPREAD_CREDENTIALS secret is empty!"; exit 1; fi
+          echo "✅ All secrets present in configuration."
+
       - name: Run Filter Script
-        continue-on-error: true
         env:
           TZ: Asia/Kolkata
           DB_HOST: ${{ secrets.DB_HOST }}

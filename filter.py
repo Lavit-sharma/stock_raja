@@ -53,70 +53,68 @@ def safe_float(v):
         return 0.0
 
 def fix_duplicate_columns(df):
-
     cols = pd.Series(df.columns)
-
     for dup in cols[cols.duplicated()].unique():
-
         cols[cols[cols == dup].index.values.tolist()] = [
             f"{dup}_{i}" if i != 0 else dup
             for i in range(sum(cols == dup))
         ]
-
     df.columns = cols
-
     return df
 
 # ---------------- DB CLASS ---------------- #
 class DB:
 
     def __init__(self, config):
-
         self.config = config
         self.conn = None
-
         self.connect()
 
     def connect(self):
-
         if self.conn:
-
             try:
                 self.conn.close()
             except:
                 pass
 
-        self.conn = mysql.connector.connect(**self.config)
-        self.conn.autocommit = True
+        # Check for missing environment values before attempting handshake
+        missing_vars = [k for k, v in self.config.items() if not v]
+        if missing_vars:
+            raise ValueError(f"❌ OS Environment variables missing values: {', '.join(missing_vars)}")
 
-        return self.conn
+        try:
+            self.conn = mysql.connector.connect(**self.config)
+            self.conn.autocommit = True
+            return self.conn
+        except mysql.connector.Error as err:
+            log("=" * 60)
+            log(f"❌ DATABASE CONNECTION ERROR DETAILS:")
+            log(f"   Error Code: {err.errno}")
+            log(f"   SQL State:  {err.sqlstate}")
+            log(f"   Message:    {err.msg}")
+            if err.errno == 2003:
+                log("👉 Tip: Error 2003 means Connection Timed Out. Your database firewall is blocking GitHub Actions.")
+            elif err.errno == 1045:
+                log("👉 Tip: Error 1045 means Access Denied. Your DB_USER or DB_PASSWORD credential string is incorrect.")
+            log("=" * 60)
+            raise err
 
     def ensure(self):
-
         if not self.conn or not self.conn.is_connected():
             return self.connect()
-
         return self.conn
 
     def close(self):
-
         if self.conn:
             self.conn.close()
 
 # ---------------- CORE LOGIC ---------------- #
 def roll_days_forward(db: DB):
-
     for attempt in range(DB_RETRY):
-
         try:
-
             conn = db.ensure()
             cur = conn.cursor()
-
-            cur.execute(
-                f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 1"
-            )
-
+            cur.execute(f"UPDATE `{TARGET_TABLE}` SET `day` = `day` + 1")
             cur.execute(
                 f"""
                 DELETE FROM `{TARGET_TABLE}`
@@ -125,69 +123,46 @@ def roll_days_forward(db: DB):
                 """,
                 (MAX_DAY_TO_KEEP,)
             )
-
             log("✅ Rollover successful.")
-
             cur.close()
-
             return
-
         except Exception as e:
-
             log(f"⚠️ Rollover retry {attempt + 1}: {e}")
-
             db.connect()
-
             time.sleep(1)
 
 def get_driver():
-
     opts = Options()
-
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--disable-blink-features=AutomationControlled")
-
     return webdriver.Chrome(
         service=Service(ChromeDriverManager().install()),
         options=opts
     )
 
 def main():
-
-    db = DB(DB_CONFIG)
-    driver = None
-
     try:
+        db = DB(DB_CONFIG)
+    except Exception as init_err:
+        log(f"❌ Initialization Fatal: {init_err}")
+        return
 
+    driver = None
+    try:
         roll_days_forward(db)
 
         # ---------------- LOAD DATA ---------------- #
         creds = os.getenv("GSPREAD_CREDENTIALS")
+        client = gspread.service_account_from_dict(json.loads(creds))
 
-        client = gspread.service_account_from_dict(
-            json.loads(creds)
-        )
-
-        mv2_sheet = client.open_by_url(
-            MV2_SQL_URL
-        ).sheet1.get_all_values()
-
-        df_mv2 = pd.DataFrame(
-            mv2_sheet[1:],
-            columns=[c.strip() for c in mv2_sheet[0]]
-        )
-
+        mv2_sheet = client.open_by_url(MV2_SQL_URL).sheet1.get_all_values()
+        df_mv2 = pd.DataFrame(mv2_sheet[1:], columns=[c.strip() for c in mv2_sheet[0]])
         df_mv2 = fix_duplicate_columns(df_mv2)
 
-        stock_ws = client.open_by_url(
-            STOCK_LIST_URL
-        ).get_worksheet_by_id(
-            STOCK_LIST_GID
-        ).get_all_values()
-
+        stock_ws = client.open_by_url(STOCK_LIST_URL).get_worksheet_by_id(STOCK_LIST_GID).get_all_values()
         url_map = {
             row[0].strip(): {
                 "week": row[2].strip(),
@@ -198,241 +173,120 @@ def main():
         }
 
         # ---------------- FILTER PROCESSING ---------------- #
-        cols_to_fix = [
-            "D_Trigger",
-            "D_Trigger_S"
-        ]
-
+        cols_to_fix = ["D_Trigger", "D_Trigger_S"]
         for col in cols_to_fix:
-
             if col in df_mv2.columns:
-
                 df_mv2[f"{col}_n"] = df_mv2[col].apply(safe_int)
-
             else:
-
                 df_mv2[f"{col}_n"] = -1
 
         # ---------------- COMPACT FILTER ---------------- #
         compact_filter_df = df_mv2[
-            (
-                df_mv2["MXMN_low"].apply(safe_float) == 1
-            )
-            &
-            (
-                df_mv2["D_CL_AB"].apply(safe_float) > 1
-            )
-            &
-            (
-                df_mv2["D_CL_AB"].apply(safe_float) < 1.03
-            )
-            &
-            (
-                df_mv2["MXMN"].apply(safe_float) < 30
-            )
+            (df_mv2["MXMN_low"].apply(safe_float) == 1) &
+            (df_mv2["D_CL_AB"].apply(safe_float) > 1) &
+            (df_mv2["D_CL_AB"].apply(safe_float) < 1.03) &
+            (df_mv2["MXMN"].apply(safe_float) < 30)
         ]
 
         # ---------------- TRIGGERS ---------------- #
         triggers = {
-
-            "D_Trigger": df_mv2[
-                df_mv2["D_Trigger_n"] == 0
-            ],
-
-            "D_Trigger_S": df_mv2[
-                (
-                    df_mv2["D_Trigger_S_n"] == 0
-                )
-                &
-                (
-                    df_mv2["D_Trigger_S_n"]
-                    !=
-                    df_mv2["D_Trigger_n"]
-                )
-            ],
-
+            "D_Trigger": df_mv2[df_mv2["D_Trigger_n"] == 0],
+            "D_Trigger_S": df_mv2[(df_mv2["D_Trigger_S_n"] == 0) & (df_mv2["D_Trigger_S_n"] != df_mv2["D_Trigger_n"])],
             "Compact_Filter": compact_filter_df
         }
 
         # ---------------- DEBUG LOGS ---------------- #
         for name, d_sub in triggers.items():
-
             symbols_found = d_sub.iloc[:, 0].astype(str).tolist()
-
-            log(
-                f"🔍 Filter Check: {name} | "
-                f"Found: {len(d_sub)} | "
-                f"Symbols: {', '.join(symbols_found) if symbols_found else 'None'}"
-            )
+            log(f"🔍 Filter Check: {name} | Found: {len(d_sub)} | Symbols: {', '.join(symbols_found) if symbols_found else 'None'}")
 
         # ---------------- SETUP BROWSER ---------------- #
         driver = get_driver()
-
         cookie_data = os.getenv("TRADINGVIEW_COOKIES")
-
         if cookie_data:
-
             driver.get("https://www.tradingview.com/")
-
             for c in json.loads(cookie_data):
-
                 try:
-
                     driver.add_cookie({
                         "name": c["name"],
                         "value": c["value"],
                         "domain": ".tradingview.com",
                         "path": "/"
                     })
-
                 except:
                     continue
-
             driver.refresh()
 
         # ---------------- EXECUTE SCREENSHOTS ---------------- #
         for filter_name, matched_df in triggers.items():
-
             if matched_df.empty:
                 continue
 
             log(f"🚀 Processing {filter_name}...")
-
             for _, row in matched_df.iterrows():
-
                 symbol = str(row.iloc[0]).strip()
-
                 urls = url_map.get(symbol)
-
                 if not urls:
                     continue
 
                 for tf in ["day", "week"]:
-
                     url = urls.get(tf)
-
                     if not url or "tradingview.com" not in url:
                         continue
 
                     try:
-
                         driver.get(url)
-
-                        chart = WebDriverWait(
-                            driver,
-                            CHART_WAIT_SEC
-                        ).until(
-                            EC.visibility_of_element_located(
-                                (
-                                    By.XPATH,
-                                    "//div[contains(@class,'chart-container')]"
-                                )
-                            )
+                        chart = WebDriverWait(driver, CHART_WAIT_SEC).until(
+                            EC.visibility_of_element_located((By.XPATH, "//div[contains(@class,'chart-container')]"))
                         )
 
-                        log(
-                            f"    ⏳ Waiting {POST_LOAD_SLEEP}s "
-                            f"for late popups: {symbol} ({tf})..."
-                        )
-
+                        log(f"    ⏳ Waiting {POST_LOAD_SLEEP}s for late popups: {symbol} ({tf})...")
                         time.sleep(POST_LOAD_SLEEP)
 
                         # ---------------- REMOVE POPUPS ---------------- #
                         was_removed = driver.execute_script("""
-
                             var found = false;
-
-                            var popups = document.querySelectorAll(
-                                '[class*="overlap-manager-root"], \
-                                [class*="modal-"], \
-                                [class*="dialog-"], \
-                                [class*="backdrops-"]'
-                            );
-
+                            var popups = document.querySelectorAll('[class*="overlap-manager-root"], [class*="modal-"], [class*="dialog-"], [class*="backdrops-"]');
                             if (popups.length > 0) {
-
-                                popups.forEach(function(p) {
-                                    p.remove();
-                                });
-
+                                popups.forEach(function(p) { p.remove(); });
                                 found = true;
                             }
-
                             document.body.style.overflow = 'auto';
                             document.body.style.position = 'static';
-
-                            var chartElem = document.querySelector(
-                                '.chart-container-border'
-                            );
-
-                            if(chartElem) {
-                                chartElem.click();
-                            }
-
+                            var chartElem = document.querySelector('.chart-container-border');
+                            if(chartElem) { chartElem.click(); }
                             return found;
-
                         """)
 
                         if was_removed:
-
-                            log(
-                                f"    🧹 Popup detected and removed "
-                                f"for {symbol} ({tf})"
-                            )
-
+                            log(f"    🧹 Popup detected and removed for {symbol} ({tf})")
                         else:
-
-                            log(
-                                f"    ✨ No popups found "
-                                f"for {symbol} ({tf})"
-                            )
+                            log(f"    ✨ No popups found for {symbol} ({tf})")
 
                         time.sleep(1)
-
                         img = chart.screenshot_as_png
 
                         conn = db.ensure()
                         cur = conn.cursor()
-
                         cur.execute(
                             f"""
-                            INSERT INTO `{TARGET_TABLE}`
-                            (
-                                symbol,
-                                timeframe,
-                                filter_type,
-                                day,
-                                screenshot
-                            )
+                            INSERT INTO `{TARGET_TABLE}` (symbol, timeframe, filter_type, day, screenshot)
                             VALUES (%s, %s, %s, 0, %s)
                             """,
-                            (
-                                symbol,
-                                tf,
-                                filter_name,
-                                img
-                            )
+                            (symbol, tf, filter_name, img)
                         )
-
                         cur.close()
-
                         log(f"    ✅ Saved {symbol} ({tf})")
 
                     except Exception as e:
-
                         log(f"    ❌ Error {symbol} {tf}: {e}")
 
         log("🏁 Execution Finished.")
-
     except Exception as e:
-
         log(f"❌ Fatal: {e}")
-
     finally:
-
         if driver:
             driver.quit()
-
         db.close()
 
 if __name__ == "__main__":

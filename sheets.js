@@ -3,50 +3,62 @@ const { google } = require("googleapis");
 async function clearSheet(sheets, spreadsheetId) {
   await sheets.spreadsheets.values.clear({
     spreadsheetId,
-    range: "Sheet2!A2:Z", // keep header row safe
+    range: "Sheet2!A2:Z", // Keep header row
   });
 
   console.log("🧹 Old data cleared");
 }
 
 async function writeToSheet(jobs) {
-  const auth = new google.auth.GoogleAuth({
-    credentials: JSON.parse(process.env.GOOGLE_CREDS),
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"]
-  });
+  try {
+    const auth = new google.auth.GoogleAuth({
+      credentials: JSON.parse(process.env.GOOGLE_CREDS),
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+    });
 
-  const sheets = google.sheets({ version: "v4", auth });
-  const spreadsheetId = process.env.SHEET_ID;
+    const sheets = google.sheets({
+      version: "v4",
+      auth
+    });
 
-  // ✅ STEP 1: clear old entries
-  await clearSheet(sheets, spreadsheetId);
+    const spreadsheetId = process.env.SHEET_ID;
 
-  console.log(`📦 Total jobs to insert: ${jobs.length}`);
+    // Clear previous data
+    await clearSheet(sheets, spreadsheetId);
 
-  const values = jobs.map(job => [
-    job.title,
-    job.company,
-    job.location,
-    job.experience,
-    job.companyProfile,
-    job.fullDesc,
-    job.link,
-    job.keyword,
-    job.searchLocation,
-    new Date().toLocaleDateString()
-  ]);
+    console.log(`📦 Total jobs to insert: ${jobs.length}`);
 
-  if (values.length === 0) return;
+    if (!jobs || jobs.length === 0) {
+      console.log("⚠️ No jobs found.");
+      return;
+    }
 
-  // ✅ STEP 2: insert fresh data
-  await sheets.spreadsheets.values.append({
-    spreadsheetId,
-    range: "Sheet2!A2",
-    valueInputOption: "RAW",
-    resource: { values }
-  });
+    const values = jobs.map(job => [
+      job.title || "",
+      job.company || "",
+      job.location || "",
+      job.experience || "",
+      job.companyProfile || "",
+      job.fullDesc || "",     // <-- Job Description
+      job.link || "",
+      job.keyword || "",
+      job.searchLocation || "",
+      new Date().toLocaleDateString()
+    ]);
 
-  console.log("✅ Fresh jobs inserted");
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: "Sheet2!A2",
+      valueInputOption: "RAW",
+      resource: {
+        values
+      }
+    });
+
+    console.log(`✅ ${values.length} jobs inserted successfully.`);
+  } catch (err) {
+    console.error("❌ Error writing to Google Sheets:", err.message);
+  }
 }
 
 module.exports = writeToSheet;

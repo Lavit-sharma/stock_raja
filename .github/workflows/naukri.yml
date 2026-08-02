@@ -2,7 +2,7 @@ name: Naukri Scraper
 
 on:
   schedule:
-    - cron: "0 3 * * *"   # daily at 3 AM UTC (~8:30 AM IST)
+    - cron: "0 3 * * *"   # Daily at 3 AM UTC (~8:30 AM IST)
   workflow_dispatch:
 
 jobs:
@@ -10,18 +10,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: "20"
+          cache: "npm"
 
-      - name: Install dependencies
-        run: npm install
+      - name: Install Dependencies
+        run: npm ci
 
-      - name: Run scraper
+      - name: Run Scraper
         run: node index.js
         env:
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}

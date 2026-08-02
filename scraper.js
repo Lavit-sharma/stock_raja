@@ -4,33 +4,61 @@ const pLimit = require("p-limit");
 
 puppeteer.use(StealthPlugin());
 
-const limit = pLimit(3); // Parallel deep scraping limit
+const DETAIL_CONCURRENCY = 3; // parallel deep-scrape limit
+const limit = pLimit(DETAIL_CONCURRENCY);
 
-async function delay(min = 2000, max = 5000) {
-  return new Promise(r => setTimeout(r, Math.random() * (max - min) + min));
+const USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+
+function delay(min = 2000, max = 5000) {
+  return new Promise((r) => setTimeout(r, Math.random() * (max - min) + min));
 }
 
+/**
+ * Scrape a single job's detail page.
+ * NOTE on selectors: Naukri's hashed CSS classes (e.g. "styles_JDC__xxxx")
+ * change on every deploy, so we do NOT rely on them. We use the stable,
+ * non-hashed classes first, then fall back to attribute/text based
+ * selectors that are much less likely to break.
+ */
 async function scrapeJobDetail(page, url) {
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 35000 });
     await delay(1500, 3000);
 
     return await page.evaluate(() => {
-      // Multiple fallback selectors for Naukri's layout changes
-      const companyProfile =
-        document.querySelector(".company-description")?.innerText ||
-        document.querySelector(".comp-desc")?.innerText ||
-        document.querySelector(".styles_JDC__comp-profile__...")?.innerText || "";
+      const pick = (selectors) => {
+        for (const sel of selectors) {
+          try {
+            const el = document.querySelector(sel);
+            if (el && el.innerText && el.innerText.trim()) {
+              return el.innerText.trim();
+            }
+          } catch (e) {
+            // ignore invalid/unsupported selector and try the next one
+          }
+        }
+        return "";
+      };
 
-      const fullDesc =
-        document.querySelector(".job-desc")?.innerText ||
-        document.querySelector(".dang-inner-html")?.innerText ||
-        document.querySelector(".styles_JDC__dang-inner-html__...")?.innerText || "";
+      const companyProfile = pick([
+        ".company-description",
+        ".comp-desc",
+        "[class*='comp-profile']",
+        "[class*='about-company']",
+      ]);
+
+      const fullDesc = pick([
+        ".job-desc",
+        ".dang-inner-html",
+        "[class*='dang-inner-html']",
+        "[class*='JDC__dang']",
+      ]);
 
       return { companyProfile, fullDesc };
     });
   } catch (err) {
-    return { companyProfile: "", fullDesc: "" };
+    return { companyProfile: "", fullDesc: "", detailError: err.message };
   }
 }
 
@@ -42,70 +70,73 @@ async function scrapeJobs(keyword, location, pages = 3) {
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-accelerated-2d-canvas",
-      "--disable-gpu"
-    ]
+      "--disable-gpu",
+    ],
   });
-
-  const page = await browser.newPage();
-
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-  );
 
   let allJobs = [];
 
-  for (let p = 1; p <= pages; p++) {
-    const url = `https://www.naukri.com/${keyword}-jobs-in-${location}-${p}?jobAge=3`;
-    console.log(`🔍 Opening: ${url}`);
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(USER_AGENT);
 
-    try {
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 40000 });
-      
-      // Wait for listing container with fallback timeout
-      await page.waitForSelector(".srp-jobtuple-wrapper", { timeout: 10000 }).catch(() => {});
+    for (let p = 1; p <= pages; p++) {
+      const url = `https://www.naukri.com/${keyword}-jobs-in-${location}-${p}?jobAge=3`;
+      console.log(`🔍 Opening: ${url}`);
 
-      const jobs = await page.evaluate(() => {
-        const cards = document.querySelectorAll(".srp-jobtuple-wrapper");
-        return Array.from(cards).map(job => ({
-          title: job.querySelector(".title")?.innerText?.trim() || "",
-          company: job.querySelector(".comp-name")?.innerText?.trim() || "",
-          location: job.querySelector(".locWdth")?.innerText?.trim() || "",
-          experience: job.querySelector(".expwdth")?.innerText?.trim() || "",
-          link: job.querySelector("a.title")?.href || ""
-        })).filter(j => j.link !== "");
-      });
+      try {
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 40000 });
 
-      allJobs.push(...jobs);
-      console.log(`📄 Page ${p}: Found ${jobs.length} jobs`);
+        // Wait for listing container with fallback timeout
+        await page
+          .waitForSelector(".srp-jobtuple-wrapper", { timeout: 10000 })
+          .catch(() => {});
 
-      await delay();
-    } catch (err) {
-      console.log(`⚠️ Page failed or blocked: ${p} (${err.message})`);
+        const jobs = await page.evaluate(() => {
+          const cards = document.querySelectorAll(".srp-jobtuple-wrapper");
+          return Array.from(cards)
+            .map((job) => ({
+              title: job.querySelector(".title")?.innerText?.trim() || "",
+              company: job.querySelector(".comp-name")?.innerText?.trim() || "",
+              location: job.querySelector(".locWdth")?.innerText?.trim() || "",
+              experience: job.querySelector(".expwdth")?.innerText?.trim() || "",
+              link: job.querySelector("a.title")?.href || "",
+            }))
+            .filter((j) => j.link !== "");
+        });
+
+        allJobs.push(...jobs);
+        console.log(`📄 Page ${p}: Found ${jobs.length} jobs`);
+        await delay();
+      } catch (err) {
+        console.log(`⚠️ Page failed or blocked: ${p} (${err.message})`);
+      }
     }
+
+    // Deduplicate jobs by link
+    const uniqueJobs = Array.from(new Map(allJobs.map((j) => [j.link, j])).values());
+    console.log(`🔗 Total unique jobs to deep-scrape: ${uniqueJobs.length}`);
+
+    // Parallel deep scraping of individual job detail pages
+    const detailedJobs = await Promise.all(
+      uniqueJobs.map((job) =>
+        limit(async () => {
+          const newPage = await browser.newPage();
+          try {
+            await newPage.setUserAgent(USER_AGENT);
+            const details = await scrapeJobDetail(newPage, job.link);
+            return { ...job, ...details };
+          } finally {
+            await newPage.close().catch(() => {});
+          }
+        })
+      )
+    );
+
+    return detailedJobs;
+  } finally {
+    await browser.close().catch(() => {});
   }
-
-  // Deduplicate jobs by link
-  const uniqueJobs = Array.from(new Map(allJobs.map(j => [j.link, j])).values());
-  console.log(`🔗 Total unique jobs to deep-scrape: ${uniqueJobs.length}`);
-
-  // Parallel deep scraping of individual job detail pages
-  const detailedJobs = await Promise.all(
-    uniqueJobs.map(job =>
-      limit(async () => {
-        const newPage = await browser.newPage();
-        await newPage.setUserAgent(
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        );
-        const details = await scrapeJobDetail(newPage, job.link);
-        await newPage.close();
-
-        return { ...job, ...details };
-      })
-    )
-  );
-
-  await browser.close();
-  return detailedJobs;
 }
 
 module.exports = scrapeJobs;

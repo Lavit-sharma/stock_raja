@@ -2,7 +2,7 @@ const scrapeJobs = require("./scraper");
 const writeToSheet = require("./sheets");
 const pLimit = require("p-limit");
 
-const limit = pLimit(2); // keep LOW for GitHub Actions
+const limit = pLimit(2); // Keep LOW for GitHub Actions
 
 const keywords = ["Product-Manager", "Program-Manager"];
 const locations = ["delhi", "bangalore", "remote"];
@@ -11,27 +11,34 @@ const locations = ["delhi", "bangalore", "remote"];
   try {
     const tasks = [];
 
-    for (let keyword of keywords) {
-      for (let location of locations) {
+    for (const keyword of keywords) {
+      for (const location of locations) {
 
         tasks.push(
           limit(async () => {
-            console.log(`Starting: ${keyword} | ${location}`);
+            console.log(`🚀 Starting: ${keyword} | ${location}`);
 
             try {
               const jobs = await scrapeJobs(keyword, location, 5);
 
-              console.log(`Done: ${keyword} | ${location} → ${jobs.length}`);
+              console.log(`✅ Done: ${keyword} | ${location} → ${jobs.length} jobs`);
 
-              return jobs.map(j => ({
-                ...j,
+              return jobs.map(job => ({
+                title: job.title || "",
+                company: job.company || "",
+                location: job.location || "",
+                experience: job.experience || "",
+                companyProfile: job.companyProfile || "",
+                fullDesc: job.fullDesc || "", // Job Description
+                link: job.link || "",
                 keyword,
                 searchLocation: location
               }));
 
             } catch (err) {
-              console.log(`Failed: ${keyword} | ${location}`, err.message);
-              return []; // prevent crash
+              console.error(`❌ Failed: ${keyword} | ${location}`);
+              console.error(err.message);
+              return [];
             }
           })
         );
@@ -42,13 +49,13 @@ const locations = ["delhi", "bangalore", "remote"];
     const results = await Promise.all(tasks);
     const finalJobs = results.flat();
 
-    console.log("Total Jobs:", finalJobs.length);
+    console.log(`📦 Total Jobs Collected: ${finalJobs.length}`);
 
     await writeToSheet(finalJobs);
 
-    console.log("✅ Sheet Updated Successfully");
+    console.log("✅ Google Sheet Updated Successfully");
 
   } catch (err) {
-    console.log("❌ Main Error:", err);
+    console.error("❌ Main Error:", err);
   }
 })();

@@ -1,12 +1,15 @@
 const { google } = require("googleapis");
 
 async function clearSheet(sheets, spreadsheetId) {
-  await sheets.spreadsheets.values.clear({
-    spreadsheetId,
-    range: "Sheet2!A2:Z", // Keep header row
-  });
-
-  console.log("🧹 Old data cleared");
+  try {
+    await sheets.spreadsheets.values.clear({
+      spreadsheetId,
+      range: "Sheet2!A2:Z",
+    });
+    console.log("🧹 Old data cleared from Sheet2");
+  } catch (err) {
+    console.log("ℹ️ Sheet clear skipped or failed (might already be empty):", err.message);
+  }
 }
 
 async function writeToSheet(jobs) {
@@ -16,20 +19,13 @@ async function writeToSheet(jobs) {
       scopes: ["https://www.googleapis.com/auth/spreadsheets"]
     });
 
-    const sheets = google.sheets({
-      version: "v4",
-      auth
-    });
-
+    const sheets = google.sheets({ version: "v4", auth });
     const spreadsheetId = process.env.SHEET_ID;
 
-    // Clear previous data
     await clearSheet(sheets, spreadsheetId);
 
-    console.log(`📦 Total jobs to insert: ${jobs.length}`);
-
     if (!jobs || jobs.length === 0) {
-      console.log("⚠️ No jobs found.");
+      console.log("⚠️ No jobs found to write.");
       return;
     }
 
@@ -39,7 +35,7 @@ async function writeToSheet(jobs) {
       job.location || "",
       job.experience || "",
       job.companyProfile || "",
-      job.fullDesc || "",     // <-- Job Description
+      job.fullDesc || "",
       job.link || "",
       job.keyword || "",
       job.searchLocation || "",
@@ -50,12 +46,10 @@ async function writeToSheet(jobs) {
       spreadsheetId,
       range: "Sheet2!A2",
       valueInputOption: "RAW",
-      resource: {
-        values
-      }
+      resource: { values }
     });
 
-    console.log(`✅ ${values.length} jobs inserted successfully.`);
+    console.log(`✅ ${values.length} jobs inserted into Google Sheets successfully.`);
   } catch (err) {
     console.error("❌ Error writing to Google Sheets:", err.message);
   }

@@ -87,6 +87,7 @@ async function scrapeJobs(keyword, location, pages = 5) {
 
   await browser.close();
   return detailedJobs;
+  console.log(JSON.stringify(detailedJobs[0], null, 2));
 }
 
 module.exports = scrapeJobs;

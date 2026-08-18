@@ -16,13 +16,12 @@ function delay(min = 2000, max = 5000) {
 
 /**
  * Scrape a single job's detail page.
- * NOTE on selectors: Naukri's hashed CSS classes (e.g. "styles_JDC__xxxx")
- * change on every deploy, so we do NOT rely on them. We use the stable,
- * non-hashed classes first, then fall back to attribute/text based
- * selectors that are much less likely to break.
  */
 async function scrapeJobDetail(page, url) {
   try {
+    // FIX: Brief delay to let the frame settle before navigating
+    await new Promise((r) => setTimeout(r, 600));
+
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 35000 });
     await delay(1500, 3000);
 
@@ -35,7 +34,7 @@ async function scrapeJobDetail(page, url) {
               return el.innerText.trim();
             }
           } catch (e) {
-            // ignore invalid/unsupported selector and try the next one
+            // ignore invalid selectors
           }
         }
         return "";
@@ -78,6 +77,10 @@ async function scrapeJobs(keyword, location, pages = 3) {
 
   try {
     const page = await browser.newPage();
+    
+    // FIX: Prevent "Requesting main frame too early!" crash in GitHub Actions
+    await new Promise((r) => setTimeout(r, 1000));
+
     await page.setUserAgent(USER_AGENT);
 
     for (let p = 1; p <= pages; p++) {
@@ -87,7 +90,6 @@ async function scrapeJobs(keyword, location, pages = 3) {
       try {
         await page.goto(url, { waitUntil: "domcontentloaded", timeout: 40000 });
 
-        // Wait for listing container with fallback timeout
         await page
           .waitForSelector(".srp-jobtuple-wrapper", { timeout: 10000 })
           .catch(() => {});
@@ -122,6 +124,10 @@ async function scrapeJobs(keyword, location, pages = 3) {
       uniqueJobs.map((job) =>
         limit(async () => {
           const newPage = await browser.newPage();
+          
+          // FIX: Prevent main frame timing crash on parallel sub-pages
+          await new Promise((r) => setTimeout(r, 800));
+
           try {
             await newPage.setUserAgent(USER_AGENT);
             const details = await scrapeJobDetail(newPage, job.link);

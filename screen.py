@@ -289,7 +289,6 @@ def open_with_retry(driver, url, retries=2):
 
 
 # ---------------- MAIN ---------------- #
-# ---------------- MAIN ---------------- #
 def main():
 
     log(f"🔎 DB TARGET {DB_CONFIG['host']} / {DB_CONFIG['database']}:{DB_CONFIG['port']}")
@@ -329,7 +328,7 @@ def main():
 
         df_mv2 = pd.DataFrame(
             mv2_raw[1:],
-            columns=mv2_raw[0]
+            columns=[safe_str(c) for c in mv2_raw[0]]
         )
 
         log(f"✅ MV2 rows loaded: {len(df_mv2)}")
@@ -344,7 +343,7 @@ def main():
 
         df_stocks = pd.DataFrame(
             stock_raw[1:],
-            columns=stock_raw[0]
+            columns=[safe_str(c) for c in stock_raw[0]]
         )
 
         log(f"✅ Stock list rows loaded: {len(df_stocks)}")
@@ -375,12 +374,20 @@ def main():
             return
 
         mv2_headers = list(df_mv2.columns)
+        
+        # ---------------- DYNAMIC HEADER FINDER ---------------- #
+        mchange_col_name = "mchange%"
+        mchange_idx = -1
 
-        if len(mv2_headers) > 15:
-            log(
-                f"📌 Monthly value column = "
-                f"index 15 = {mv2_headers[15]}"
-            )
+        for idx, col_name in enumerate(mv2_headers):
+            if col_name.strip().lower() == mchange_col_name:
+                mchange_idx = idx
+                break
+
+        if mchange_idx != -1:
+            log(f"📌 Dynamic Header Found: '{mchange_col_name}' at column index {mchange_idx}")
+        else:
+            log(f"⚠️ WARNING: '{mchange_col_name}' column not found! Check sheet header names.")
 
         # =========================
         # PROCESS ROWS
@@ -393,7 +400,6 @@ def main():
 
             try:
                 symbol = safe_str(row.iloc[0])
-
                 sector = safe_str(row.iloc[1]).upper()
 
                 # SKIP INVALID
@@ -404,13 +410,12 @@ def main():
                     continue
 
                 # =========================
-                # MONTHLY VALUE ONLY
+                # MONTHLY VALUE DYNAMIC
                 # =========================
-                raw_monthly = (
-                    row.iloc[15]
-                    if len(row) > 15
-                    else ""
-                )
+                if mchange_idx != -1 and len(row) > mchange_idx:
+                    raw_monthly = row.iloc[mchange_idx]
+                else:
+                    raw_monthly = ""
 
                 monthly_val = safe_float(raw_monthly)
 
@@ -421,16 +426,14 @@ def main():
                 )
 
                 # =========================
-                # MV2 DATA
+                # MV2 DATA (DYNAMIC RANGE)
                 # =========================
-                n_al_map = {
-                    safe_str(mv2_headers[i]):
-                    safe_str(row.iloc[i])
+                start_range = mchange_idx if mchange_idx != -1 else 13
+                end_range = min(start_range + 24, len(mv2_headers))
 
-                    for i in range(
-                        13,
-                        min(37, len(mv2_headers))
-                    )
+                n_al_map = {
+                    safe_str(mv2_headers[i]): safe_str(row.iloc[i])
+                    for i in range(start_range, end_range)
                 }
 
                 mv2_n_al_json = json.dumps(

@@ -44,14 +44,6 @@ def safe_int(v):
     except (ValueError, TypeError):
         return -1
 
-def safe_float(v):
-    try:
-        if v is None or str(v).strip() == "" or str(v).lower() == "nan":
-            return 0.0
-        return float(str(v).strip())
-    except (ValueError, TypeError):
-        return 0.0
-
 def fix_duplicate_columns(df):
     cols = pd.Series(df.columns)
     for dup in cols[cols.duplicated()].unique():
@@ -180,19 +172,10 @@ def main():
             else:
                 df_mv2[f"{col}_n"] = -1
 
-        # ---------------- COMPACT FILTER ---------------- #
-        compact_filter_df = df_mv2[
-            (df_mv2["MXMN_low"].apply(safe_float) == 1) &
-            (df_mv2["D_CL_AB"].apply(safe_float) > 1) &
-            (df_mv2["D_CL_AB"].apply(safe_float) < 1.03) &
-            (df_mv2["MXMN"].apply(safe_float) < 30)
-        ]
-
         # ---------------- TRIGGERS ---------------- #
         triggers = {
             "D_Trigger": df_mv2[df_mv2["D_Trigger_n"] == 0],
-            "D_Trigger_S": df_mv2[(df_mv2["D_Trigger_S_n"] == 0) & (df_mv2["D_Trigger_S_n"] != df_mv2["D_Trigger_n"])],
-            "Compact_Filter": compact_filter_df
+            "D_Trigger_S": df_mv2[(df_mv2["D_Trigger_S_n"] == 0) & (df_mv2["D_Trigger_S_n"] != df_mv2["D_Trigger_n"])]
         }
 
         # ---------------- DEBUG LOGS ---------------- #

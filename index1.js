@@ -1,5 +1,5 @@
-const scrapeJobs = require("./scraper");
-const writeToSheet = require("./sheets");
+const scrapeJobs = require("./scraper1");
+const writeToSheet = require("./sheets1");
 const pLimit = require("p-limit");
 
 const limit = pLimit(2); // Kept low to prevent rate limiting/bans on GitHub Actions

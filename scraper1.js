@@ -79,20 +79,17 @@ async function scrapeJobs(keyword, location, pages = 2) {
     await new Promise((r) => setTimeout(r, 1000));
     await page.setUserAgent(USER_AGENT);
 
-    // Formulate Wellfound URL target
     const url = `https://wellfound.com/jobs?q=${encodeURIComponent(keyword)}&l=${encodeURIComponent(location)}`;
     console.log(`🔍 Opening: ${url}`);
 
     try {
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 40000 });
 
-      // Wait for job cards to render on page
       await page
         .waitForSelector("[class*='styles_component']", { timeout: 12000 })
         .catch(() => {});
 
       const jobs = await page.evaluate(() => {
-        // Target job listing container cards on Wellfound
         const cards = document.querySelectorAll("[class*='styles_jobListing'], [class*='styles_component__']");
         
         return Array.from(cards)
@@ -120,11 +117,9 @@ async function scrapeJobs(keyword, location, pages = 2) {
       console.log(`⚠️ Page failed or blocked: (${err.message})`);
     }
 
-    // Deduplicate jobs by link
     const uniqueJobs = Array.from(new Map(allJobs.map((j) => [j.link, j])).values());
     console.log(`🔗 Total unique jobs to deep-scrape: ${uniqueJobs.length}`);
 
-    // Parallel deep scraping of individual job detail pages
     const detailedJobs = await Promise.all(
       uniqueJobs.map((job) =>
         limit(async () => {

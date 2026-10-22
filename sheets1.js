@@ -1,14 +1,18 @@
+
 const { google } = require("googleapis");
 
 async function clearSheet(sheets, spreadsheetId) {
   try {
     await sheets.spreadsheets.values.clear({
       spreadsheetId,
-      range: "Sheet2!A2:Z",
+      range: "Sheet3!A2:Z",
     });
-    console.log("🧹 Old data cleared from Sheet2");
+    console.log("🧹 Old data cleared from Sheet3");
   } catch (err) {
-    console.log("ℹ️ Sheet clear skipped or failed (might already be empty):", err.message);
+    console.log(
+      "ℹ️ Sheet clear skipped or failed (might already be empty):",
+      err.message
+    );
   }
 }
 
@@ -16,7 +20,7 @@ async function writeToSheet(jobs) {
   try {
     const auth = new google.auth.GoogleAuth({
       credentials: JSON.parse(process.env.GOOGLE_CREDS),
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
     });
 
     const sheets = google.sheets({ version: "v4", auth });
@@ -29,7 +33,7 @@ async function writeToSheet(jobs) {
       return;
     }
 
-    const values = jobs.map(job => [
+    const values = jobs.map((job) => [
       job.title || "",
       job.company || "",
       job.location || "",
@@ -39,17 +43,19 @@ async function writeToSheet(jobs) {
       job.link || "",
       job.keyword || "",
       job.searchLocation || "",
-      new Date().toLocaleDateString()
+      new Date().toLocaleDateString(),
     ]);
 
     await sheets.spreadsheets.values.append({
       spreadsheetId,
-      range: "Sheet2!A2",
+      range: "Sheet3!A2",
       valueInputOption: "RAW",
-      resource: { values }
+      resource: { values },
     });
 
-    console.log(`✅ ${values.length} jobs inserted into Google Sheets successfully.`);
+    console.log(
+      `✅ ${values.length} jobs inserted into Google Sheets successfully.`
+    );
   } catch (err) {
     console.error("❌ Error writing to Google Sheets:", err.message);
   }

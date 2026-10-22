@@ -2,36 +2,44 @@
 const { google } = require("googleapis");
 
 async function clearSheet(sheets, spreadsheetId) {
-  try {
-    await sheets.spreadsheets.values.clear({
-      spreadsheetId,
-      range: "Sheet3!A2:Z",
-    });
-    console.log("🧹 Old data cleared from Sheet3");
-  } catch (err) {
-    console.log(
-      "ℹ️ Sheet clear skipped or failed (might already be empty):",
-      err.message
-    );
-  }
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId,
+    range: "Sheet3!A2:Z",
+  });
+
+  console.log("🧹 Old data cleared from Sheet3");
 }
 
 async function writeToSheet(jobs) {
+  if (!Array.isArray(jobs) || jobs.length === 0) {
+    console.log(
+      "⚠️ No jobs found. Existing Sheet3 data has been preserved."
+    );
+    return;
+  }
+
   try {
+    if (!process.env.GOOGLE_CREDS || !process.env.SHEET_ID) {
+      throw new Error(
+        "Missing GOOGLE_CREDS or SHEET_ID environment variable."
+      );
+    }
+
+    const credentials = JSON.parse(process.env.GOOGLE_CREDS);
+
     const auth = new google.auth.GoogleAuth({
-      credentials: JSON.parse(process.env.GOOGLE_CREDS),
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+      credentials,
+      scopes: [
+        "https://www.googleapis.com/auth/spreadsheets",
+      ],
     });
 
-    const sheets = google.sheets({ version: "v4", auth });
+    const sheets = google.sheets({
+      version: "v4",
+      auth,
+    });
+
     const spreadsheetId = process.env.SHEET_ID;
-
-    await clearSheet(sheets, spreadsheetId);
-
-    if (!jobs || jobs.length === 0) {
-      console.log("⚠️ No jobs found to write.");
-      return;
-    }
 
     const values = jobs.map((job) => [
       job.title || "",
@@ -43,21 +51,30 @@ async function writeToSheet(jobs) {
       job.link || "",
       job.keyword || "",
       job.searchLocation || "",
-      new Date().toLocaleDateString(),
+      new Date().toLocaleDateString("en-IN", {
+        timeZone: "Asia/Kolkata",
+      }),
     ]);
 
-    await sheets.spreadsheets.values.append({
+    // Clear only after confirming we have data to write.
+    await clearSheet(sheets, spreadsheetId);
+
+    await sheets.spreadsheets.values.update({
       spreadsheetId,
       range: "Sheet3!A2",
       valueInputOption: "RAW",
-      resource: { values },
+      requestBody: { values },
     });
 
     console.log(
-      `✅ ${values.length} jobs inserted into Google Sheets successfully.`
+      `✅ Successfully wrote ${values.length} jobs to Sheet3.`
     );
-  } catch (err) {
-    console.error("❌ Error writing to Google Sheets:", err.message);
+  } catch (error) {
+    console.error(
+      "❌ Google Sheets error:",
+      error.message
+    );
+    throw error;
   }
 }
 

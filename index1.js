@@ -1,29 +1,49 @@
+
 const scrapeJobs = require("./scraper1");
 const writeToSheet = require("./sheets1");
 const pLimit = require("p-limit");
 
-const limit = pLimit(2); // Kept low to prevent rate limiting/bans on GitHub Actions
+const limit = pLimit(2);
 
-const keywords = ["product-manager", "engineering-manager", "edge-ai"];
-const locations = ["delhi", "bengaluru", "mumbai", "hyderabad"];
+const keywords = [
+  "product-manager",
+  "engineering-manager",
+  "edge-ai",
+];
+
+const locations = [
+  "delhi",
+  "bengaluru",
+  "mumbai",
+  "hyderabad",
+];
 
 (async () => {
   try {
     console.log("🚀 Starting Wellfound Job Scraping Pipeline...");
+
     const tasks = [];
 
     for (const keyword of keywords) {
       for (const location of locations) {
         tasks.push(
           limit(async () => {
-            console.log(`🚀 Starting Task: ${keyword} | ${location}`);
+            console.log(
+              `\n🚀 Starting Task: ${keyword} | ${location}`
+            );
 
             try {
-              const jobs = await scrapeJobs(keyword, location, 2);
+              const jobs = await scrapeJobs(
+                keyword,
+                location,
+                2
+              );
 
-              console.log(`✅ Done: ${keyword} | ${location} → ${jobs.length} jobs collected`);
+              console.log(
+                `✅ Finished: ${keyword} | ${location} → ${jobs.length} jobs`
+              );
 
-              return jobs.map(job => ({
+              return jobs.map((job) => ({
                 title: job.title || "",
                 company: job.company || "",
                 location: job.location || "",
@@ -32,11 +52,13 @@ const locations = ["delhi", "bengaluru", "mumbai", "hyderabad"];
                 fullDesc: job.fullDesc || "",
                 link: job.link || "",
                 keyword,
-                searchLocation: location
+                searchLocation: location,
               }));
+            } catch (error) {
+              console.error(
+                `❌ Task failed: ${keyword} | ${location}: ${error.message}`
+              );
 
-            } catch (err) {
-              console.error(`❌ Failed Task: ${keyword} | ${location} -> ${err.message}`);
               return [];
             }
           })
@@ -45,15 +67,32 @@ const locations = ["delhi", "bengaluru", "mumbai", "hyderabad"];
     }
 
     const results = await Promise.all(tasks);
-    const finalJobs = results.flat();
+    const collectedJobs = results.flat();
 
-    console.log(`📦 Total Unique Jobs Collected Across All Queries: ${finalJobs.length}`);
+    // Deduplicate across all keywords and locations.
+    const uniqueJobs = new Map();
 
+    for (const job of collectedJobs) {
+      if (!job.link) continue;
+
+      if (!uniqueJobs.has(job.link)) {
+        uniqueJobs.set(job.link, job);
+      }
+    }
+
+    const finalJobs = Array.from(uniqueJobs.values());
+
+    console.log("\n======================================");
+    console.log(`📦 Total collected: ${collectedJobs.length}`);
+    console.log(`🔗 Unique jobs: ${finalJobs.length}`);
+    console.log("======================================\n");
+
+    // sheets1.js preserves old data when this array is empty.
     await writeToSheet(finalJobs);
 
-    console.log("🎉 Process Completed Successfully!");
-  } catch (err) {
-    console.error("❌ Main Error:", err);
-    process.exit(1);
+    console.log("🎉 Pipeline completed.");
+  } catch (error) {
+    console.error("❌ Main pipeline error:", error);
+    process.exitCode = 1;
   }
 })();

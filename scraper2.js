@@ -45,7 +45,7 @@ function buildSearchUrl(keyword, location) {
 }
 
 async function scrapeSearchPage(page, url, keyword) {
-  console.log(`🔍 Opening: ${url}`);
+  console.log(`🔍 Opening Cutshort URL: ${url}`);
 
   const response = await page.goto(url, {
     waitUntil: "domcontentloaded",
@@ -71,7 +71,7 @@ async function scrapeSearchPage(page, url, keyword) {
     for (const anchor of anchors) {
       const link = anchor.href;
 
-      if (!/^https:\/\/cutshort\.io\/job\/[^/?#]+/i.test(link)) {
+      if (!/^https:\/\/(www\.)?cutshort\.io\/job\/[^/?#]+/i.test(link)) {
         continue;
       }
 
@@ -262,6 +262,7 @@ async function scrapeJobs(keyword, location) {
 
   try {
     const searchPage = await browser.newPage();
+    await searchPage.setCacheEnabled(false);
     await searchPage.setUserAgent(USER_AGENT);
     await searchPage.setViewport({ width: 1366, height: 768 });
 
@@ -289,7 +290,7 @@ async function scrapeJobs(keyword, location) {
     const uniqueJobs = Array.from(found.values());
 
     console.log(
-      `🔗 ${keyword} | ${location}: ${uniqueJobs.length} unique jobs found. Scraping detailed JDs...`
+      `🔗 ${keyword} | ${location}: ${uniqueJobs.length} unique Cutshort jobs found. Scraping detailed JDs...`
     );
 
     const detailedJobs = await Promise.all(
@@ -298,6 +299,7 @@ async function scrapeJobs(keyword, location) {
           const detailPage = await browser.newPage();
 
           try {
+            await detailPage.setCacheEnabled(false);
             await detailPage.setUserAgent(USER_AGENT);
             await detailPage.setViewport({ width: 1366, height: 768 });
 

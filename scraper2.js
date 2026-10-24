@@ -51,7 +51,7 @@ async function scrapeSearchPage(page, url, keyword) {
     return [];
   }
 
-  // Scroll down smoothly to trigger hydration and image/list lazy loading
+  // Scroll down smoothly to trigger hydration and lazy loading
   try {
     await page.evaluate(async () => {
       await new Promise((resolve) => {
@@ -77,7 +77,6 @@ async function scrapeSearchPage(page, url, keyword) {
     const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
     const output = [];
 
-    // Strategy A: Check NEXT_DATA script tag for structured state
     try {
       const nextDataEl = document.getElementById("__NEXT_DATA__");
       if (nextDataEl && nextDataEl.innerText) {
@@ -101,10 +100,9 @@ async function scrapeSearchPage(page, url, keyword) {
         }
       }
     } catch (err) {
-      // Fallback to DOM extraction if NEXT_DATA parsing fails
+      // Fallback to DOM extraction
     }
 
-    // Strategy B: DOM extraction as primary / fallback
     if (output.length === 0) {
       const anchors = Array.from(document.querySelectorAll("a[href]"));
 
@@ -193,7 +191,12 @@ async function scrapeJobDetail(page, url) {
     });
 
     if (response && response.status() === 403) {
-      return { companyProfile: "", fullDesc: "Cloudflare 403 Security Check Blocked", detailError: "403 Forbidden" };
+      return { 
+        companyProfile: "", 
+        fullDesc: "Cloudflare 403 Security Check Blocked", 
+        keyResponsibilities: [], 
+        detailError: "403 Forbidden" 
+      };
     }
 
     await randomSleep(1500, 2500);
@@ -240,9 +243,63 @@ async function scrapeJobDetail(page, url) {
         }
       }
 
+      // Extract Key Responsibilities
+      const keyResponsibilities = [];
+      const headings = Array.from(document.querySelectorAll("h2, h3, h4, h5, strong, b"));
+      let respHeader = null;
+
+      for (const h of headings) {
+        const text = (h.innerText || "").toLowerCase();
+        if (
+          text.includes("responsibility") ||
+          text.includes("what you will do") ||
+          text.includes("what you'll do") ||
+          text.includes("roles & responsibilities") ||
+          text.includes("key responsibilities")
+        ) {
+          respHeader = h;
+          break;
+        }
+      }
+
+      if (respHeader) {
+        let nextEl = respHeader.nextElementSibling;
+        // Search through subsequent elements to find lists or paragraphs
+        let limitCount = 0;
+        while (nextEl && limitCount < 5) {
+          if (nextEl.tagName === "UL" || nextEl.tagName === "OL") {
+            const items = nextEl.querySelectorAll("li");
+            items.forEach((li) => {
+              const val = clean(li.innerText);
+              if (val.length > 5) keyResponsibilities.push(val);
+            });
+            break;
+          } else if (nextEl.tagName === "P" || nextEl.tagName === "DIV") {
+            const textVal = clean(nextEl.innerText);
+            if (textVal.length > 10) {
+              keyResponsibilities.push(textVal);
+            }
+          }
+          nextEl = nextEl.nextElementSibling;
+          limitCount++;
+        }
+      }
+
+      // Fallback responsibilities search if header-based DOM extraction is empty
+      if (keyResponsibilities.length === 0 && fullDesc) {
+        const lines = fullDesc.split(/(?:\r?\n)+|[•\-\*]\s+/);
+        for (const line of lines) {
+          const cleanedLine = clean(line);
+          if (cleanedLine.length > 20 && /manage|develop|build|design|lead|create|implement|collaborate|test|deploy|maintain/i.test(cleanedLine)) {
+            keyResponsibilities.push(cleanedLine);
+          }
+        }
+      }
+
       return {
         companyProfile,
         fullDesc: fullDesc || "No detailed JD found.",
+        keyResponsibilities: Array.from(new Set(keyResponsibilities)),
       };
     });
   } catch (error) {
@@ -250,6 +307,7 @@ async function scrapeJobDetail(page, url) {
     return {
       companyProfile: "",
       fullDesc: "",
+      keyResponsibilities: [],
       detailError: error.message,
     };
   }
@@ -268,7 +326,6 @@ async function scrapeJobs(keyword, location) {
   });
 
   try {
-    // 1. Create worker pool once upfront to avoid target/frame creation race conditions
     const pages = [];
     for (let i = 0; i < WORKER_POOL_SIZE; i++) {
       const p = await browser.newPage();
@@ -278,7 +335,6 @@ async function scrapeJobs(keyword, location) {
       pages.push(p);
     }
 
-    // Delay briefly to allow stealth bindings to fully settle across all worker pages
     await new Promise((resolve) => setTimeout(resolve, 500));
 
     const mainPage = pages[0];
@@ -292,10 +348,9 @@ async function scrapeJobs(keyword, location) {
     }
 
     console.log(
-      `🔗 ${keyword} | ${location}: ${uniqueJobs.length} unique Cutshort jobs found. Scraping detailed JDs...`
+      `🔗 ${keyword} | ${location}: ${uniqueJobs.length} unique Cutshort jobs found. Scraping detailed JDs & Responsibilities...`
     );
 
-    // 2. Process detail pages round-robin using static worker pages
     const detailedJobs = [];
     for (let i = 0; i < uniqueJobs.length; i += WORKER_POOL_SIZE) {
       const chunk = uniqueJobs.slice(i, i + WORKER_POOL_SIZE);
@@ -311,7 +366,6 @@ async function scrapeJobs(keyword, location) {
       detailedJobs.push(...chunkResults);
     }
 
-    // Close created worker pages
     await Promise.all(pages.map((p) => p.close().catch(() => {})));
 
     return detailedJobs;

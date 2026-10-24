@@ -1,9 +1,7 @@
-
-const scrapeJobs = require("./scraper1");
+const scrapeWellfound = require("./scraperWellfound");
+const scrapeCutshort = require("./scraperCutshort");
+const scrapeYC = require("./scraperYC");
 const writeToSheet = require("./sheets1");
-const pLimit = require("p-limit");
-
-const limit = pLimit(2);
 
 const keywords = [
   "product-manager",
@@ -20,77 +18,52 @@ const locations = [
 
 (async () => {
   try {
-    console.log("🚀 Starting Wellfound Job Scraping Pipeline...");
+    console.log("🚀 Starting Multi-Platform Job Scraping Pipeline (Wellfound + Cutshort + YC)...");
 
-    const tasks = [];
+    let allCollectedJobs = [];
 
     for (const keyword of keywords) {
       for (const location of locations) {
-        tasks.push(
-          limit(async () => {
-            console.log(
-              `\n🚀 Starting Task: ${keyword} | ${location}`
-            );
+        console.log(`\n📌 Processing Task: ${keyword} | ${location}`);
 
-            try {
-              const jobs = await scrapeJobs(
-                keyword,
-                location,
-                2
-              );
+        try {
+          // 1. Scrape Wellfound
+          const wellfoundJobs = await scrapeWellfound(keyword, location, 1);
+          allCollectedJobs.push(...wellfoundJobs);
 
-              console.log(
-                `✅ Finished: ${keyword} | ${location} → ${jobs.length} jobs`
-              );
+          // 2. Scrape Cutshort
+          const cutshortJobs = await scrapeCutshort(keyword, location);
+          allCollectedJobs.push(...cutshortJobs);
 
-              return jobs.map((job) => ({
-                title: job.title || "",
-                company: job.company || "",
-                location: job.location || "",
-                experience: job.experience || "",
-                companyProfile: job.companyProfile || "",
-                fullDesc: job.fullDesc || "",
-                link: job.link || "",
-                keyword,
-                searchLocation: location,
-              }));
-            } catch (error) {
-              console.error(
-                `❌ Task failed: ${keyword} | ${location}: ${error.message}`
-              );
+          // 3. Scrape YC (Location independent search)
+          const ycJobs = await scrapeYC(keyword, location);
+          allCollectedJobs.push(...ycJobs);
 
-              return [];
-            }
-          })
-        );
+        } catch (err) {
+          console.error(`❌ Error in task ${keyword} | ${location}: ${err.message}`);
+        }
       }
     }
 
-    const results = await Promise.all(tasks);
-    const collectedJobs = results.flat();
-
-    // Deduplicate across all keywords and locations.
-    const uniqueJobs = new Map();
-
-    for (const job of collectedJobs) {
-      if (!job.link) continue;
-
-      if (!uniqueJobs.has(job.link)) {
-        uniqueJobs.set(job.link, job);
+    // Deduplicate across all scraped items based on link
+    const uniqueMap = new Map();
+    for (const job of allCollectedJobs) {
+      if (job.link && !uniqueMap.has(job.link)) {
+        uniqueMap.set(job.link, job);
       }
     }
 
-    const finalJobs = Array.from(uniqueJobs.values());
+    const finalJobs = Array.from(uniqueMap.values());
 
     console.log("\n======================================");
-    console.log(`📦 Total collected: ${collectedJobs.length}`);
-    console.log(`🔗 Unique jobs: ${finalJobs.length}`);
+    console.log(`📦 Total Raw Collected: ${allCollectedJobs.length}`);
+    console.log(`🔗 Total Unique Jobs: ${finalJobs.length}`);
     console.log("======================================\n");
 
-    // sheets1.js preserves old data when this array is empty.
+    // Write to Google Sheets (Sheet3)
     await writeToSheet(finalJobs);
 
-    console.log("🎉 Pipeline completed.");
+    console.log("🎉 Complete Multi-Platform Pipeline Finished Successfully.");
   } catch (error) {
     console.error("❌ Main pipeline error:", error);
     process.exitCode = 1;

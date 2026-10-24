@@ -1,4 +1,3 @@
-
 const { google } = require("googleapis");
 
 async function clearSheet(sheets, spreadsheetId) {
@@ -51,12 +50,12 @@ async function writeToSheet(jobs) {
       job.link || "",
       job.keyword || "",
       job.searchLocation || "",
+      job.platform || "",
       new Date().toLocaleDateString("en-IN", {
         timeZone: "Asia/Kolkata",
       }),
     ]);
 
-    // Clear only after confirming we have data to write.
     await clearSheet(sheets, spreadsheetId);
 
     await sheets.spreadsheets.values.update({

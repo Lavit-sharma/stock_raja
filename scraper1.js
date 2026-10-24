@@ -4,7 +4,7 @@ const pLimit = require("p-limit");
 
 puppeteer.use(StealthPlugin());
 
-const DETAIL_CONCURRENCY = 2;
+const DETAIL_CONCURRENCY = 1; // Lowered to 1 to avoid triggering Cloudflare rate limits
 const limit = pLimit(DETAIL_CONCURRENCY);
 
 const USER_AGENT =
@@ -25,6 +25,10 @@ const ROLE_SLUGS = {
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const randomSleep = (min, max) =>
+  new Promise((resolve) =>
+    setTimeout(resolve, Math.floor(Math.random() * (max - min + 1)) + min)
+  );
 
 function buildSearchUrl(keyword, location, pageNumber = 1) {
   const role = ROLE_SLUGS[keyword];
@@ -55,7 +59,11 @@ async function scrapeSearchPage(page, url, keyword) {
     `🌐 HTTP: ${response?.status() ?? "No response"} | ${page.url()}`
   );
 
-  await sleep(2500);
+  if (response?.status() === 403) {
+    console.error("🛡️ Cloudflare 403 Block encountered on search page.");
+  }
+
+  await randomSleep(3000, 5000);
 
   const result = await page.evaluate(() => {
     const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
@@ -163,14 +171,26 @@ async function scrapeJobDetail(page, url) {
 
     await page.setExtraHTTPHeaders({
       "accept-language": "en-US,en;q=0.9",
+      "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="8", "Google Chrome";v="122"',
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": '"Windows"',
     });
 
-    await page.goto(url, {
+    const response = await page.goto(url, {
       waitUntil: "domcontentloaded",
       timeout: 40000,
     });
 
-    await sleep(2000);
+    if (response && response.status() === 403) {
+      console.error(`🛡️ Cloudflare 403 Block encountered on detail page: ${url}`);
+      return {
+        companyProfile: "",
+        fullDesc: "Cloudflare 403 Security Check Blocked",
+        detailError: "403 Forbidden",
+      };
+    }
+
+    await randomSleep(2500, 4500);
 
     return await page.evaluate(() => {
       const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
@@ -184,7 +204,6 @@ async function scrapeJobDetail(page, url) {
         return "";
       };
 
-      // 1. Extract Company Overview
       const companyProfile = pick([
         "[data-test='CompanyProfile']",
         "[class*='companyOverview']",
@@ -193,7 +212,6 @@ async function scrapeJobDetail(page, url) {
         "section[class*='company']",
       ]);
 
-      // 2. Extract Full Job Description ("About the job")
       let fullDesc = pick([
         "[data-test='JobDescription']",
         "[class*='jobDescription']",
@@ -205,7 +223,6 @@ async function scrapeJobDetail(page, url) {
         "section[class*='description']",
       ]);
 
-      // 3. Fallback: Parse directly from main text content
       if (!fullDesc) {
         const main = document.querySelector("main") || document.body;
         const text = clean(main?.innerText);
@@ -247,12 +264,14 @@ async function scrapeJobs(keyword, location, pages = 2) {
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-gpu",
+      "--window-size=1366,768",
     ],
   });
 
   try {
     const searchPage = await browser.newPage();
     await searchPage.setUserAgent(USER_AGENT);
+    await searchPage.setViewport({ width: 1366, height: 768 });
 
     const found = new Map();
 
@@ -277,7 +296,7 @@ async function scrapeJobs(keyword, location, pages = 2) {
 
         if (jobs.length === 0) break;
 
-        await sleep(1200);
+        await randomSleep(2000, 3500);
       }
     } finally {
       await searchPage.close().catch(() => {});
@@ -296,6 +315,7 @@ async function scrapeJobs(keyword, location, pages = 2) {
 
           try {
             await detailPage.setUserAgent(USER_AGENT);
+            await detailPage.setViewport({ width: 1366, height: 768 });
 
             const details = await scrapeJobDetail(
               detailPage,

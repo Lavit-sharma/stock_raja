@@ -48,7 +48,7 @@ async function scrapeSearchPage(page, url, keyword) {
   console.log(`🔍 Opening Cutshort URL: ${url}`);
 
   const response = await page.goto(url, {
-    waitUntil: "domcontentloaded",
+    waitUntil: "networkidle2",
     timeout: 45000,
   });
 
@@ -58,6 +58,13 @@ async function scrapeSearchPage(page, url, keyword) {
 
   if (response?.status() === 403) {
     console.error("🛡️ Cloudflare/Security Block encountered on search page.");
+  }
+
+  // Wait for job cards to render in the DOM
+  try {
+    await page.waitForSelector("a[href*='/job/']", { timeout: 10000 });
+  } catch (e) {
+    console.log("⚠️ Timeout waiting for job anchors to appear.");
   }
 
   await randomSleep(3000, 5000);
@@ -146,7 +153,6 @@ async function scrapeSearchPage(page, url, keyword) {
 
   if (result.jobs.length === 0) {
     console.log(`⚠️ No job links found on ${url}`);
-    console.log(`Page preview: ${result.pageText}`);
   }
 
   const filtered =
@@ -173,7 +179,7 @@ async function scrapeJobDetail(page, url) {
     });
 
     const response = await page.goto(url, {
-      waitUntil: "domcontentloaded",
+      waitUntil: "networkidle2",
       timeout: 40000,
     });
 
@@ -261,7 +267,11 @@ async function scrapeJobs(keyword, location) {
   });
 
   try {
+    // FIX: Await a small delay and ensure the target/frame is initialized 
+    // before calling methods that trigger stealth plugin bindings on new pages.
     const searchPage = await browser.newPage();
+    await new Promise((r) => setTimeout(r, 500));
+
     await searchPage.setCacheEnabled(false);
     await searchPage.setUserAgent(USER_AGENT);
     await searchPage.setViewport({ width: 1366, height: 768 });
@@ -297,6 +307,8 @@ async function scrapeJobs(keyword, location) {
       uniqueJobs.map((job) =>
         limit(async () => {
           const detailPage = await browser.newPage();
+          // FIX: Prevent "Requesting main frame too early!" race condition
+          await new Promise((r) => setTimeout(r, 500));
 
           try {
             await detailPage.setCacheEnabled(false);

@@ -1,0 +1,28 @@
+name: Cut Short Scraper 
+ 
+on:
+  schedule:
+    - cron: "0 3 * * *"   # Daily at 3 AM UTC (~8:30 AM IST)
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Run Scraper
+        run: node index1.js
+        env:
+          GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}

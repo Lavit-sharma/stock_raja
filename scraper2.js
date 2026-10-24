@@ -4,7 +4,7 @@ const pLimit = require("p-limit");
 
 puppeteer.use(StealthPlugin());
 
-const DETAIL_CONCURRENCY = 1;
+const DETAIL_CONCURRENCY = 2; // Increased slightly for better throughput
 const limit = pLimit(DETAIL_CONCURRENCY);
 
 const USER_AGENT =
@@ -33,13 +33,8 @@ function buildSearchUrl(keyword, location) {
   const role = ROLE_SLUGS[keyword];
   const place = LOCATION_SLUGS[location];
 
-  if (!role) {
-    throw new Error(`No Cutshort role mapping for: ${keyword}`);
-  }
-
-  if (!place) {
-    throw new Error(`No Cutshort location mapping for: ${location}`);
-  }
+  if (!role) throw new Error(`No Cutshort role mapping for: ${keyword}`);
+  if (!place) throw new Error(`No Cutshort location mapping for: ${location}`);
 
   return `https://cutshort.io/jobs/${role}-in-${place}`;
 }
@@ -48,36 +43,57 @@ async function scrapeSearchPage(page, url, keyword) {
   console.log(`🔍 Opening Cutshort URL: ${url}`);
 
   const response = await page.goto(url, {
-    waitUntil: "networkidle2",
+    waitUntil: "domcontentloaded",
     timeout: 45000,
   });
 
-  console.log(
-    `🌐 HTTP: ${response?.status() ?? "No response"} | ${page.url()}`
-  );
+  console.log(`🌐 HTTP: ${response?.status() ?? "No response"} | ${page.url()}`);
 
   if (response?.status() === 403) {
     console.error("🛡️ Cloudflare/Security Block encountered on search page.");
+    return [];
   }
 
-  // Wait for job cards to render in the DOM
+  // Scroll down to trigger lazy loading of job cards
   try {
-    await page.waitForSelector("a[href*='/job/']", { timeout: 10000 });
+    await page.evaluate(async () => {
+      await new Promise((resolve) => {
+        let totalHeight = 0;
+        const distance = 500;
+        const timer = setInterval(() => {
+          window.scrollBy(0, distance);
+          totalHeight += distance;
+          if (totalHeight >= 2000 || totalHeight >= document.body.scrollHeight) {
+            clearInterval(timer);
+            resolve();
+          }
+        }, 300);
+      });
+    });
   } catch (e) {
-    console.log("⚠️ Timeout waiting for job anchors to appear.");
+    // Ignore scroll errors
   }
 
-  await randomSleep(3000, 5000);
+  // Wait for dynamic React container content to render
+  try {
+    await page.waitForFunction(
+      () => document.querySelectorAll("a[href*='/job/']").length > 0,
+      { timeout: 12000 }
+    );
+  } catch (e) {
+    console.log("⚠️ Job links took too long to appear, attempting fallback parse...");
+  }
 
-  const result = await page.evaluate(() => {
-    const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
+  await randomSleep(2000, 3000);
 
+  return await page.evaluate(() => {
+    const clean = (val) => (val || "").replace(/\s+/g, " ").trim();
     const anchors = Array.from(document.querySelectorAll("a[href]"));
     const output = [];
 
     for (const anchor of anchors) {
       const link = anchor.href;
-
+      // Match Cutshort job link pattern
       if (!/^https:\/\/(www\.)?cutshort\.io\/job\/[^/?#]+/i.test(link)) {
         continue;
       }
@@ -88,20 +104,16 @@ async function scrapeSearchPage(page, url, keyword) {
       let card = anchor;
       let cardText = "";
 
-      for (let level = 0; level < 7 && card; level++) {
+      for (let level = 0; level < 6 && card; level++) {
         const text = clean(card.innerText);
-
         if (
           text.length >= title.length &&
-          text.length < 3500 &&
-          /exp\b|years|full.?time|remote|hybrid|onsite|salary|lac|lpa/i.test(
-            text
-          )
+          text.length < 4000 &&
+          /exp\b|years|full.?time|remote|hybrid|onsite|salary|lac|lpa/i.test(text)
         ) {
           cardText = text;
           break;
         }
-
         card = card.parentElement;
       }
 
@@ -110,21 +122,14 @@ async function scrapeSearchPage(page, url, keyword) {
       }
 
       const headings = card
-        ? Array.from(card.querySelectorAll("h2, h3, h4"))
+        ? Array.from(card.querySelectorAll("h2, h3, h4, span, div"))
             .map((el) => clean(el.innerText))
             .filter(Boolean)
         : [];
 
-      const company =
-        headings.find((heading) => heading !== title) || "";
-
-      const experienceMatch = cardText.match(
-        /\b\d+(?:-\d+)?\s*(?:\+)?\s*years?\b/i
-      );
-
-      const locationMatch = cardText.match(
-        /(?:Remote|Hybrid|Onsite|In office)\s*[•·|-]?\s*([^•·|\n]{2,100})/i
-      );
+      const company = headings.find((h) => h !== title && h.length < 50) || "";
+      const experienceMatch = cardText.match(/\b\d+(?:-\d+)?\s*(?:\+)?\s*years?\b/i);
+      const locationMatch = cardText.match(/(?:Remote|Hybrid|Onsite|In office)\s*[•·|-]?\s*([^•·|\n]{2,100})/i);
 
       output.push({
         title,
@@ -136,122 +141,53 @@ async function scrapeSearchPage(page, url, keyword) {
     }
 
     const unique = new Map();
-
     for (const job of output) {
       if (!unique.has(job.link)) unique.set(job.link, job);
     }
-
-    return {
-      pageTitle: document.title,
-      pageText: clean(document.body?.innerText).slice(0, 600),
-      jobs: Array.from(unique.values()),
-    };
+    return Array.from(unique.values());
   });
-
-  console.log(`📄 Page title: ${result.pageTitle}`);
-  console.log(`📄 Candidate jobs: ${result.jobs.length}`);
-
-  if (result.jobs.length === 0) {
-    console.log(`⚠️ No job links found on ${url}`);
-  }
-
-  const filtered =
-    keyword === "edge-ai"
-      ? result.jobs.filter((job) =>
-          /\bedge\b|\bai\b|artificial intelligence|machine learning|computer vision|embedded/i.test(
-            job.title
-          )
-        )
-      : result.jobs;
-
-  return filtered;
 }
 
 async function scrapeJobDetail(page, url) {
   try {
-    console.log(`📄 Fetching Job Description: ${url}`);
-
-    await page.setExtraHTTPHeaders({
-      "accept-language": "en-US,en;q=0.9",
-      "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="8", "Google Chrome";v="122"',
-      "sec-ch-ua-mobile": "?0",
-      "sec-ch-ua-platform": '"Windows"',
-    });
-
     const response = await page.goto(url, {
-      waitUntil: "networkidle2",
-      timeout: 40000,
+      waitUntil: "domcontentloaded",
+      timeout: 35000,
     });
 
     if (response && response.status() === 403) {
-      console.error(`🛡️ Cloudflare 403 Block encountered on detail page: ${url}`);
-      return {
-        companyProfile: "",
-        fullDesc: "Cloudflare 403 Security Check Blocked",
-        detailError: "403 Forbidden",
-      };
+      return { companyProfile: "", fullDesc: "403 Forbidden", detailError: "403" };
     }
 
-    await randomSleep(2500, 4500);
+    await randomSleep(1500, 2500);
 
     return await page.evaluate(() => {
-      const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
-
-      const pick = (selectors) => {
-        for (const selector of selectors) {
-          const element = document.querySelector(selector);
-          const text = clean(element?.innerText);
-          if (text && text.length > 20) return text;
-        }
-        return "";
-      };
-
-      const companyProfile = pick([
-        "[class*='company-info']",
-        "[class*='aboutCompany']",
-        "[class*='companyOverview']",
-        "section[class*='company']",
-      ]);
-
-      let fullDesc = pick([
-        "[class*='job-description']",
-        "[class*='jobDescription']",
-        "[class*='description']",
-        "div[class*='jd']",
-        "section[class*='description']",
-      ]);
-
-      if (!fullDesc) {
-        const main = document.querySelector("main") || document.body;
-        const text = clean(main?.innerText);
-
-        const lowerText = text.toLowerCase();
-        const marker = lowerText.indexOf("about the job");
-        const roleMarker = lowerText.indexOf("about the role");
-
-        const startIdx = marker !== -1 ? marker : roleMarker;
-
-        if (startIdx >= 0) {
-          fullDesc = text.slice(startIdx, startIdx + 15000);
-        } else if (text.length > 200) {
-          fullDesc = text;
-        }
-      }
+      const clean = (val) => (val || "").replace(/\s+/g, " ").trim();
+      const main = document.querySelector("main") || document.body;
+      const text = clean(main?.innerText);
 
       return {
-        companyProfile,
-        fullDesc: fullDesc || "No detailed JD found.",
+        companyProfile: "",
+        fullDesc: text.length > 100 ? text : "No detailed JD found.",
       };
     });
   } catch (error) {
-    console.error(`⚠️ Detail page failed: ${url} - ${error.message}`);
-
-    return {
-      companyProfile: "",
-      fullDesc: "",
-      detailError: error.message,
-    };
+    return { companyProfile: "", fullDesc: "", detailError: error.message };
   }
+}
+
+async function createStabilizedPage(browser) {
+  const page = await browser.newPage();
+  // Safe initialization waiting for target frames to attach fully
+  try {
+    await page.setCacheEnabled(false);
+    await page.setUserAgent(USER_AGENT);
+    await page.setViewport({ width: 1366, height: 768 });
+  } catch (err) {
+    // Fallback if initial target setup needs a tick
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return page;
 }
 
 async function scrapeJobs(keyword, location) {
@@ -267,59 +203,35 @@ async function scrapeJobs(keyword, location) {
   });
 
   try {
-    // FIX: Await a small delay and ensure the target/frame is initialized 
-    // before calling methods that trigger stealth plugin bindings on new pages.
-    const searchPage = await browser.newPage();
-    await new Promise((r) => setTimeout(r, 500));
-
-    await searchPage.setCacheEnabled(false);
-    await searchPage.setUserAgent(USER_AGENT);
-    await searchPage.setViewport({ width: 1366, height: 768 });
-
-    const found = new Map();
+    const searchPage = await createStabilizedPage(browser);
+    let uniqueJobs = [];
 
     try {
       const url = buildSearchUrl(keyword, location);
-      let jobs = [];
-
-      try {
-        jobs = await scrapeSearchPage(searchPage, url, keyword);
-      } catch (error) {
-        console.error(
-          `❌ Search failed (${keyword} | ${location}): ${error.message}`
-        );
-      }
-
-      for (const job of jobs) {
-        if (!found.has(job.link)) found.set(job.link, job);
-      }
+      const jobs = await scrapeSearchPage(searchPage, url, keyword);
+      
+      uniqueJobs =
+        keyword === "edge-ai"
+          ? jobs.filter((job) =>
+              /\bedge\b|\bai\b|artificial intelligence|machine learning|computer vision|embedded/i.test(
+                job.title
+              )
+            )
+          : jobs;
+    } catch (error) {
+      console.error(`❌ Search failed (${keyword} | ${location}): ${error.message}`);
     } finally {
       await searchPage.close().catch(() => {});
     }
 
-    const uniqueJobs = Array.from(found.values());
-
-    console.log(
-      `🔗 ${keyword} | ${location}: ${uniqueJobs.length} unique Cutshort jobs found. Scraping detailed JDs...`
-    );
+    console.log(`🔗 ${keyword} | ${location}: ${uniqueJobs.length} unique Cutshort jobs found.`);
 
     const detailedJobs = await Promise.all(
       uniqueJobs.map((job) =>
         limit(async () => {
-          const detailPage = await browser.newPage();
-          // FIX: Prevent "Requesting main frame too early!" race condition
-          await new Promise((r) => setTimeout(r, 500));
-
+          const detailPage = await createStabilizedPage(browser);
           try {
-            await detailPage.setCacheEnabled(false);
-            await detailPage.setUserAgent(USER_AGENT);
-            await detailPage.setViewport({ width: 1366, height: 768 });
-
-            const details = await scrapeJobDetail(
-              detailPage,
-              job.link
-            );
-
+            const details = await scrapeJobDetail(detailPage, job.link);
             return { ...job, ...details };
           } finally {
             await detailPage.close().catch(() => {});

@@ -1,4 +1,3 @@
-
 const puppeteer = require("puppeteer-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const pLimit = require("p-limit");
@@ -19,8 +18,6 @@ const LOCATION_SLUGS = {
   hyderabad: "hyderabad",
 };
 
-// Map search terms to supported Wellfound role pages.
-// edge-ai is approximated using the AI engineering role page.
 const ROLE_SLUGS = {
   "product-manager": "product-manager",
   "engineering-manager": "engineering-manager",
@@ -43,9 +40,7 @@ function buildSearchUrl(keyword, location, pageNumber = 1) {
 
   const base = `https://wellfound.com/role/l/${role}/${place}`;
 
-  return pageNumber > 1
-    ? `${base}?page=${pageNumber}`
-    : base;
+  return pageNumber > 1 ? `${base}?page=${pageNumber}` : base;
 }
 
 async function scrapeSearchPage(page, url, keyword) {
@@ -63,8 +58,7 @@ async function scrapeSearchPage(page, url, keyword) {
   await sleep(2500);
 
   const result = await page.evaluate(() => {
-    const clean = (value) =>
-      (value || "").replace(/\s+/g, " ").trim();
+    const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
 
     const anchors = Array.from(document.querySelectorAll("a[href]"));
     const output = [];
@@ -72,7 +66,6 @@ async function scrapeSearchPage(page, url, keyword) {
     for (const anchor of anchors) {
       const link = anchor.href;
 
-      // Wellfound individual job URLs use /jobs/<job-id>-<slug>.
       if (!/^https:\/\/wellfound\.com\/jobs\/[^/?#]+/i.test(link)) {
         continue;
       }
@@ -81,7 +74,6 @@ async function scrapeSearchPage(page, url, keyword) {
 
       if (!title || title.length > 180) continue;
 
-      // Find the closest ancestor that resembles a job card.
       let card = anchor;
       let cardText = "";
 
@@ -91,7 +83,9 @@ async function scrapeSearchPage(page, url, keyword) {
         if (
           text.length >= title.length &&
           text.length < 3500 &&
-          (/exp\b|full.?time|part.?time|remote|in office|salary|equity/i.test(text))
+          /exp\b|full.?time|part.?time|remote|in office|salary|equity/i.test(
+            text
+          )
         ) {
           cardText = text;
           break;
@@ -110,9 +104,8 @@ async function scrapeSearchPage(page, url, keyword) {
             .filter(Boolean)
         : [];
 
-      const company = headings.find(
-        (heading) => heading !== title
-      ) || "";
+      const company =
+        headings.find((heading) => heading !== title) || "";
 
       const experienceMatch = cardText.match(
         /\b\d+\+?\s+years?\s+of\s+exp(?:erience)?\b/i
@@ -125,12 +118,8 @@ async function scrapeSearchPage(page, url, keyword) {
       output.push({
         title,
         company,
-        location: locationMatch
-          ? clean(locationMatch[0])
-          : "",
-        experience: experienceMatch
-          ? experienceMatch[0]
-          : "",
+        location: locationMatch ? clean(locationMatch[0]) : "",
+        experience: experienceMatch ? experienceMatch[0] : "",
         link,
       });
     }
@@ -156,76 +145,88 @@ async function scrapeSearchPage(page, url, keyword) {
     console.log(`Page preview: ${result.pageText}`);
   }
 
-  // For edge-ai, keep AI/edge-related engineering titles.
-  const filtered = keyword === "edge-ai"
-    ? result.jobs.filter((job) =>
-        /\bedge\b|\bai\b|artificial intelligence|machine learning|computer vision|embedded/i.test(
-          job.title
+  const filtered =
+    keyword === "edge-ai"
+      ? result.jobs.filter((job) =>
+          /\bedge\b|\bai\b|artificial intelligence|machine learning|computer vision|embedded/i.test(
+            job.title
+          )
         )
-      )
-    : result.jobs;
+      : result.jobs;
 
   return filtered;
 }
 
 async function scrapeJobDetail(page, url) {
   try {
+    console.log(`📄 Fetching Job Description: ${url}`);
+
+    await page.setExtraHTTPHeaders({
+      "accept-language": "en-US,en;q=0.9",
+    });
+
     await page.goto(url, {
       waitUntil: "domcontentloaded",
       timeout: 40000,
     });
 
-    await sleep(1200);
+    await sleep(2000);
 
     return await page.evaluate(() => {
-      const clean = (value) =>
-        (value || "").replace(/\s+/g, " ").trim();
+      const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
 
       const pick = (selectors) => {
         for (const selector of selectors) {
           const element = document.querySelector(selector);
           const text = clean(element?.innerText);
-
-          if (text) return text;
+          if (text && text.length > 20) return text;
         }
-
         return "";
       };
 
+      // 1. Extract Company Overview
       const companyProfile = pick([
         "[data-test='CompanyProfile']",
         "[class*='companyOverview']",
         "[class*='company_description']",
         "[class*='aboutCompany']",
+        "section[class*='company']",
       ]);
 
+      // 2. Extract Full Job Description ("About the job")
       let fullDesc = pick([
         "[data-test='JobDescription']",
         "[class*='jobDescription']",
         "[class*='job-description']",
         "[class*='descriptionWrapper']",
         "[class*='description-wrapper']",
+        "div[class*='styles_jobDescription']",
+        "div[class*='styles_description']",
+        "section[class*='description']",
       ]);
 
-      // Fallback: use the main content if CSS classes change.
+      // 3. Fallback: Parse directly from main text content
       if (!fullDesc) {
-        const main = document.querySelector("main");
+        const main = document.querySelector("main") || document.body;
         const text = clean(main?.innerText);
 
-        const marker = text.toLowerCase().indexOf("about the job");
+        const lowerText = text.toLowerCase();
+        const marker = lowerText.indexOf("about the job");
+        const roleMarker = lowerText.indexOf("about the role");
 
-        if (marker >= 0) {
-          fullDesc = text.slice(marker, marker + 15000);
-        } else if (text.length > 300) {
-          fullDesc = text.slice(0, 15000);
+        const startIdx = marker !== -1 ? marker : roleMarker;
+
+        if (startIdx >= 0) {
+          fullDesc = text.slice(startIdx, startIdx + 15000);
+        } else if (text.length > 200) {
+          fullDesc = text;
         }
       }
 
-      if (!fullDesc) {
-        fullDesc = pick(["main", "article"]);
-      }
-
-      return { companyProfile, fullDesc };
+      return {
+        companyProfile,
+        fullDesc: fullDesc || "No detailed JD found.",
+      };
     });
   } catch (error) {
     console.error(`⚠️ Detail page failed: ${url} - ${error.message}`);
@@ -285,7 +286,7 @@ async function scrapeJobs(keyword, location, pages = 2) {
     const uniqueJobs = Array.from(found.values());
 
     console.log(
-      `🔗 ${keyword} | ${location}: ${uniqueJobs.length} unique jobs`
+      `🔗 ${keyword} | ${location}: ${uniqueJobs.length} unique jobs found. Scraping detailed JDs...`
     );
 
     const detailedJobs = await Promise.all(

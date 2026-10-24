@@ -51,7 +51,6 @@ async function scrapeSearchPage(page, url, keyword) {
     return [];
   }
 
-  // Scroll down smoothly to trigger hydration and lazy loading
   try {
     await page.evaluate(async () => {
       await new Promise((resolve) => {
@@ -66,13 +65,10 @@ async function scrapeSearchPage(page, url, keyword) {
         }, 150);
       });
     });
-  } catch (e) {
-    // Ignore evaluation scroll errors
-  }
+  } catch (e) {}
 
   await randomSleep(2000, 3500);
 
-  // Extract jobs from DOM or __NEXT_DATA__ payload
   const result = await page.evaluate(() => {
     const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
     const output = [];
@@ -99,9 +95,7 @@ async function scrapeSearchPage(page, url, keyword) {
           }
         }
       }
-    } catch (err) {
-      // Fallback to DOM extraction
-    }
+    } catch (err) {}
 
     if (output.length === 0) {
       const anchors = Array.from(document.querySelectorAll("a[href]"));
@@ -166,9 +160,6 @@ async function scrapeSearchPage(page, url, keyword) {
     };
   });
 
-  console.log(`📄 Page title: ${result.pageTitle}`);
-  console.log(`📄 Candidate jobs found: ${result.jobs.length}`);
-
   const filtered =
     keyword === "edge-ai"
       ? result.jobs.filter((job) =>
@@ -183,7 +174,7 @@ async function scrapeSearchPage(page, url, keyword) {
 
 async function scrapeJobDetail(page, url) {
   try {
-    console.log(`📄 Fetching Job Description: ${url}`);
+    console.log(`📄 Fetching Job Description & Metadata: ${url}`);
 
     const response = await page.goto(url, {
       waitUntil: "domcontentloaded",
@@ -193,6 +184,8 @@ async function scrapeJobDetail(page, url) {
     if (response && response.status() === 403) {
       return { 
         companyProfile: "", 
+        workMode: "",
+        interviewRounds: "",
         fullDesc: "Cloudflare 403 Security Check Blocked", 
         keyResponsibilities: [], 
         detailError: "403 Forbidden" 
@@ -203,7 +196,29 @@ async function scrapeJobDetail(page, url) {
 
     return await page.evaluate(() => {
       const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
+      const bodyText = clean(document.body?.innerText);
 
+      // Extract Work Mode (Remote / Hybrid / Onsite)
+      let workMode = "";
+      const workModeMatch = bodyText.match(/(?:Work\s*Mode|Location\s*Type)\s*[:|-]?\s*(Remote|Hybrid|Onsite|In[- ]office)/i);
+      if (workModeMatch) {
+        workMode = workModeMatch[1];
+      } else if (/hybrid/i.test(bodyText)) {
+        workMode = "Hybrid";
+      } else if (/remote/i.test(bodyText)) {
+        workMode = "Remote";
+      } else if (/onsite|in[- ]office/i.test(bodyText)) {
+        workMode = "Onsite";
+      }
+
+      // Extract Interview Rounds
+      let interviewRounds = "";
+      const roundsMatch = bodyText.match(/Interview\s*Rounds?\s*[:|-]?\s*([^\n]+(?:\n[^\n]+){0,3})/i);
+      if (roundsMatch) {
+        interviewRounds = clean(roundsMatch[1]);
+      }
+
+      // Extract Company Profile / About Company
       const pick = (selectors) => {
         for (const selector of selectors) {
           const element = document.querySelector(selector);
@@ -220,6 +235,7 @@ async function scrapeJobDetail(page, url) {
         "section[class*='company']",
       ]);
 
+      // Extract Full Job Description
       let fullDesc = pick([
         "[class*='job-description']",
         "[class*='jobDescription']",
@@ -243,7 +259,7 @@ async function scrapeJobDetail(page, url) {
         }
       }
 
-      // Extract Key Responsibilities
+      // Extract Key Responsibilities / Qualifications (Bullet points structure)
       const keyResponsibilities = [];
       const headings = Array.from(document.querySelectorAll("h2, h3, h4, h5, strong, b"));
       let respHeader = null;
@@ -255,7 +271,9 @@ async function scrapeJobDetail(page, url) {
           text.includes("what you will do") ||
           text.includes("what you'll do") ||
           text.includes("roles & responsibilities") ||
-          text.includes("key responsibilities")
+          text.includes("key responsibilities") ||
+          text.includes("key qualifications") ||
+          text.includes("requirements")
         ) {
           respHeader = h;
           break;
@@ -264,9 +282,8 @@ async function scrapeJobDetail(page, url) {
 
       if (respHeader) {
         let nextEl = respHeader.nextElementSibling;
-        // Search through subsequent elements to find lists or paragraphs
         let limitCount = 0;
-        while (nextEl && limitCount < 5) {
+        while (nextEl && limitCount < 6) {
           if (nextEl.tagName === "UL" || nextEl.tagName === "OL") {
             const items = nextEl.querySelectorAll("li");
             items.forEach((li) => {
@@ -285,7 +302,6 @@ async function scrapeJobDetail(page, url) {
         }
       }
 
-      // Fallback responsibilities search if header-based DOM extraction is empty
       if (keyResponsibilities.length === 0 && fullDesc) {
         const lines = fullDesc.split(/(?:\r?\n)+|[•\-\*]\s+/);
         for (const line of lines) {
@@ -298,6 +314,8 @@ async function scrapeJobDetail(page, url) {
 
       return {
         companyProfile,
+        workMode,
+        interviewRounds,
         fullDesc: fullDesc || "No detailed JD found.",
         keyResponsibilities: Array.from(new Set(keyResponsibilities)),
       };
@@ -306,6 +324,8 @@ async function scrapeJobDetail(page, url) {
     console.error(`⚠️ Detail page failed: ${url} - ${error.message}`);
     return {
       companyProfile: "",
+      workMode: "",
+      interviewRounds: "",
       fullDesc: "",
       keyResponsibilities: [],
       detailError: error.message,
@@ -348,7 +368,7 @@ async function scrapeJobs(keyword, location) {
     }
 
     console.log(
-      `🔗 ${keyword} | ${location}: ${uniqueJobs.length} unique Cutshort jobs found. Scraping detailed JDs & Responsibilities...`
+      `🔗 ${keyword} | ${location}: ${uniqueJobs.length} unique Cutshort jobs found. Scraping detailed metadata & JDs...`
     );
 
     const detailedJobs = [];

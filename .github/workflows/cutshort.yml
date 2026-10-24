@@ -22,7 +22,7 @@ jobs:
         run: npm install
 
       - name: Run Scraper
-        run: node index1.js
+        run: node index2.js
         env:
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
